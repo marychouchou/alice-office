@@ -1,0 +1,25 @@
+services:
+  webhook_router:
+    build: .
+    volumes:
+      - ./data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
+      - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
+      - HOST_DATA_DIR=${PWD}/data
+      - HERMES_IMAGE=${HERMES_IMAGE}
+      - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_MODEL=${LLM_MODEL}
+    ports:
+      - "8000:8000"
+    networks:
+      - hermes_global_net
+    restart: always
+
+networks:
+  hermes_global_net:
+    name: hermes_global_net
+    external: true
