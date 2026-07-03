@@ -35,6 +35,22 @@ Router 必須先啟動：
 [8] LLM 回應較慢時，延長等待時間（預設 8 秒）
     uv run python scripts/test_webhook.py --text "寫一首關於秋天的詩" --wait 20
 
+[9] 測試貼圖事件（驗證佔位文字轉換，不需要真實 LINE 媒體）
+    uv run python scripts/test_webhook.py --sticker
+
+[10] 測試位置事件（驗證佔位文字轉換）
+    uv run python scripts/test_webhook.py --location
+
+[11] 測試圖片事件（驗證下載並落地到 data/<userId>/incoming/）
+    uv run python scripts/test_webhook.py --image-message-id "<真實 LINE messageId>"
+
+    注意：router 會用真實的 LINE Content API 下載這個 messageId 的內容，所以
+    要傳一個「真的」曾經在你的 LINE OA 收到過的圖片訊息 messageId（可以從真實
+    使用者傳圖時的 container log 或 router log 找到），假造的 ID 會下載失敗
+    （router 會記錄錯誤並略過該事件，這是預期行為，不代表程式壞掉）。
+    成功時可確認：
+      ls data/<userId>/incoming/
+
 看 log 的方式
 -------------
 即時追蹤特定容器的 log（把 <userId> 換成實際 ID）：
@@ -46,10 +62,13 @@ Router 必須先啟動：
 Log 判讀重點（container log，看 hermes agent 有沒有收到訊息）：
     POST /v1/chat/completions 200   → hermes agent api_server 收到並回覆了訊息
 
-Log 判讀重點（router 自己的 terminal/log，看 LLM 呼叫與 LINE push 有沒有成功）：
+Log 判讀重點（router 自己的 terminal/log，看 LLM 呼叫與 LINE 回覆有沒有成功）：
     Hermes agent request failed     → 呼叫 hermes agent 失敗，需要排查
+    Failed to download LINE ... content → LINE Content API 下載媒體失敗（假 messageId 屬預期行為）
+    LINE reply token rejected       → reply token 過期/已用過，已自動 fallback 到 Push（正常行為）
     Failed to push LINE reply       → LINE Push API 失敗（假 room_id/token 屬預期行為）
 """
+
 from __future__ import annotations
 
 import argparse
@@ -97,6 +116,7 @@ def load_env(path: Path) -> dict[str, str]:
 # LINE signature
 # ---------------------------------------------------------------------------
 
+
 def sign(body: str, secret: str) -> str:
     """Compute the LINE HMAC-SHA256 signature for a webhook body.
 
@@ -119,6 +139,7 @@ def sign(body: str, secret: str) -> str:
 # Webhook body builders
 # ---------------------------------------------------------------------------
 
+
 def make_user_message(user_id: str, text: str) -> str:
     """Build a LINE webhook body simulating a user text message.
 
@@ -130,11 +151,13 @@ def make_user_message(user_id: str, text: str) -> str:
         JSON string.
     """
     payload = {
-        "events": [{
-            "type": "message",
-            "source": {"type": "user", "userId": user_id},
-            "message": {"type": "text", "text": text},
-        }]
+        "events": [
+            {
+                "type": "message",
+                "source": {"type": "user", "userId": user_id},
+                "message": {"type": "text", "text": text},
+            }
+        ]
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -150,11 +173,94 @@ def make_group_message(group_id: str, text: str) -> str:
         JSON string.
     """
     payload = {
-        "events": [{
-            "type": "message",
-            "source": {"type": "group", "groupId": group_id},
-            "message": {"type": "text", "text": text},
-        }]
+        "events": [
+            {
+                "type": "message",
+                "source": {"type": "group", "groupId": group_id},
+                "message": {"type": "text", "text": text},
+            }
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def make_sticker_message(user_id: str) -> str:
+    """Build a LINE webhook body simulating a sticker message.
+
+    Args:
+        user_id: Simulated LINE userId.
+
+    Returns:
+        JSON string.
+    """
+    payload = {
+        "events": [
+            {
+                "type": "message",
+                "source": {"type": "user", "userId": user_id},
+                "message": {
+                    "type": "sticker",
+                    "packageId": "446",
+                    "stickerId": "1988",
+                    "keywords": ["Happy", "Fun"],
+                },
+            }
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def make_location_message(user_id: str) -> str:
+    """Build a LINE webhook body simulating a location message.
+
+    Args:
+        user_id: Simulated LINE userId.
+
+    Returns:
+        JSON string.
+    """
+    payload = {
+        "events": [
+            {
+                "type": "message",
+                "source": {"type": "user", "userId": user_id},
+                "message": {
+                    "type": "location",
+                    "title": "台北車站",
+                    "address": "100台灣台北市中正區北平西路3號",
+                    "latitude": 25.0478,
+                    "longitude": 121.5170,
+                },
+            }
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def make_image_message(user_id: str, message_id: str) -> str:
+    """Build a LINE webhook body simulating an image message.
+
+    The router calls the real LINE Content API to download `message_id`'s
+    binary content, so this only actually saves a file under
+    `data/<user_id>/incoming/` when `message_id` is a real image messageId
+    captured from live LINE traffic. A synthetic ID will fail to download —
+    the router logs the error and drops the event, which is expected.
+
+    Args:
+        user_id: Simulated LINE userId.
+        message_id: LINE message id to request content for.
+
+    Returns:
+        JSON string.
+    """
+    payload = {
+        "events": [
+            {
+                "type": "message",
+                "source": {"type": "user", "userId": user_id},
+                "message": {"type": "image", "id": message_id},
+            }
+        ]
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -171,6 +277,7 @@ def make_verification_ping() -> str:
 # ---------------------------------------------------------------------------
 # Docker helpers
 # ---------------------------------------------------------------------------
+
 
 def container_name(room_id: str) -> str:
     """Return the expected container name for a given room_id.
@@ -224,8 +331,14 @@ def get_container_logs(room_id: str, tail: int = 30) -> str:
 def list_hermes_containers() -> None:
     """Print all running hermes_* containers."""
     result = subprocess.run(
-        ["docker", "ps", "--filter", "name=hermes_", "--format",
-         "table {{.Names}}\t{{.Status}}\t{{.Ports}}"],
+        [
+            "docker",
+            "ps",
+            "--filter",
+            "name=hermes_",
+            "--format",
+            "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
+        ],
         capture_output=True,
         text=True,
     )
@@ -235,6 +348,7 @@ def list_hermes_containers() -> None:
 # ---------------------------------------------------------------------------
 # Core test runner
 # ---------------------------------------------------------------------------
+
 
 def send_webhook(body: str, secret: str) -> tuple[int, str]:
     """POST a signed webhook body to the local router.
@@ -276,9 +390,9 @@ def run_test(
         label: Test label shown in output.
         wait: Seconds to wait before checking logs.
     """
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  {label}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Target room : {room_id}")
     print(f"  Body        : {body[:80]}{'...' if len(body) > 80 else ''}")
 
@@ -300,7 +414,7 @@ def run_test(
     print(f"\n  LLM の処理を {wait} 秒待ちます...", flush=True)
     for i in range(wait):
         time.sleep(1)
-        print(f"  {i+1}/{wait}", end="\r", flush=True)
+        print(f"  {i + 1}/{wait}", end="\r", flush=True)
     print()
 
     # Container check
@@ -335,6 +449,7 @@ def run_test(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def build_args() -> argparse.Namespace:
     """Parse command-line arguments.
 
@@ -348,6 +463,17 @@ def build_args() -> argparse.Namespace:
     parser.add_argument("--wait", type=int, default=WAIT_SECONDS, help="等待 LLM 回應的秒數")
     parser.add_argument("--list-containers", action="store_true", help="列出所有 hermes 容器後離開")
     parser.add_argument("--ping", action="store_true", help="只發一個空 events ping 測 router 連線")
+    parser.add_argument(
+        "--sticker",
+        action="store_true",
+        help="送出貼圖事件（測試佔位文字轉換，不需真實 LINE 媒體）",
+    )
+    parser.add_argument("--location", action="store_true", help="送出位置事件（測試佔位文字轉換）")
+    parser.add_argument(
+        "--image-message-id",
+        default="",
+        help="送出圖片事件；需提供真實 LINE image messageId 才能讓 router 下載成功",
+    )
     return parser.parse_args()
 
 
@@ -375,6 +501,18 @@ def main() -> None:
         body = make_group_message(args.group_id, args.text)
         room_id = args.group_id
         label = f"Group 訊息測試（groupId={args.group_id}）"
+    elif args.sticker:
+        body = make_sticker_message(args.user_id)
+        room_id = args.user_id
+        label = f"貼圖訊息測試（userId={args.user_id}）"
+    elif args.location:
+        body = make_location_message(args.user_id)
+        room_id = args.user_id
+        label = f"位置訊息測試（userId={args.user_id}）"
+    elif args.image_message_id:
+        body = make_image_message(args.user_id, args.image_message_id)
+        room_id = args.user_id
+        label = f"圖片訊息測試（userId={args.user_id}, messageId={args.image_message_id}）"
     else:
         body = make_user_message(args.user_id, args.text)
         room_id = args.user_id

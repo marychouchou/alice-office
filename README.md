@@ -64,6 +64,28 @@ sequenceDiagram
     LINE->>User: 顯示回覆
 ```
 
+## LINE 訊息類型支援
+
+Router 會處理整個 webhook body 裡的**所有** event（不只第一個），逐一解析、去重、排背景任務：
+
+| 訊息類型 | 處理方式 |
+|---|---|
+| `text` | 直接轉發文字給 Hermes agent |
+| `image` / `audio` / `video` / `file` | 用 LINE Content API 下載二進位內容，寫進該房間掛載的 volume（`data/<room_id>/incoming/`，container 內對應 `/opt/data/incoming/`），送一則文字通知 agent 檔案路徑——由 container 內**真正的 Hermes agent** 用自己的 vision/STT/檔案工具處理，router 不做任何內容解析 |
+| `sticker` / `location` | 轉成佔位文字（如 `[使用者傳送了貼圖：...]`）送給 agent |
+| 其他／未知類型 | 記錄一行 log 後略過 |
+
+回覆時：
+
+- **Reply token 優先、Push 為 fallback**：webhook 事件裡的 `replyToken`（免費、單次、~60 秒內有效）優先使用；若已過期或被 LINE 拒絕，自動 fallback 到 Push Message API。
+- **長文自動分段 + Markdown 去除**：LLM 回覆會先去除 LINE 無法渲染的 Markdown 語法（保留連結可點擊），再依 LINE 單則 bubble 5000 字上限智慧分段（最多 5 則/次）。
+- **Webhook 事件去重**：LINE 的 webhook 是 at-least-once 語意，可能重送同一個 event；router 用 `webhookEventId` 做 in-memory 去重，避免同一則訊息被回覆兩次。
+
+以上邏輯 1:1 參考自 Hermes Agent 內建 LINE adapter 的演算法（詳見 `docs/hermes-agent-line-gateway-comparison.md`），但因為架構不同（router 與 container 分離、只透過 `api_server` + 共用 volume 溝通），媒體處理走的是「檔案落地 + 文字通知」而非 Hermes 內建的多模態 API 路徑。
+
+Outbound 媒體（agent 主動產生圖片/語音/影片送回 LINE）與 slow-LLM postback 按鈕尚未實作，見同一份文件的
+「未做（Phase 2）」項目。
+
 ## 部署模式
 
 `ROUTER_IN_DOCKER` 決定 router 怎麼找到 Hermes 容器：
@@ -174,7 +196,9 @@ alice-office-router/
 │       ├── main.py              # FastAPI app factory + lifespan
 │       ├── router.py            # POST /webhook 端點 + 取得回覆並 push 回 LINE
 │       ├── line_verify.py       # LINE HMAC-SHA256 簽章驗證
-│       ├── line_client.py       # 呼叫 LINE Push Message API
+│       ├── line_client.py       # 呼叫 LINE Reply/Push Message API + Content API 下載媒體
+│       ├── line_format.py       # Markdown 去除 + 長文分段（LINE bubble 限制）
+│       ├── line_dedup.py        # Webhook event 去重（in-memory）
 │       ├── hermes_client.py     # 呼叫 Hermes 容器的 /v1/chat/completions
 │       ├── container_manager.py # Docker 容器動態管理
 │       └── config.py            # pydantic-settings 設定
@@ -182,13 +206,17 @@ alice-office-router/
 │   ├── conftest.py
 │   ├── test_line_verify.py
 │   ├── test_line_client.py
+│   ├── test_line_format.py
+│   ├── test_line_dedup.py
 │   ├── test_hermes_client.py
 │   ├── test_router.py
 │   └── test_container_manager.py
 ├── scripts/
 │   └── test_webhook.py          # 手動 end-to-end 測試腳本
 ├── docs/
-│   └── hermes-agent-real-integration.md  # 架構變更紀錄
+│   ├── hermes-agent-real-integration.md         # 從 mock 換成真實 Hermes Agent 的變更紀錄
+│   ├── hermes-agent-line-gateway-comparison.md  # 為何不用 Hermes 內建 LINE gateway、對照表
+│   └── line-hermes-message-flow.md              # 單則訊息從 LINE 到 Hermes container 的完整流程
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pyproject.toml
@@ -213,6 +241,6 @@ alice-office-router/
 ## 安全性
 
 - 每個 Webhook 請求均驗證 LINE HMAC-SHA256 簽章，驗證失敗回傳 `400`。
-- 各聊天室的 Hermes Agent 容器僅掛載自己的 Volume（`/opt/data`），容器間硬碟資料完全隔離。
+- 各聊天室的 Hermes Agent 容器僅掛載自己的 Volume（`/opt/data`），容器間硬碟資料完全隔離；使用者傳送的圖片/檔案/語音/影片也是落在各自房間的 `incoming/` 子目錄下，同樣不互通。
 - Hermes 容器完全不接觸 LINE 憑證，只透過 `HERMES_API_SERVER_KEY` 與 Router 的內部 API 通訊；`api_server` 本身只在 Docker 內網（`hermes_global_net`）可達。
 - `LINE_CHANNEL_SECRET`、`LINE_CHANNEL_ACCESS_TOKEN`、`HERMES_API_SERVER_KEY` 僅存於 `.env`，不進版控。

@@ -32,9 +32,7 @@ def _mock_response(status_code: int, json_body: dict[str, object]) -> MagicMock:
 
 async def test_ask_hermes_agent_returns_reply_content() -> None:
     """A successful chat completion response yields the assistant's text."""
-    response = _mock_response(
-        200, {"choices": [{"message": {"content": "哈囉，我是 Hermes"}}]}
-    )
+    response = _mock_response(200, {"choices": [{"message": {"content": "哈囉，我是 Hermes"}}]})
     with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)):
         reply = await ask_hermes_agent(
             "http://hermes_room_AAA:8642", "room_AAA", "哈囉", "test_key"

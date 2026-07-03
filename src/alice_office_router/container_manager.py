@@ -21,6 +21,12 @@ _lock = threading.Lock()
 _READY_TIMEOUT_SECONDS = 60.0
 _READY_POLL_INTERVAL_SECONDS = 1.0
 
+# Bind path for each room's data volume inside its Hermes container. Exported
+# so callers outside this module (e.g. router.py, when telling the agent
+# where an inbound media file landed) can reference the same path without
+# duplicating the string.
+CONTAINER_DATA_DIR = "/opt/data"
+
 
 def _find_free_port() -> int:
     """Bind to port 0 to let the OS pick a free port, then return it.
@@ -79,7 +85,7 @@ def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, 
         Docker volumes mapping dict for use with containers.run().
     """
     host_path = str(config.HOST_DATA_DIR / room_id)
-    return {host_path: {"bind": "/opt/data", "mode": "rw"}}
+    return {host_path: {"bind": CONTAINER_DATA_DIR, "mode": "rw"}}
 
 
 _CONFIG_YAML_TEMPLATE = """\
