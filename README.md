@@ -108,6 +108,7 @@ docker compose up -d --build
 - Docker（宿主機）
 - Python 3.12（本地開發用）
 - [uv](https://docs.astral.sh/uv/)（套件管理）
+- [ngrok](https://ngrok.com/)（選配——只有接真 LINE 端到端驗收時需要）
 
 ## 快速開始
 
@@ -132,8 +133,24 @@ LLM_MODEL=change-me
 > `HOST_DATA_DIR` 必須是**宿主機**的絕對路徑，Docker 掛載 Volume 時需要用到。
 > `HERMES_API_SERVER_KEY` 用 `openssl rand -hex 32` 產生，router 與每個 Hermes 容器共用同一把密鑰。
 > `LLM_*` 是共用的 LLM 後端設定，會自動寫入每個新房間的 `config.yaml`。
+>
+> **本機開發不需要真的 LINE channel**：`LINE_CHANNEL_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN`
+> 填任意假值即可——`scripts/test_webhook.py` 會用你填的 secret 計算簽章，兩邊一致就能通過驗簽。
+> 只有要接真 LINE 端到端驗收時才需要真憑證（見下方「接真的 LINE」）。
 
-### 2. 啟動服務
+### 2. 建立 Docker 網路、拉取 Hermes image
+
+```bash
+docker network create hermes_global_net
+docker pull nousresearch/hermes-agent:<pinned-tag>
+```
+
+> `hermes_global_net` 在 `docker-compose.yml` 中宣告為 `external`，沒先建立會直接啟動失敗。
+> `nousresearch/hermes-agent` 是 Docker Hub 公開 image，不需要任何 registry 權限，
+> 但請在 `.env` 的 `HERMES_IMAGE` **pin 版本 tag**（如 `nousresearch/hermes-agent:v2026.4.16`），
+> 不要用預設的 `latest`——版本漂移是這個架構最容易踩的雷之一。
+
+### 3. 啟動服務
 
 ```bash
 docker compose up -d
@@ -143,7 +160,7 @@ docker compose up -d
 
 將 LINE OA 的 Webhook URL 設為：`https://your-domain.com/webhook`
 
-### 3. 驗證運作
+### 4. 驗證運作
 
 模擬聊天室 A 發送訊息：
 
@@ -164,12 +181,116 @@ docker logs hermes_room_AAA | grep "/v1/chat/completions"  # 確認 Hermes agent
 
 > 也可以用 `uv run python scripts/test_webhook.py` 快速跑一輪模擬測試，不用手動組 curl 和簽章。
 
+第一次觸發某個房間時會拉起 `hermes_<room_id>` 容器，Hermes 開機（s6 supervision + skill sync）
+需要 30–60 秒，不是卡住。成功後 `data/<room_id>/` 會出現完整的 agent home
+（sessions、memories、skills…）——這個目錄就是該房間的「記憶」，容器可以隨時砍掉重建而不失憶，
+但不要手動修改裡面的狀態檔。
+
 ## 本地開發
+
+日常開發一律用 host 模式（`ROUTER_IN_DOCKER=false`），改 code 即時 reload、不用重 build image：
 
 ```bash
 uv sync                          # 安裝依賴
 uv run fastapi dev src/alice_office_router/main.py  # 開發伺服器
+uv run python scripts/test_webhook.py               # 隨手驗證整條路
 ```
+
+Container 模式（`docker compose up --build`）只在動到 Dockerfile / compose /
+`container_manager.py` 連線邏輯時才需要驗一次。
+
+### 接真的 LINE（端到端驗收才需要）
+
+每位開發者自建免費 LINE OA，互不干擾（一個 channel 同時只能設一個 webhook URL，共用會互搶）：
+
+1. [LINE Developers Console](https://developers.line.biz/) → 建 Provider → 建 **Messaging API** channel，
+   把 channel secret / access token 填入 `.env`
+2. `ngrok http 8000`，將 `https://<id>.ngrok-free.app/webhook` 填入 channel 的 Webhook URL，
+   開啟 "Use webhook"
+3. 用手機加該 OA 為好友，傳訊息 → 應收到 Hermes 回覆
+
+## 開發工作流程
+
+### 三條開發線
+
+改動前先認清你在改哪一種東西——三者的生效方式與交付路徑完全不同：
+
+| 交付物 | 改動位置 | 生效方式 | 頻率 |
+|--------|----------|----------|------|
+| **A. Router feature** | `src/alice_office_router/` | 重建 router image | 低頻 |
+| **B. Hermes skill** | skill 檔案（`SKILL.md` + `scripts/`） | 放進房間的 `/opt/data/skills/`，restart 容器 | 高頻 |
+| **C. Plugin / MCP** | MCP server（獨立 HTTP/SSE 容器）或 Hermes 衍生 image | 改房間 `config.yaml` + restart；或換 `HERMES_IMAGE` | 低頻 |
+
+共同的鐵律（對 Hermes `0.18.0` 實測確認）：
+
+- `HERMES_HOME=/opt/data`——掛載的 volume 就是完整 agent home，
+  **file-drop 設定（skills / plugins / hooks / MCP / SOUL.md）都真的有效**。
+- **沒有熱載入**。透過 `/v1/chat/completions` 送 `/reload-mcp` 之類的 slash command
+  不會被攔截（會被當一般文字丟給 LLM）。設定變更的通用生效手段就是 **restart 容器**。
+- 部署版本的 Jobs REST API（`/api/jobs`）**沒有開**（`/v1/capabilities` 回報
+  `jobs_admin: false`）——官方文件寫有不代表真的有，開發前先打 `/v1/capabilities` 確認。
+
+### A. Router feature
+
+Trunk-based，短分支：
+
+```bash
+git checkout -b feat/xxx        # 或 fix/xxx
+# ... host 模式開發，scripts/test_webhook.py 隨手驗 ...
+uv run ruff check . && uv run mypy src/ && uv run pytest   # 提交前必跑
+```
+
+- `main` 永遠保持可 release。做一半的功能用環境變數 feature flag 藏起來照樣合併——
+  **小步合併，不養長分支**。
+- 單元測試 mock 掉 LINE API 與 Docker（照 `tests/conftest.py` 現有模式）；
+  但編排邏輯（`container_manager.py`）的改動要另外用 `scripts/test_webhook.py`
+  對真容器驗一次——單元測試全 mock，測不到最容易壞的 Docker 層。
+
+### B. Hermes skill
+
+Skill 是純檔案，格式照 `data/<room>/skills/` 裡的現成範例
+（`DESCRIPTION.md` + 各 skill 的 `SKILL.md`，選配 `scripts/`、`references/`）：
+
+1. 把 skill 放進自己測試房間的 `data/<room_id>/skills/<name>/`
+2. `docker restart hermes_<room_id>`
+3. 用 `test_webhook.py` 送會觸發該 skill 的訊息驗證
+
+### C. Plugin / MCP
+
+**預設路徑：MCP server 做成獨立的 HTTP/SSE 容器**（sibling container），不進 Hermes image。
+image 裡雖有 node / npx / uvx 可跑 stdio MCP，但那樣每個房間容器都要各自複製一份 runtime；
+HTTP/SSE 一份服務所有房間共用：
+
+1. 開發並 `docker build`，`docker run --network hermes_global_net` 起起來
+2. 在測試房間的 `data/<room_id>/config.yaml` 加 MCP 設定（指向 `http://<container-name>:<port>`）
+3. `docker restart hermes_<room_id>`，用 `test_webhook.py` 驗證 agent 呼叫得到該 tool
+
+只有當功能必須跑在 Hermes **進程內**（真 plugin，不是 MCP）才走衍生 image：
+`FROM nousresearch/hermes-agent:<pin>`，改 `HERMES_IMAGE` 逐房重建。
+這條路每次升級 Hermes 都要 rebase，成本高，沒必要不要走。
+
+### 驗證層級（由快到慢）
+
+| 層級 | 工具 | 驗什麼 | 什麼時候跑 |
+|------|------|--------|-----------|
+| 1 | `pytest`（全 mock） | router 邏輯 | 每次改動，秒級 |
+| 2 | `scripts/test_webhook.py` | 驗簽 → 容器編排 → LLM 整條路 | 動到編排/協定時 |
+| 3 | 真 LINE（自建 OA + ngrok） | LINE 平台行為（媒體、reply token…） | 驗收、動到 LINE 相關 code 時 |
+| 4 | canary 房間 | 正式環境、真使用者流量 | release 前 |
+
+## 疑難排解
+
+- **compose 啟動直接失敗**：`hermes_global_net` 沒建（network 宣告為 `external`），
+  先 `docker network create hermes_global_net`。
+- **host 模式連 Hermes 容器 timeout**：忘了把 `ROUTER_IN_DOCKER` 設 `false`，
+  router 在用容器名連線，host 上解析不到。
+- **第一次訊息很久才回**：Hermes 容器首次啟動要 30–60 秒（s6 + skill sync）屬正常；
+  慢機器上 `_wait_until_ready` 的 60 秒 timeout 偶爾不夠，可調 `container_manager.py`。
+- **改了掛載來源的 symlink 沒生效**：Docker bind mount 在**建容器時**就把 symlink
+  解析成實體路徑，之後切 symlink 對既有容器無效，`docker restart` 也不會重新解析——
+  必須 recreate 容器。
+- **改了 config.yaml / skills / MCP 設定沒生效**：Hermes 沒有熱載入，
+  restart 該房間容器才會生效。
 
 ## 指令速查
 
@@ -213,10 +334,12 @@ alice-office-router/
 │   └── test_container_manager.py
 ├── scripts/
 │   └── test_webhook.py          # 手動 end-to-end 測試腳本
-├── docs/
+├── docs/                        # 設計文件（不進版控，clone 不會有；實質內容以本 README 為準）
 │   ├── hermes-agent-real-integration.md         # 從 mock 換成真實 Hermes Agent 的變更紀錄
 │   ├── hermes-agent-line-gateway-comparison.md  # 為何不用 Hermes 內建 LINE gateway、對照表
-│   └── line-hermes-message-flow.md              # 單則訊息從 LINE 到 Hermes container 的完整流程
+│   ├── line-hermes-message-flow.md              # 單則訊息從 LINE 到 Hermes container 的完整流程
+│   ├── cicd-plan.md                             # CI/CD 與客戶交付流程設計
+│   └── developer-workflow.md                    # 開發工作流程完整版（本 README 的擴充）
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pyproject.toml
@@ -232,7 +355,7 @@ alice-office-router/
 | `HOST_DATA_DIR` | ✅ | 宿主機上 `data/` 的絕對路徑，用於 Docker Volume 掛載 |
 | `HERMES_API_SERVER_KEY` | ✅ | Router 與每個 Hermes 容器共用的 Bearer 密鑰（容器的 `api_server` platform 靠它啟用與驗證） |
 | `DATA_DIR` | | 容器內 data 目錄（預設 `/app/data`） |
-| `HERMES_IMAGE` | | Hermes Agent 映像（預設 `nousresearch/hermes-agent`） |
+| `HERMES_IMAGE` | | Hermes Agent 映像（預設 `nousresearch/hermes-agent`，等同 `latest`——請改成 pin 版本 tag，如 `nousresearch/hermes-agent:v2026.4.16`） |
 | `HERMES_NETWORK` | | Docker 內網名稱（預設 `hermes_global_net`） |
 | `HERMES_INTERNAL_PORT` | | Hermes Agent `api_server` 監聽 Port（預設 `8642`） |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | | 共用 LLM 後端設定，自動寫入每個新房間的 `config.yaml` |
