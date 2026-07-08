@@ -1,0 +1,5 @@
+employee_id,work_days,paid_leave_days,unpaid_leave_days,absence_hours,late_minutes,overtime_1_34_hours,overtime_1_67_hours,overtime_2_67_hours
+E001,22,0,0,0,10,4,2,0
+E002,22,1,0,0,0,0,0,0
+E003,21,0,1,0,30,6,3,1
+E004,22,0,0,2,0,2,0,0

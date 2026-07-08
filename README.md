@@ -103,6 +103,11 @@ docker compose up -d --build
 
 已用 `docker compose up` + 真實的 LINE webhook 請求驗證過：router 在自己的 container 內仍能正常呼叫 `docker.sock` 建立 `hermes_{room_id}` 容器、透過容器名稱互連、並把回覆 push 回 LINE。
 
+正式部署時 `.env` 用真的 LINE 憑證、`ROUTER_IN_DOCKER=true`，並把 LINE OA 的
+Webhook URL 設為 `https://your-domain.com/webhook`（服務監聽 `http://localhost:8000`）。
+日常開發不用起 compose——只在動到 Dockerfile / compose / `container_manager.py`
+連線邏輯時，才需要用 container 模式驗一次。
+
 ## 環境需求
 
 - Docker（宿主機）
@@ -112,7 +117,16 @@ docker compose up -d --build
 
 ## 快速開始
 
-### 1. 設定環境變數
+從 git clone 到改 code 看到更動。照著做即可，全程不需要真的 LINE channel——
+`scripts/test_webhook.py` 會模擬 LINE 平台的簽章與訊息。
+
+### 1. 安裝依賴
+
+```bash
+uv sync
+```
+
+### 2. 設定環境變數
 
 ```bash
 cp .env.example .env
@@ -121,83 +135,80 @@ cp .env.example .env
 編輯 `.env`：
 
 ```env
-LINE_CHANNEL_SECRET=your_channel_secret_here
-LINE_CHANNEL_ACCESS_TOKEN=your_channel_access_token_here
+LINE_CHANNEL_SECRET=dev-fake-secret        # 開發用假值即可，test_webhook.py 用它算簽章
+LINE_CHANNEL_ACCESS_TOKEN=dev-fake-token   # 同上——接真 LINE 驗收才需要真憑證
+ROUTER_IN_DOCKER=false                     # 開發用 host 模式；容器化部署才設 true
 HOST_DATA_DIR=/absolute/path/to/alice-office-router/data
-HERMES_API_SERVER_KEY=change-me
-LLM_BASE_URL=change-me
+HOST_PLUGINS_DIR=/absolute/path/to/alice-office-router/plugins
+HOST_SECRETARY_MCP_DIR=/absolute/path/to/alice-office-router/secretary-mcp  # 要改 MCP 才需要
+HERMES_IMAGE=alice-hermes-agent:v1
+HERMES_API_SERVER_KEY=change-me            # openssl rand -hex 32
+LLM_BASE_URL=change-me                     # 唯一不能假的：可用的 OpenAI-compatible endpoint
 LLM_API_KEY=change-me
 LLM_MODEL=change-me
 ```
 
-> `HOST_DATA_DIR` 必須是**宿主機**的絕對路徑，Docker 掛載 Volume 時需要用到。
-> `HERMES_API_SERVER_KEY` 用 `openssl rand -hex 32` 產生，router 與每個 Hermes 容器共用同一把密鑰。
+> `HOST_*` 必須是**宿主機**的絕對路徑，Docker 掛載 volume 時需要用到。
+> `HERMES_API_SERVER_KEY` 是 router 與每個 Hermes 容器共用的密鑰。
 > `LLM_*` 是共用的 LLM 後端設定，會自動寫入每個新房間的 `config.yaml`。
->
-> **本機開發不需要真的 LINE channel**：`LINE_CHANNEL_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN`
-> 填任意假值即可——`scripts/test_webhook.py` 會用你填的 secret 計算簽章，兩邊一致就能通過驗簽。
-> 只有要接真 LINE 端到端驗收時才需要真憑證（見下方「接真的 LINE」）。
 
-### 2. 建立 Docker 網路、拉取 Hermes image
+### 3. 建立 Docker 網路、準備 Hermes image
 
 ```bash
 docker network create hermes_global_net
-docker pull nousresearch/hermes-agent:<pinned-tag>
+docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .   # 含 plugin 依賴與 secretary-mcp
 ```
 
 > `hermes_global_net` 在 `docker-compose.yml` 中宣告為 `external`，沒先建立會直接啟動失敗。
-> `nousresearch/hermes-agent` 是 Docker Hub 公開 image，不需要任何 registry 權限，
-> 但請在 `.env` 的 `HERMES_IMAGE` **pin 版本 tag**（如 `nousresearch/hermes-agent:v2026.4.16`），
-> 不要用預設的 `latest`——版本漂移是這個架構最容易踩的雷之一。
+>
+> 趕時間可以跳過 build，先 `docker pull nousresearch/hermes-agent:<pinned-tag>`（Docker Hub
+> 公開 image，免權限）填進 `HERMES_IMAGE`——local-tools 的 4 個 stdlib 工具能動，但
+> math／OCR／webdriver 與 secretary-mcp 不行，差別見「[預裝 Plugin](#預裝-pluginlocal-tools)」。
+> 不論哪種，`HERMES_IMAGE` 都 **pin 版本 tag**，不要 `latest`——版本漂移是這個架構最容易踩的雷之一。
 
-### 3. 啟動服務
-
-```bash
-docker compose up -d
-```
-
-服務啟動後監聽 `http://localhost:8000`。
-
-將 LINE OA 的 Webhook URL 設為：`https://your-domain.com/webhook`
-
-### 4. 驗證運作
-
-模擬聊天室 A 發送訊息：
+### 4. 啟動 router、建立測試房間
 
 ```bash
-curl -X POST http://localhost:8000/webhook \
-  -H "Content-Type: application/json" \
-  -H "x-line-signature: <valid_sig>" \
-  -d '{"events":[{"type":"message","source":{"type":"room","roomId":"room_AAA"},"message":{"type":"text","text":"hello"}}]}'
+uv run fastapi dev src/alice_office_router/main.py        # terminal A，保持開著
+uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "你好"   # terminal B
 ```
 
 確認容器自動建立：
 
 ```bash
-docker ps | grep hermes_room_AAA
-ls data/room_AAA/          # 內含自動產生的 config.yaml
-docker logs hermes_room_AAA | grep "/v1/chat/completions"  # 確認 Hermes agent 收到並回覆了訊息
+docker ps | grep hermes_U_LOCAL_TEST
+ls data/U_LOCAL_TEST/          # 內含自動產生的 config.yaml
+docker logs hermes_U_LOCAL_TEST | grep "/v1/chat/completions"  # Hermes agent 收到並回覆了訊息
 ```
-
-> 也可以用 `uv run python scripts/test_webhook.py` 快速跑一輪模擬測試，不用手動組 curl 和簽章。
 
 第一次觸發某個房間時會拉起 `hermes_<room_id>` 容器，Hermes 開機（s6 supervision + skill sync）
 需要 30–60 秒，不是卡住。成功後 `data/<room_id>/` 會出現完整的 agent home
 （sessions、memories、skills…）——這個目錄就是該房間的「記憶」，容器可以隨時砍掉重建而不失憶，
 但不要手動修改裡面的狀態檔。
 
-## 本地開發
+agent 的回覆去哪看：假 user id 推不回真的 LINE（router log 出現 `Failed to push LINE reply`
+屬預期），所以看 `docker logs -f hermes_U_LOCAL_TEST` 與 router terminal 的 log。
 
-日常開發一律用 host 模式（`ROUTER_IN_DOCKER=false`），改 code 即時 reload、不用重 build image：
+### 5. 日常開發迴圈
 
 ```bash
-uv sync                          # 安裝依賴
-uv run fastapi dev src/alice_office_router/main.py  # 開發伺服器
-uv run python scripts/test_webhook.py               # 隨手驗證整條路
+# terminal A：router
+uv run fastapi dev src/alice_office_router/main.py
+
+# terminal B：watcher——監看 plugins/ 與 secretary-mcp/，存檔自動 restart 測試房間
+uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
+
+# terminal C：改 code → 存檔 → 等 watcher 顯示 restart 完成（warm restart 約 10–15 秒）
+#            → 送訊息驗證
+vim plugins/local-tools/tools.py              # 或 secretary-mcp/tools/*.mjs
+uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "呼叫 math 工具，expression=\"2+2\""
 ```
 
-Container 模式（`docker compose up --build`）只在動到 Dockerfile / compose /
-`container_manager.py` 連線邏輯時才需要驗一次。
+- 改 **router code**（`src/`）：`fastapi dev` 自己會 reload，不用動任何容器。
+- 改 **plugin / MCP**：watcher 自動 restart 測試房間。更細的生效條件（哪些要 restart、
+  哪些要 rebuild）見「[測試 plugins 修改](#測試-plugins-修改)」與
+  「[測試 secretary-mcp 修改](#測試-secretary-mcp-修改)」。
+- 改 **skill**：放進 `data/<room_id>/skills/` 後 restart 該房間（見「[B. Hermes skill](#b-hermes-skill)」）。
 
 ### 接真的 LINE（端到端驗收才需要）
 
@@ -265,9 +276,119 @@ HTTP/SSE 一份服務所有房間共用：
 2. 在測試房間的 `data/<room_id>/config.yaml` 加 MCP 設定（指向 `http://<container-name>:<port>`）
 3. `docker restart hermes_<room_id>`，用 `test_webhook.py` 驗證 agent 呼叫得到該 tool
 
+#### 現況：secretary-mcp 是例外路徑
+
+`secretary-mcp/` 目前**不是**走上面的「獨立 HTTP/SSE 容器」路徑，而是 stdio + 烤進
+`Dockerfile.hermes`（`/opt/secretary-mcp/`），每個房間的 Hermes 容器各自 spawn 一份
+（`SECRETARY_LINE_USER_ID` = `room_id`，見 `container_manager.py` 的 `_MCP_SECTION_TEMPLATE`）。
+這是文件裡說的「必須跑在 Hermes 進程內」例外情況的變體——嚴格說它不是真 in-process
+plugin，只是圖方便先這樣接。之後若要遷移成共用 HTTP/SSE 容器，需要先解決
+tenant 識別（目前靠 process 啟動時的 env var 分房間，共用容器要改成 per-request 識別）。
+
+因為源碼烤在 image 裡，改 `secretary-mcp/` 程式碼預設要重 build `Dockerfile.hermes`
+才會生效。Dev 環境可設 `HOST_SECRETARY_MCP_DIR`（見環境變數表）bind mount
+`server.mjs` + `tools/` 覆蓋 image 內版本，`docker restart` 即可測試新程式碼；
+`node_modules` 依然吃 image 內建的，套件版本變動時還是得重 build。
+
+##### 測試 secretary-mcp 修改
+
+**Level 0（最快，不碰 Docker/Hermes）**——用官方 MCP inspector 直接對 `server.mjs` 打 stdio protocol：
+
+```bash
+cd secretary-mcp && npm install   # 第一次要裝依賴
+SECRETARY_LINE_USER_ID=test_room npx @modelcontextprotocol/inspector node server.mjs
+```
+
+開瀏覽器 UI，可直接呼叫個別 tool、驗 schema、看回傳值，不用經過 Hermes。
+
+**Level 1（透過 Hermes 容器驗證，用 dev override）**：
+
+1. `.env` 設 `HOST_SECRETARY_MCP_DIR=/absolute/path/to/alice-office-router/secretary-mcp`
+2. **注意**：如果測試房間的 `hermes_<room_id>` 容器**在設定這個變數之前就已存在**，
+   `docker restart` 不會套用新 mount——volume 掛載是建立容器當下就固定的。
+   第一次啟用要先 `docker rm -f hermes_<room_id>`，讓 router 下次收到訊息時重新建立容器
+   （帶上新 mount）。全新房間則不用這步，建立時就會直接帶上。
+3. 之後改 `server.mjs` / `tools/*.mjs`，只要 `docker restart hermes_<room_id>` 就會生效
+   （Hermes gateway 重啟時重新 spawn MCP server process，讀到新程式碼）——這步可以用
+   `uv run python scripts/watch_restart.py` 自動化，存檔即觸發，見下方「測試 plugins 修改」
+4. `uv run python scripts/test_webhook.py` 送會觸發 secretary tool 的訊息（例如「幫我加一筆待辦」），
+   `docker logs hermes_<room_id>` 找 `[secretary-mcp] ready; lineUserId=...` 確認 spawn 成功、有無報錯
+
+**Level 2（完整驗證，套件有變動時必跑）**：改了 `package.json`（新增/升級依賴）時，
+dev override 的 `node_modules` 還是吃 image 內建的，必須重 build：
+
+```bash
+docker build -f Dockerfile.hermes -t alice-hermes-agent:v2 .
+# .env 改 HERMES_IMAGE=alice-hermes-agent:v2，docker rm -f 測試房間容器重建
+```
+
+#### 預裝 Plugin（local-tools）
+
+Repo 的 `plugins/local-tools/` 是一套 Hermes standalone plugin（台灣薪資計算、法規查詢、工程計算機、長期記憶、AI 生態系索引、OCR、瀏覽器自動化），**每個 Hermes 容器啟動時自動掛載為預設工具**。掛載方式：
+
+- **原始碼**：`plugins/` 目錄以 read-only volume 掛載到容器的 `/opt/data/plugins/`（所有房間共用）
+- **啟用**：每個新房間的 `config.yaml` 模板自動寫入 `plugins.enabled: [local-tools]`
+- **執行資料**（SQLite、快取）：落在各房間的 `/opt/data/local-tools-data/`（房間隔離）
+
+工具的 Python 依賴分為兩類：
+
+| 工具 | 依賴 | 上游 image 是否內建 |
+|------|------|---------------------|
+| hr / law / longmem / research | 純 stdlib | ✅ 直接可用 |
+| math | `sympy` | ❌ 需衍生 image |
+| image_ocr | `pymupdf` + 外部 Vision API | ❌ 需衍生 image + API server |
+| webdriver | `selenium` + geckodriver + Firefox | ❌ 需衍生 image（plugin 自動隱藏） |
+
+**Production 建法**——用 `Dockerfile.hermes` 建衍生 image 預裝 sympy + pymupdf：
+
+```bash
+docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
+# .env 設 HERMES_IMAGE=alice-hermes-agent:v1
+```
+
+> 原始碼仍走 volume 掛載，不 bake 進 image——改 plugin 程式碼只需 `docker restart`，
+> 不用重 build。只有依賴變動時才需要重 build 衍生 image。
+>
+> 一般開發時用上游 `nousresearch/hermes-agent` 即可，4 個 stdlib 工具直接可用。
+
 只有當功能必須跑在 Hermes **進程內**（真 plugin，不是 MCP）才走衍生 image：
 `FROM nousresearch/hermes-agent:<pin>`，改 `HERMES_IMAGE` 逐房重建。
 這條路每次升級 Hermes 都要 rebase，成本高，沒必要不要走。
+
+##### 測試 plugins 修改
+
+**Level 0（最快，不碰 Docker/Hermes）**——每個 tool 是一支獨立可執行的 CLI script
+（`tools.py` 用 `subprocess.run([PYTHON, script, *argv])` 呼叫，吃 CLI args、吐 JSON stdout），
+可以直接跑，邏輯對不對這層就測得完：
+
+```bash
+python3 plugins/local-tools/scripts/hr/alice-payroll-engine.py --help
+python3 plugins/local-tools/scripts/hr/alice-payroll-engine.py <實際參數>
+```
+
+**Level 1（驗證 Hermes 真的呼叫得到 tool）**：
+
+1. 確保測試房間容器已存在（`plugins/` 本來就是 hot-mount，host 模式、容器模式都免 rebuild）
+2. `docker restart hermes_<room_id>`——新加的 tool 或改了 `plugin.yaml` / `schemas.py` 需要
+   restart 才生效；純改 script 內容其實每次呼叫都是重新 spawn subprocess，通常不用重啟，
+   但 restart 保險
+3. `uv run python scripts/test_webhook.py` 送一句會觸發該 tool 的訊息，看 agent 回覆
+4. 有問題就 `docker logs -f hermes_<room_id>` 看 stderr
+
+**不想每次手動打 restart？** `scripts/watch_restart.py` 會輪詢 `plugins/`（有設
+`HOST_SECRETARY_MCP_DIR` 的話連 secretary-mcp 一起）的檔案異動，存檔自動
+`docker restart hermes_<room_id>`：
+
+```bash
+uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
+```
+
+只是把「你自己打 restart」自動化，容器怎麼建立、掛載什麼都還是
+`container_manager.py` 那唯一一份邏輯決定的——不是另外養一份 compose service
+設定，不會有兩份設定漂移的風險。
+
+只有新增的 tool 需要新的 Python 套件（不在上游 image 也不在 `Dockerfile.hermes` 已裝清單裡）
+時，才需要重 build 衍生 image——單純改 script 邏輯完全不用。
 
 ### 驗證層級（由快到慢）
 
@@ -301,6 +422,9 @@ HTTP/SSE 一份服務所有房間共用：
 | `uv run mypy src/` | 型別檢查 |
 | `uv run ruff check .` | Lint |
 | `uv run ruff format .` | 格式化 |
+| `uv run fastapi dev src/alice_office_router/main.py` | 開發伺服器（host 模式） |
+| `uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "..."` | 模擬 LINE 訊息打整條路 |
+| `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看 extension 原始碼，存檔自動 restart |
 
 提交前必跑：
 
@@ -332,16 +456,14 @@ alice-office-router/
 │   ├── test_hermes_client.py
 │   ├── test_router.py
 │   └── test_container_manager.py
+├── plugins/                     # Hermes 預裝 plugin（volume 掛載到每個容器）
+│   └── local-tools/             # 台灣薪資/法規/數學/記憶/OCR/瀏覽器 工具包
 ├── scripts/
 │   └── test_webhook.py          # 手動 end-to-end 測試腳本
 ├── docs/                        # 設計文件（不進版控，clone 不會有；實質內容以本 README 為準）
-│   ├── hermes-agent-real-integration.md         # 從 mock 換成真實 Hermes Agent 的變更紀錄
-│   ├── hermes-agent-line-gateway-comparison.md  # 為何不用 Hermes 內建 LINE gateway、對照表
-│   ├── line-hermes-message-flow.md              # 單則訊息從 LINE 到 Hermes container 的完整流程
-│   ├── cicd-plan.md                             # CI/CD 與客戶交付流程設計
-│   └── developer-workflow.md                    # 開發工作流程完整版（本 README 的擴充）
 ├── docker-compose.yml
-├── Dockerfile
+├── Dockerfile                   # Router image
+├── Dockerfile.hermes            # 衍生 Hermes image（預裝 plugin 依賴，production 用）
 ├── pyproject.toml
 └── .env.example
 ```
@@ -360,6 +482,9 @@ alice-office-router/
 | `HERMES_INTERNAL_PORT` | | Hermes Agent `api_server` 監聽 Port（預設 `8642`） |
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | | 共用 LLM 後端設定，自動寫入每個新房間的 `config.yaml` |
 | `ROUTER_IN_DOCKER` | | Router 是否跑在 Docker 內（預設 `true`）；本機開發用 `uv run uvicorn` 時設為 `false`，容器會改為發布隨機 host port |
+| `HOST_PLUGINS_DIR` | | 宿主機上 `plugins/` 的絕對路徑，用於 Docker Volume 掛載（compose 自動設 `${PWD}/plugins`） |
+| `HOST_SECRETARY_MCP_DIR` | | **Dev only**。宿主機上 `secretary-mcp/` 的絕對路徑；設定後會把 `server.mjs` + `tools/` bind mount 覆蓋 image 內烤好的版本，改程式碼只需 `docker restart` 不用重 build（`node_modules` 仍用 image 內建的）。Production 留空——客戶主機沒有這份 repo 原始碼 |
+| `DEFAULT_PLUGINS` | | 寫入每個新房間 config.yaml 的預設 plugin 清單（逗號分隔，預設 `local-tools`） |
 
 ## 安全性
 

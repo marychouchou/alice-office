@@ -4,6 +4,7 @@ import logging
 import socket
 import threading
 import time
+from pathlib import Path
 
 import docker
 import docker.errors
@@ -26,6 +27,17 @@ _READY_POLL_INTERVAL_SECONDS = 1.0
 # where an inbound media file landed) can reference the same path without
 # duplicating the string.
 CONTAINER_DATA_DIR = "/opt/data"
+
+# Bind path for the shared, repo-managed plugins directory. Mounted read-only
+# into every Hermes container so plugin source code is shared across rooms.
+# Room-specific plugin runtime data (SQLite DBs, caches, etc.) lives under
+# each room's writable CONTAINER_DATA_DIR (e.g. /opt/data/local-tools-data/).
+CONTAINER_PLUGINS_DIR = f"{CONTAINER_DATA_DIR}/plugins"
+
+# Bind path for secretary-mcp inside the Hermes image (baked in by
+# Dockerfile.hermes). Dev mode overlays just server.mjs + tools/ here,
+# leaving the image's baked-in node_modules untouched.
+CONTAINER_SECRETARY_MCP_DIR = "/opt/secretary-mcp"
 
 
 def _find_free_port() -> int:
@@ -71,21 +83,112 @@ def _build_container_env(config: Settings) -> dict[str, str]:
     }
     if config.LLM_API_KEY:
         env["LLM_API_KEY"] = config.LLM_API_KEY
+    # Forwarded so secretary-mcp's maps_* tools can reach Google Places API.
+    # Hermes expands ${GOOGLE_MAPS_API_KEY} in config.yaml from the container env.
+    if config.GOOGLE_MAPS_API_KEY:
+        env["GOOGLE_MAPS_API_KEY"] = config.GOOGLE_MAPS_API_KEY
     return env
 
 
 def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, str]]:
     """Build Docker volume configuration for a room's container.
 
+    Mounts two volumes always:
+    1. The room's data directory (read-write, room-isolated).
+    2. The shared plugins directory (read-only, repo-managed source code).
+
+    When HOST_SECRETARY_MCP_DIR is set (dev only), server.mjs and tools/ are
+    additionally bind-mounted (read-only) over the copy baked into the Hermes
+    image, so MCP source edits take effect on container restart without an
+    image rebuild. node_modules stays the image's baked-in copy.
+
     Args:
         room_id: Unique identifier for the chatroom.
-        config: Application settings containing host data directory path.
+        config: Application settings containing host data/plugins paths.
 
     Returns:
         Docker volumes mapping dict for use with containers.run().
     """
-    host_path = str(config.HOST_DATA_DIR / room_id)
-    return {host_path: {"bind": CONTAINER_DATA_DIR, "mode": "rw"}}
+    host_data_path = str(config.HOST_DATA_DIR / room_id)
+    host_plugins_path = str(config.HOST_PLUGINS_DIR)
+    volumes = {
+        host_data_path: {"bind": CONTAINER_DATA_DIR, "mode": "rw"},
+        host_plugins_path: {"bind": CONTAINER_PLUGINS_DIR, "mode": "ro"},
+    }
+    if config.HOST_SECRETARY_MCP_DIR:
+        secretary_dir = Path(config.HOST_SECRETARY_MCP_DIR)
+        for entry in ("server.mjs", "tools"):
+            volumes[str(secretary_dir / entry)] = {
+                "bind": f"{CONTAINER_SECRETARY_MCP_DIR}/{entry}",
+                "mode": "ro",
+            }
+    return volumes
+
+
+def _format_plugins_yaml(plugins: list[str]) -> str:
+    """Format a list of plugin names as a YAML plugins section.
+
+    Args:
+        plugins: List of plugin names to enable.
+
+    Returns:
+        YAML string for the ``plugins:`` config block.
+    """
+    if not plugins:
+        return "plugins:\n  enabled: []"
+    items = "\n".join(f"    - {p}" for p in plugins)
+    return f"plugins:\n  enabled:\n{items}"
+
+
+# MCP server section written into every room's config.yaml. The secretary MCP
+# server source is baked into the image at /opt/secretary-mcp/ (see Dockerfile.hermes);
+# each room's container spawns its own instance with per-room state keyed by room_id.
+#
+# NOTE on escaping: this string is consumed by str.format(), so the literal
+# ${GOOGLE_MAPS_API_KEY} that Hermes itself expands at MCP-spawn time must be
+# written as ${{GOOGLE_MAPS_API_KEY}} here — .format() collapses {{ }} to { }.
+_MCP_SECTION_TEMPLATE = """\
+mcp_servers:
+  secretary:
+    command: node
+    args:
+      - /opt/secretary-mcp/server.mjs
+    env:
+      # room_id doubles as the per-room state key for secretary-mcp's
+      # todo / attendance / expense tools (stored under ~/.hermes/secretary-*.json).
+      SECRETARY_LINE_USER_ID: {room_id}
+      # Hermes expands the GOOGLE_MAPS_API_KEY env var (forwarded by the
+      # router) at MCP spawn time. Blank disables maps_* tools.
+      GOOGLE_MAPS_API_KEY: ${{GOOGLE_MAPS_API_KEY}}
+    # LINE tools are disabled: the router owns all LINE communication.
+    # Reminder tools are disabled: they depend on line_send_message to deliver.
+    tools:
+      exclude:
+        - line_send_message
+        - line_send_media
+        - line_send_file
+        - reminder_set
+        - reminder_list
+        - reminder_cancel
+toolsets:
+  - mcp-secretary
+tools:
+  tool_search:
+    threshold_pct: 20
+"""
+
+
+def _format_mcp_section(room_id: str) -> str:
+    """Render the MCP servers / toolsets block for a room's config.yaml.
+
+    Args:
+        room_id: Unique chatroom identifier, used as secretary-mcp's per-user
+            state key (so each room has isolated todo/attendance/expense state).
+
+    Returns:
+        YAML string for the ``mcp_servers`` / ``toolsets`` / ``tools`` blocks.
+    """
+    return _MCP_SECTION_TEMPLATE.format(room_id=room_id)
 
 
 _CONFIG_YAML_TEMPLATE = """\
@@ -99,25 +202,36 @@ providers:
     default_model: {model}
     models:
       - {model}
+{plugins_section}
+{mcp_section}
 """
 
 
 def _ensure_config_yaml(room_id: str, config: Settings) -> None:
     """Write a default Hermes config.yaml for a room if one doesn't already exist.
 
-    Configures the shared LLM provider so the agent can answer without any
-    manual per-room setup. Left untouched on subsequent calls so operators can
-    hand-edit a room's config without it being overwritten on container recreation.
+    Configures the shared LLM provider, default plugins, and secretary MCP
+    server so the agent can answer without any manual per-room setup. Left
+    untouched on subsequent calls so operators can hand-edit a room's config
+    without it being overwritten on container recreation.
 
     Args:
-        room_id: Unique identifier for the chatroom.
-        config: Application settings containing the shared LLM provider details.
+        room_id: Unique identifier for the chatroom (also secretary-mcp's
+            per-user state key).
+        config: Application settings containing the shared LLM provider details
+            and default plugin list.
     """
     config_path = config.DATA_DIR / room_id / "config.yaml"
     if config_path.exists() or not config.LLM_BASE_URL or not config.LLM_MODEL:
         return
+    plugins = [p.strip() for p in config.DEFAULT_PLUGINS.split(",") if p.strip()]
     config_path.write_text(
-        _CONFIG_YAML_TEMPLATE.format(model=config.LLM_MODEL, base_url=config.LLM_BASE_URL),
+        _CONFIG_YAML_TEMPLATE.format(
+            model=config.LLM_MODEL,
+            base_url=config.LLM_BASE_URL,
+            plugins_section=_format_plugins_yaml(plugins),
+            mcp_section=_format_mcp_section(room_id),
+        ),
         encoding="utf-8",
     )
     logger.info(f"Wrote default config.yaml for room [{room_id}]")

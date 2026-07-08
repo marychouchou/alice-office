@@ -1,0 +1,12 @@
+name: local-tools
+version: 1.0.0
+description: "Alice 本機工具包：台灣薪資計算、法規查詢、工程計算機、長期記憶、AI 助理生態系查詢、瀏覽器自動化（browser 依賴未安裝，暫不可用）。"
+author: alice
+kind: standalone
+provides_tools:
+  - hr
+  - law
+  - math
+  - longmem
+  - research
+  - webdriver

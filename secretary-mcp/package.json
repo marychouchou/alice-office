@@ -1,0 +1,14 @@
+{
+  "name": "secretary-mcp",
+  "version": "0.1.0",
+  "description": "Secretary tools (batch 1: todo, meeting, translate) as a hermes MCP server",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "secretary-mcp": "server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  }
+}

@@ -1,0 +1,159 @@
+{
+  "version": "2026-05-10",
+  "locale": "zh-TW",
+  "purpose": "台灣商品查價/訂購用電商與品牌官網索引。先依商品類別選站，再用 agent browser 工具查實際頁面，禁止靠模型猜售價或庫存。",
+  "sourceNotes": [
+    "Wise 台灣九大電商平台整理",
+    "ConnactAI 2024 台灣電商平台 TOP 11",
+    "PChome/Lowi AI 2024-2025 電商聲量排行",
+    "Tenten Coupang 台灣市場分析",
+    "MyLink 台灣網站導航電商列表",
+    "品牌官方商城與通路頁"
+  ],
+  "categories": [
+    {
+      "id": "general_marketplace",
+      "name": "綜合電商/百貨型平台",
+      "defaultPriority": 100,
+      "keywords": ["一般商品", "綜合", "日用品", "家用品", "生活用品", "網購", "比價"],
+      "platforms": ["momo", "pchome_24h", "shopee", "coupang", "yahoo_shopping", "ruten", "rakuten_tw", "etmall", "books", "711_shop", "friday", "buy123", "pcone"]
+    },
+    {
+      "id": "marketplace_auction",
+      "name": "市集/拍賣/二手/長尾商品",
+      "defaultPriority": 92,
+      "keywords": ["拍賣", "二手", "賣家", "市集", "長尾", "稀有", "現貨"],
+      "platforms": ["shopee", "ruten", "yahoo_auction", "rakuten_tw", "pchome_store", "facebook_marketplace"]
+    },
+    {
+      "id": "computer_3c_ai",
+      "name": "3C/電腦/AI伺服器/零組件",
+      "defaultPriority": 120,
+      "keywords": ["3C", "電腦", "筆電", "桌機", "伺服器", "AI", "GPU", "顯卡", "主機板", "記憶體", "SSD", "ASUS", "GX10", "DGX", "NVIDIA"],
+      "platforms": ["asus_store", "acer_store", "apple_tw", "samsung_tw", "sony_store", "pchome_24h", "momo", "shopee", "ruten", "yahoo_shopping", "coolpc", "autobuy", "sinya", "liangxing", "tk3c", "elife", "senao", "mi_tw", "logitech_tw"]
+    },
+    {
+      "id": "home_appliance",
+      "name": "家電/生活電器",
+      "defaultPriority": 105,
+      "keywords": ["家電", "冰箱", "洗衣機", "電視", "冷氣", "除濕", "吸塵器", "吹風機", "氣炸鍋", "微波爐"],
+      "platforms": ["momo", "pchome_24h", "yahoo_shopping", "coupang", "tk3c", "elife", "senao", "carrefour", "rt_mart", "costco", "dyson_tw", "lg_tw", "samsung_tw", "sony_store", "panasonic_tw", "philips_tw"]
+    },
+    {
+      "id": "daily_grocery",
+      "name": "日用品/量販/超市/衛生紙",
+      "defaultPriority": 110,
+      "keywords": ["衛生紙", "清潔", "洗衣精", "食品", "飲料", "量販", "超市", "生鮮", "家庭用品"],
+      "platforms": ["momo", "coupang", "shopee", "pchome_24h", "carrefour", "pxgo", "rt_mart", "costco", "711_shop", "familymart", "watsons", "cosmed", "etmall"]
+    },
+    {
+      "id": "beauty_health",
+      "name": "美妝/保健/藥妝",
+      "defaultPriority": 95,
+      "keywords": ["美妝", "保養", "彩妝", "保健", "維他命", "藥妝", "洗髮", "面膜"],
+      "platforms": ["momo", "shopee", "watsons", "cosmed", "coupang", "poya", "etmall", "yahoo_shopping", "rakuten_tw", "oliveyoung_global"]
+    },
+    {
+      "id": "fashion_sports",
+      "name": "服飾/鞋包/運動",
+      "defaultPriority": 88,
+      "keywords": ["衣服", "鞋", "包", "運動", "外套", "褲", "球鞋", "服飾"],
+      "platforms": ["uniqlo_tw", "nike_tw", "adidas_tw", "newbalance_tw", "lativ", "ob_design", "pazzo", "zara_tw", "gu_tw", "shopee", "momo", "yahoo_shopping", "rakuten_tw", "shein_tw"]
+    },
+    {
+      "id": "books_media_stationery",
+      "name": "書籍/文具/影音",
+      "defaultPriority": 85,
+      "keywords": ["書", "文具", "漫畫", "雜誌", "影音", "教材", "考試"],
+      "platforms": ["books", "eslite", "kingstone", "sanmin", "momo", "pchome_24h", "shopee"]
+    },
+    {
+      "id": "furniture_home",
+      "name": "家具/居家/寢具",
+      "defaultPriority": 86,
+      "keywords": ["家具", "椅子", "桌子", "床", "寢具", "收納", "居家", "沙發"],
+      "platforms": ["ikea_tw", "hola", "trplus", "momo", "pchome_24h", "shopee", "yahoo_shopping", "coupang"]
+    },
+    {
+      "id": "food_delivery_coupon",
+      "name": "餐飲/票券/團購/旅遊",
+      "defaultPriority": 80,
+      "keywords": ["餐券", "票券", "團購", "旅遊", "住宿", "美食", "外送"],
+      "platforms": ["gomaji", "kkday", "klook", "eztravel", "ibon", "opentix", "line_shopping"]
+    },
+    {
+      "id": "brand_official",
+      "name": "品牌官方/授權商城",
+      "defaultPriority": 115,
+      "keywords": ["官方", "官網", "授權", "品牌", "保固", "企業採購", "原廠"],
+      "platforms": ["asus_store", "acer_store", "apple_tw", "samsung_tw", "sony_store", "mi_tw", "dyson_tw", "lg_tw", "panasonic_tw", "philips_tw", "ikea_tw", "nike_tw", "adidas_tw", "uniqlo_tw"]
+    }
+  ],
+  "platforms": [
+    {"id": "shopee", "name": "蝦皮購物 Shopee", "url": "https://shopee.tw", "siteQuery": "site:shopee.tw", "kind": "marketplace", "aliases": ["蝦皮", "shopee", "shp.ee"], "strengths": ["市集", "長尾商品", "賣家現貨", "價格競爭"]},
+    {"id": "momo", "name": "momo 購物網", "url": "https://www.momoshop.com.tw", "siteQuery": "site:momoshop.com.tw", "kind": "b2c", "aliases": ["momo", "富邦momo", "momoshop"], "strengths": ["品牌百貨", "家電", "美妝", "日用品"]},
+    {"id": "pchome_24h", "name": "PChome 24h購物", "url": "https://24h.pchome.com.tw", "siteQuery": "site:24h.pchome.com.tw", "kind": "b2c", "aliases": ["pchome", "pchome24h", "24h"], "strengths": ["3C", "24h到貨", "電腦周邊"]},
+    {"id": "pchome_store", "name": "PChome 商店街", "url": "https://www.pcstore.com.tw", "siteQuery": "site:pcstore.com.tw OR site:shopping.pchome.com.tw", "kind": "marketplace", "aliases": ["商店街", "pcstore"], "strengths": ["中小商家", "長尾商品"]},
+    {"id": "yahoo_shopping", "name": "Yahoo 奇摩購物中心", "url": "https://tw.buy.yahoo.com", "siteQuery": "site:tw.buy.yahoo.com", "kind": "b2c", "aliases": ["yahoo購物", "奇摩購物", "yahoo shopping"], "strengths": ["綜合", "品牌", "家電"]},
+    {"id": "yahoo_auction", "name": "Yahoo 奇摩拍賣", "url": "https://tw.bid.yahoo.com", "siteQuery": "site:tw.bid.yahoo.com", "kind": "auction", "aliases": ["yahoo拍賣", "雅虎拍賣", "奇摩拍賣"], "strengths": ["拍賣", "二手", "賣家商品"]},
+    {"id": "ruten", "name": "露天拍賣/露天市集", "url": "https://www.ruten.com.tw", "siteQuery": "site:ruten.com.tw", "kind": "auction", "aliases": ["露天", "ruten"], "strengths": ["拍賣", "固定價", "長尾商品"]},
+    {"id": "coupang", "name": "酷澎 Coupang", "url": "https://www.coupang.com", "siteQuery": "site:coupang.com", "kind": "b2c", "aliases": ["酷澎", "coupang"], "strengths": ["火箭速配", "跨境", "日用品", "韓系商品"]},
+    {"id": "rakuten_tw", "name": "樂天市場 Rakuten Taiwan", "url": "https://www.rakuten.com.tw", "siteQuery": "site:rakuten.com.tw", "kind": "marketplace", "aliases": ["樂天", "rakuten"], "strengths": ["日本商品", "品牌店", "點數"]},
+    {"id": "books", "name": "博客來", "url": "https://www.books.com.tw", "siteQuery": "site:books.com.tw", "kind": "b2c", "aliases": ["博客來", "books"], "strengths": ["書籍", "文具", "影音", "生活品"]},
+    {"id": "etmall", "name": "東森購物 ETMall", "url": "https://www.etmall.com.tw", "siteQuery": "site:etmall.com.tw", "kind": "b2c", "aliases": ["東森", "etmall"], "strengths": ["電視購物", "家電", "量販"]},
+    {"id": "umall", "name": "森森購物 U-mall", "url": "https://www.u-mall.com.tw", "siteQuery": "site:u-mall.com.tw", "kind": "b2c", "aliases": ["森森", "umall", "u-mall"], "strengths": ["電視購物", "生活品"]},
+    {"id": "friday", "name": "friDay購物", "url": "https://shopping.friday.tw", "siteQuery": "site:shopping.friday.tw", "kind": "b2c", "aliases": ["friday", "friDay購物"], "strengths": ["綜合", "電信通路"]},
+    {"id": "buy123", "name": "生活市集", "url": "https://www.buy123.com.tw", "siteQuery": "site:buy123.com.tw", "kind": "b2c", "aliases": ["生活市集", "buy123"], "strengths": ["生活用品", "團購"]},
+    {"id": "pcone", "name": "松果購物", "url": "https://www.pcone.com.tw", "siteQuery": "site:pcone.com.tw", "kind": "marketplace", "aliases": ["松果", "pcone"], "strengths": ["生活品", "賣家商品"]},
+    {"id": "711_shop", "name": "7-ELEVEN 線上購物", "url": "https://www.7-11.com.tw", "siteQuery": "site:7-11.com.tw", "kind": "retail", "aliases": ["7-11", "711", "open point", "ibon"], "strengths": ["超商", "取貨", "票券"]},
+    {"id": "line_shopping", "name": "LINE購物", "url": "https://buy.line.me", "siteQuery": "site:buy.line.me", "kind": "shopping_portal", "aliases": ["line購物", "LINE購物"], "strengths": ["導購", "點數", "歷史價格"]},
+    {"id": "biggo", "name": "BigGo 比價", "url": "https://biggo.com.tw", "siteQuery": "site:biggo.com.tw", "kind": "price_compare", "aliases": ["biggo", "比價"], "strengths": ["比價", "跨平台"]},
+    {"id": "ezprice", "name": "EZprice 比價網", "url": "https://ezprice.com.tw", "siteQuery": "site:ezprice.com.tw", "kind": "price_compare", "aliases": ["ezprice", "找便宜"], "strengths": ["比價", "跨平台"]},
+    {"id": "findprice", "name": "FindPrice 價格網", "url": "https://www.findprice.com.tw", "siteQuery": "site:findprice.com.tw", "kind": "price_compare", "aliases": ["findprice", "價格網"], "strengths": ["比價"]},
+    {"id": "asus_store", "name": "ASUS 華碩官方商城", "url": "https://www.asus.com/tw/store/", "siteQuery": "site:asus.com/tw/store OR site:asus.com/tw", "kind": "brand_official", "aliases": ["asus", "華碩", "rog"], "strengths": ["官方", "筆電", "桌機", "零組件", "保固"]},
+    {"id": "acer_store", "name": "Acer 宏碁官方商城", "url": "https://store.acer.com/zh-tw", "siteQuery": "site:store.acer.com/zh-tw OR site:acer.com/tw", "kind": "brand_official", "aliases": ["acer", "宏碁"], "strengths": ["官方", "筆電", "桌機"]},
+    {"id": "apple_tw", "name": "Apple 台灣官方", "url": "https://www.apple.com/tw/store", "siteQuery": "site:apple.com/tw", "kind": "brand_official", "aliases": ["apple", "蘋果", "iphone", "macbook"], "strengths": ["官方", "手機", "電腦"]},
+    {"id": "samsung_tw", "name": "Samsung 台灣官方商城", "url": "https://www.samsung.com/tw", "siteQuery": "site:samsung.com/tw", "kind": "brand_official", "aliases": ["samsung", "三星"], "strengths": ["官方", "手機", "電視", "家電"]},
+    {"id": "sony_store", "name": "Sony Store Taiwan", "url": "https://store.sony.com.tw", "siteQuery": "site:store.sony.com.tw", "kind": "brand_official", "aliases": ["sony", "索尼"], "strengths": ["官方", "相機", "影音", "電視"]},
+    {"id": "mi_tw", "name": "小米台灣官網", "url": "https://www.mi.com/tw", "siteQuery": "site:mi.com/tw", "kind": "brand_official", "aliases": ["小米", "xiaomi", "mi"], "strengths": ["手機", "IoT", "家電"]},
+    {"id": "logitech_tw", "name": "Logitech 羅技台灣", "url": "https://www.logitech.com/zh-tw", "siteQuery": "site:logitech.com/zh-tw", "kind": "brand_official", "aliases": ["logitech", "羅技"], "strengths": ["滑鼠", "鍵盤", "視訊"]},
+    {"id": "coolpc", "name": "原價屋 CoolPC", "url": "https://www.coolpc.com.tw", "siteQuery": "site:coolpc.com.tw", "kind": "computer_store", "aliases": ["原價屋", "coolpc"], "strengths": ["零組件", "電腦組裝", "報價"]},
+    {"id": "autobuy", "name": "欣亞數位 Autobuy", "url": "https://www.autobuy.tw", "siteQuery": "site:autobuy.tw", "kind": "computer_store", "aliases": ["欣亞", "autobuy"], "strengths": ["零組件", "電腦"]},
+    {"id": "sinya", "name": "欣亞線上購物", "url": "https://www.sinya.com.tw", "siteQuery": "site:sinya.com.tw", "kind": "computer_store", "aliases": ["欣亞", "sinya"], "strengths": ["3C", "零組件"]},
+    {"id": "liangxing", "name": "良興 EcLife", "url": "https://www.eclife.com.tw", "siteQuery": "site:eclife.com.tw", "kind": "computer_store", "aliases": ["良興", "eclife"], "strengths": ["3C", "周邊"]},
+    {"id": "tk3c", "name": "燦坤3C", "url": "https://www.tk3c.com.tw", "siteQuery": "site:tk3c.com.tw", "kind": "electronics_retail", "aliases": ["燦坤", "tk3c"], "strengths": ["3C", "家電", "門市"]},
+    {"id": "elife", "name": "全國電子", "url": "https://www.elifemall.com.tw", "siteQuery": "site:elifemall.com.tw", "kind": "electronics_retail", "aliases": ["全國電子", "elife"], "strengths": ["家電", "3C", "門市"]},
+    {"id": "senao", "name": "神腦生活", "url": "https://online.senao.com.tw", "siteQuery": "site:online.senao.com.tw", "kind": "electronics_retail", "aliases": ["神腦", "senao"], "strengths": ["手機", "電信", "3C"]},
+    {"id": "carrefour", "name": "家樂福線上購物", "url": "https://online.carrefour.com.tw", "siteQuery": "site:online.carrefour.com.tw", "kind": "hypermarket", "aliases": ["家樂福", "carrefour"], "strengths": ["量販", "食品", "日用品"]},
+    {"id": "pxgo", "name": "全聯 PXGo", "url": "https://pxgo.com.tw", "siteQuery": "site:pxgo.com.tw", "kind": "supermarket", "aliases": ["全聯", "pxgo"], "strengths": ["生鮮", "食品", "日用品"]},
+    {"id": "rt_mart", "name": "大潤發 RT-Mart", "url": "https://www.rt-mart.com.tw", "siteQuery": "site:rt-mart.com.tw", "kind": "hypermarket", "aliases": ["大潤發", "rtmart"], "strengths": ["量販", "日用品"]},
+    {"id": "costco", "name": "Costco 好市多台灣", "url": "https://www.costco.com.tw", "siteQuery": "site:costco.com.tw", "kind": "warehouse", "aliases": ["costco", "好市多"], "strengths": ["量販", "會員", "家電"]},
+    {"id": "watsons", "name": "屈臣氏 Watsons", "url": "https://www.watsons.com.tw", "siteQuery": "site:watsons.com.tw", "kind": "drugstore", "aliases": ["屈臣氏", "watsons"], "strengths": ["藥妝", "美妝", "保健"]},
+    {"id": "cosmed", "name": "康是美", "url": "https://shop.cosmed.com.tw", "siteQuery": "site:cosmed.com.tw", "kind": "drugstore", "aliases": ["康是美", "cosmed"], "strengths": ["藥妝", "美妝"]},
+    {"id": "poya", "name": "寶雅 POYA", "url": "https://www.poya.com.tw", "siteQuery": "site:poya.com.tw", "kind": "drugstore", "aliases": ["寶雅", "poya"], "strengths": ["美妝", "生活雜貨"]},
+    {"id": "uniqlo_tw", "name": "UNIQLO Taiwan", "url": "https://www.uniqlo.com/tw", "siteQuery": "site:uniqlo.com/tw", "kind": "brand_official", "aliases": ["uniqlo", "優衣庫"], "strengths": ["服飾", "官方"]},
+    {"id": "nike_tw", "name": "Nike 官方商店 Taiwan", "url": "https://www.nike.com/tw", "siteQuery": "site:nike.com/tw", "kind": "brand_official", "aliases": ["nike", "耐吉"], "strengths": ["鞋", "運動", "官方"]},
+    {"id": "adidas_tw", "name": "adidas Taiwan", "url": "https://www.adidas.com.tw", "siteQuery": "site:adidas.com.tw", "kind": "brand_official", "aliases": ["adidas", "愛迪達"], "strengths": ["鞋", "運動", "官方"]},
+    {"id": "lativ", "name": "lativ", "url": "https://www.lativ.com.tw", "siteQuery": "site:lativ.com.tw", "kind": "fashion", "aliases": ["lativ"], "strengths": ["平價服飾"]},
+    {"id": "ob_design", "name": "OB嚴選", "url": "https://www.obdesign.com.tw", "siteQuery": "site:obdesign.com.tw", "kind": "fashion", "aliases": ["ob嚴選", "obdesign"], "strengths": ["服飾"]},
+    {"id": "pazzo", "name": "PAZZO", "url": "https://www.pazzo.com.tw", "siteQuery": "site:pazzo.com.tw", "kind": "fashion", "aliases": ["pazzo"], "strengths": ["服飾"]},
+    {"id": "zara_tw", "name": "ZARA Taiwan", "url": "https://www.zara.com/tw", "siteQuery": "site:zara.com/tw", "kind": "brand_official", "aliases": ["zara"], "strengths": ["服飾", "官方"]},
+    {"id": "ikea_tw", "name": "IKEA Taiwan", "url": "https://www.ikea.com.tw", "siteQuery": "site:ikea.com.tw", "kind": "brand_official", "aliases": ["ikea", "宜家"], "strengths": ["家具", "居家"]},
+    {"id": "hola", "name": "HOLA 特力和樂", "url": "https://www.hola.com.tw", "siteQuery": "site:hola.com.tw", "kind": "home", "aliases": ["hola", "和樂"], "strengths": ["居家", "寢具"]},
+    {"id": "trplus", "name": "特力屋/特力家購物網", "url": "https://www.trplus.com.tw", "siteQuery": "site:trplus.com.tw", "kind": "home", "aliases": ["特力屋", "trplus"], "strengths": ["居家修繕", "家具"]},
+    {"id": "eslite", "name": "誠品線上", "url": "https://www.eslite.com", "siteQuery": "site:eslite.com", "kind": "books_lifestyle", "aliases": ["誠品", "eslite"], "strengths": ["書籍", "文具", "生活"]},
+    {"id": "kingstone", "name": "金石堂", "url": "https://www.kingstone.com.tw", "siteQuery": "site:kingstone.com.tw", "kind": "books", "aliases": ["金石堂", "kingstone"], "strengths": ["書籍"]},
+    {"id": "sanmin", "name": "三民網路書店", "url": "https://www.sanmin.com.tw", "siteQuery": "site:sanmin.com.tw", "kind": "books", "aliases": ["三民", "sanmin"], "strengths": ["書籍", "教材"]},
+    {"id": "gomaji", "name": "GOMAJI", "url": "https://www.gomaji.com", "siteQuery": "site:gomaji.com", "kind": "coupon", "aliases": ["gomaji"], "strengths": ["餐券", "團購", "生活服務"]},
+    {"id": "kkday", "name": "KKday", "url": "https://www.kkday.com/zh-tw", "siteQuery": "site:kkday.com/zh-tw", "kind": "travel", "aliases": ["kkday"], "strengths": ["旅遊", "票券"]},
+    {"id": "klook", "name": "Klook", "url": "https://www.klook.com/zh-TW", "siteQuery": "site:klook.com/zh-TW", "kind": "travel", "aliases": ["klook"], "strengths": ["旅遊", "票券"]},
+    {"id": "ibon", "name": "ibon 售票/購物", "url": "https://www.ibon.com.tw", "siteQuery": "site:ibon.com.tw", "kind": "ticket", "aliases": ["ibon"], "strengths": ["票券", "超商"]},
+    {"id": "dyson_tw", "name": "Dyson Taiwan", "url": "https://www.dyson.tw", "siteQuery": "site:dyson.tw", "kind": "brand_official", "aliases": ["dyson", "戴森"], "strengths": ["官方", "家電"]},
+    {"id": "lg_tw", "name": "LG Taiwan", "url": "https://www.lg.com/tw", "siteQuery": "site:lg.com/tw", "kind": "brand_official", "aliases": ["lg"], "strengths": ["官方", "家電", "電視"]},
+    {"id": "panasonic_tw", "name": "Panasonic Taiwan", "url": "https://www.panasonic.com/tw", "siteQuery": "site:panasonic.com/tw", "kind": "brand_official", "aliases": ["panasonic", "國際牌"], "strengths": ["官方", "家電"]},
+    {"id": "philips_tw", "name": "Philips Taiwan", "url": "https://www.philips.com.tw", "siteQuery": "site:philips.com.tw", "kind": "brand_official", "aliases": ["philips", "飛利浦"], "strengths": ["官方", "家電", "健康"]},
+    {"id": "taobao", "name": "淘寶/天貓跨境", "url": "https://www.taobao.com", "siteQuery": "site:taobao.com OR site:tmall.com", "kind": "cross_border", "aliases": ["淘寶", "天貓", "taobao", "tmall"], "strengths": ["跨境", "低價", "長尾"]},
+    {"id": "amazon_jp", "name": "Amazon Japan", "url": "https://www.amazon.co.jp", "siteQuery": "site:amazon.co.jp", "kind": "cross_border", "aliases": ["amazon jp", "日本亞馬遜"], "strengths": ["跨境", "日本商品"]},
+    {"id": "shein_tw", "name": "SHEIN", "url": "https://tw.shein.com", "siteQuery": "site:tw.shein.com", "kind": "fashion_cross_border", "aliases": ["shein"], "strengths": ["服飾", "跨境"]}
+  ]
+}

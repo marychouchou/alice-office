@@ -31,8 +31,10 @@ packages = ["src/alice_office_router"]
 line-length = 100
 target-version = "py312"
 # data/ holds runtime state mounted into per-room Hermes containers (bundled
-# skill scripts etc.) — not project source.
-extend-exclude = ["data"]
+# skill scripts etc.) — not project source. plugins/ is Hermes plugin code
+# ported from alice-tools-pack and kept intentionally close to its upstream
+# form (runs inside Hermes containers, not part of the router package).
+extend-exclude = ["data", "plugins"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,72 @@
+# Derivative Hermes Agent image with local-tools + secretary-mcp dependencies
+# pre-installed.
+#
+# Plugin SOURCE CODE is NOT baked in — it's volume-mounted at runtime from
+# the repo's plugins/ directory (see docker-compose.yml HOST_PLUGINS_DIR).
+# This separation lets you update plugin code by simply restarting containers,
+# without rebuilding the image. Only rebuild when Python/Node DEPENDENCIES
+# change.
+#
+# secretary-mcp source IS baked in (under /opt/secretary-mcp/) because it is
+# an MCP server, not a Hermes plugin — Hermes connects to it via mcp_servers
+# in config.yaml. Its node_modules are also baked in so container startup
+# doesn't pay the npm install cost.
+#
+# Usage:
+#   docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
+#   # then in .env:
+#   HERMES_IMAGE=alice-hermes-agent:v1
+#
+# Rebase on Hermes upgrade:
+#   1. Update HERMES_BASE below (or pass --build-arg HERMES_BASE=...)
+#   2. docker build -f Dockerfile.hermes -t alice-hermes-agent:v2 .
+
+ARG HERMES_BASE=nousresearch/hermes-agent
+FROM ${HERMES_BASE}
+
+# Pin geckodriver to a known-good release. Bump when firefox-esr moves.
+# https://github.com/mozilla/geckodriver/releases
+ARG GECKODRIVER_VERSION=v0.36.0
+
+# ── System packages ────────────────────────────────────────────────────────
+# firefox-esr  — webdriver tool's Selenium browser
+# The Hermes base image is Debian-based and already has apt + curl.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        firefox-esr \
+        ca-certificates \
+        tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL \
+        "https://github.com/mozilla/geckodriver/releases/download/${GECKODRIVER_VERSION}/geckodriver-${GECKODRIVER_VERSION}-linux64.tar.gz" \
+        | tar -xz -C /usr/local/bin/ \
+    && chmod +x /usr/local/bin/geckodriver \
+    && geckodriver --version
+
+# ── Python packages (into Hermes's venv) ───────────────────────────────────
+# sympy    — math tool (engineering calculator)
+# pymupdf  — image_ocr tool (PDF page extraction)
+# pyyaml   — plugin layer (tools.py reads config.yaml); likely already
+#             present in Hermes, but included for safety.
+# selenium — webdriver tool (Firefox remote driver)
+#
+# Hermes uses uv (not pip) and keeps Python in /opt/hermes/.venv.
+# We install into that venv so plugin scripts (run via sys.executable)
+# can import these packages.
+RUN /usr/local/bin/uv pip install \
+    --python /opt/hermes/.venv/bin/python3 \
+    --no-cache-dir \
+    sympy pymupdf pyyaml selenium
+
+# ── secretary-mcp MCP server ───────────────────────────────────────────────
+# Node.js is already in the Hermes base image (v22 for browser automation).
+# We bake the secretary-mcp source + node_modules into /opt/secretary-mcp/
+# so every Hermes container can spawn it without re-installing at runtime.
+# Container's generated config.yaml points mcp_servers.secretary at this path.
+COPY secretary-mcp/ /opt/secretary-mcp/
+RUN cd /opt/secretary-mcp && npm install --omit=dev
+
+# Smoke-test: geckodriver + firefox + node + npm all on PATH, and secretary-mcp's
+# runtime deps (MCP SDK + zod) are installed under node_modules.
+RUN which geckodriver firefox node npm \
+    && test -d /opt/secretary-mcp/node_modules/@modelcontextprotocol/sdk \
+    && test -d /opt/secretary-mcp/node_modules/zod

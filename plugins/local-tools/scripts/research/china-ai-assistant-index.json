@@ -1,0 +1,230 @@
+{
+  "version": "2026-05-10",
+  "locale": "zh-Hant",
+  "purpose": "Offline research index for Alice/OpenClaw to compare China/mainland Chinese AI assistant, housekeeper, agent, secretary, smart-home and office-automation projects.",
+  "projects": [
+    {
+      "id": "cowagent",
+      "name": "CowAgent",
+      "type": "open_source",
+      "category": "personal_ai_assistant",
+      "urls": [
+        "https://github.com/zhayujie/CowAgent",
+        "https://cowagent.ai/"
+      ],
+      "aliases": ["chatgpt-on-wechat", "微信助手", "超级AI助理", "CowAgent"],
+      "capabilities": ["wechat", "feishu", "dingtalk", "wecom", "qq", "web", "skills", "long_term_memory", "knowledge_base", "image", "voice", "file"],
+      "why_it_matters_to_alice": "最接近中文圈私人秘書入口：多通道、Skills、長期記憶與多模態。適合參考 LINE/微信式訊息入口如何分流到技能與記憶。",
+      "alice_integration": {
+        "priority": "P0",
+        "use": "Study routing, channel adapters, image/file handling and memory policies; do not replace OpenClaw.",
+        "candidate_modules": ["line_gateway", "memory", "skill_router", "ocr"]
+      },
+      "risks": ["微信個人號自動化合規風險", "插件品質需逐一驗證"]
+    },
+    {
+      "id": "copaw",
+      "name": "CoPaw",
+      "type": "open_source",
+      "category": "personal_ai_assistant",
+      "urls": ["https://github.com/teambition/CoPaw"],
+      "aliases": ["CoPaw", "personal assistant", "AI assistant"],
+      "capabilities": ["dingtalk", "feishu", "qq", "discord", "imessage", "memory", "cron", "custom_skills", "desktop_files", "knowledge_base"],
+      "why_it_matters_to_alice": "它把排程、跨通道與自訂技能放在核心，適合 Alice 的辦公室秘書場景。",
+      "alice_integration": {
+        "priority": "P0",
+        "use": "Borrow the idea of first-class scheduled tasks and auto-loaded workspace skills.",
+        "candidate_modules": ["scheduler", "skill_router", "workspace_tools"]
+      },
+      "risks": ["需要確認授權與通道穩定性"]
+    },
+    {
+      "id": "hermes-agent",
+      "name": "Hermes Agent",
+      "type": "open_source_community",
+      "category": "self_improving_agent",
+      "urls": [
+        "https://hermes-agent.org.cn/",
+        "https://hermesagent.org.cn/",
+        "https://github.com/NousResearch/hermes-agent"
+      ],
+      "aliases": ["Hermes", "Hermes Agent", "自进化智能体", "长期记忆"],
+      "capabilities": ["gateway", "long_term_memory", "skill_generation", "scheduled_tasks", "sub_agents", "sandbox", "wechat", "wecom", "dingtalk", "feishu", "local_models"],
+      "why_it_matters_to_alice": "它的核心賣點是持久記憶、自動沉澱 Skills、子智能體與沙箱，剛好補 Alice 不能每次重開機的問題。",
+      "alice_integration": {
+        "priority": "P0",
+        "use": "Adopt memory-to-skill promotion: repeated user patterns should become deterministic skills/rules.",
+        "candidate_modules": ["memory", "skill_router", "job_queue", "sandbox"]
+      },
+      "risks": ["中文社群站點多，需以主 GitHub/官方文檔為準"]
+    },
+    {
+      "id": "chatclaw",
+      "name": "ChatClaw",
+      "type": "open_source",
+      "category": "local_desktop_assistant",
+      "urls": ["https://github.com/zhimaAi/ChatClaw"],
+      "aliases": ["ChatClaw", "OpenClaw 图形化", "本地知识库"],
+      "capabilities": ["desktop_app", "knowledge_base", "mcp", "skill_market", "scheduled_tasks", "sandbox"],
+      "why_it_matters_to_alice": "適合參考非工程師可用的本地知識庫與桌面管家包裝方式。",
+      "alice_integration": {
+        "priority": "P1",
+        "use": "Use as UX/reference for local knowledge base management and skill marketplace packaging.",
+        "candidate_modules": ["admin_ui", "knowledge_base", "skill_market"]
+      },
+      "risks": ["需實際讀 code 確認資料模型成熟度"]
+    },
+    {
+      "id": "openclaw-cn-community",
+      "name": "OpenClaw 中文社群與指南",
+      "type": "community",
+      "category": "openclaw_ecosystem",
+      "urls": [
+        "https://www.openclaw1.org/",
+        "https://www.openclaw-cn.net/",
+        "https://github.com/liyupi/openclaw-guide"
+      ],
+      "aliases": ["OpenClaw 中文", "小龙虾", "OpenClaw 指南", "ClawHub"],
+      "capabilities": ["skills", "community_guides", "deployment", "channels", "models", "sandbox"],
+      "why_it_matters_to_alice": "Alice 本身跑在 OpenClaw 底下，中文社群資料可以變成部署、Skill、通道與模型參考入口。",
+      "alice_integration": {
+        "priority": "P0",
+        "use": "Keep Alice docs and runtime aligned with OpenClaw skills and gateway patterns.",
+        "candidate_modules": ["docs", "skills", "deployment"]
+      },
+      "risks": ["社群內容品質不一，不能直接當正式規格"]
+    },
+    {
+      "id": "home-assistant",
+      "name": "Home Assistant",
+      "type": "open_source",
+      "category": "smart_home_housekeeper",
+      "urls": [
+        "https://github.com/home-assistant",
+        "https://www.home-assistants.cn/"
+      ],
+      "aliases": ["Home Assistant", "HA", "智能家居", "家庭助理"],
+      "capabilities": ["local_control", "iot", "automation", "dashboard", "device_integrations", "privacy"],
+      "why_it_matters_to_alice": "如果 Alice 要成為辦公室/家裡管家，HA 是最穩的設備控制與自動化底座。",
+      "alice_integration": {
+        "priority": "P1",
+        "use": "Expose HA via MCP/API and route device commands away from LLM when deterministic.",
+        "candidate_modules": ["home_automation", "mcp", "device_router"]
+      },
+      "risks": ["需要設備清單與權限控管", "控制實體設備需確認閘門"]
+    },
+    {
+      "id": "xiaozhi-ai",
+      "name": "小智 AI / ESP32 Voice Robot",
+      "type": "open_source_hardware",
+      "category": "voice_housekeeper",
+      "urls": [
+        "https://xiaozhi.dev/",
+        "https://github.com/mac8005/xiaozhi-mcp-ha"
+      ],
+      "aliases": ["小智", "小智AI", "ESP32", "MCP Home Assistant", "语音机器人"],
+      "capabilities": ["wake_word", "asr", "tts", "mcp", "iot", "home_assistant", "esp32", "voice"],
+      "why_it_matters_to_alice": "適合做 Alice 的低成本語音硬體入口，並透過 MCP 接 Home Assistant/IoT。",
+      "alice_integration": {
+        "priority": "P1",
+        "use": "Use as future voice endpoint; route spoken commands into Alice/OpenClaw and deterministic device tools.",
+        "candidate_modules": ["voice", "mcp", "home_automation"]
+      },
+      "risks": ["硬體與語音延遲需實測", "語音誤觸需安全確認"]
+    },
+    {
+      "id": "wecom-cli",
+      "name": "WeCom CLI / wecom-pro",
+      "type": "open_source_cli",
+      "category": "office_secretary_tool",
+      "urls": [
+        "https://github.com/WecomTeam/wecom-cli",
+        "https://github.com/Liangdi/wecom-pro"
+      ],
+      "aliases": ["企业微信 CLI", "wecom-cli", "wecom-pro", "企業微信", "WeCom"],
+      "capabilities": ["contacts", "todo", "meeting", "messages", "calendar", "documents", "smart_table", "agent_skills", "json_output"],
+      "why_it_matters_to_alice": "這種 CLI 最適合接給 Agent：輸入輸出穩定、JSON 化、可操作會議/日程/文件，比瀏覽器點擊可靠。",
+      "alice_integration": {
+        "priority": "P0",
+        "use": "Model Alice's deterministic office tools after this pattern: CLI first, browser fallback second.",
+        "candidate_modules": ["office_tools", "calendar", "documents", "todo"]
+      },
+      "risks": ["需要企業微信帳號與 API 權限", "台灣 LINE/Google Workspace 場景需對應本地工具"]
+    },
+    {
+      "id": "wanwu",
+      "name": "Wanwu 萬物智能體平台",
+      "type": "open_source_enterprise_platform",
+      "category": "enterprise_agent_platform",
+      "urls": ["https://github.com/UnicomAI/wanwu"],
+      "aliases": ["万物", "Wanwu", "联通", "Agent 平台"],
+      "capabilities": ["multi_tenant", "workflow", "rag", "model_management", "mcp", "web_search", "enterprise"],
+      "why_it_matters_to_alice": "企業級 workflow/RAG/模型管理可作為 Alice 變成公司秘書平台時的架構參照。",
+      "alice_integration": {
+        "priority": "P2",
+        "use": "Reference for future multi-tenant and enterprise knowledge-base architecture; do not import wholesale.",
+        "candidate_modules": ["multi_tenant", "workflow", "rag"]
+      },
+      "risks": ["平台很重，短期導入會拖慢 Alice"]
+    },
+    {
+      "id": "openjiuwen",
+      "name": "openJiuwen",
+      "type": "agent_platform",
+      "category": "event_driven_agent_platform",
+      "urls": ["https://openjiuwen.com/"],
+      "aliases": ["九问", "Jiuwen", "事件驱动", "多Agent"],
+      "capabilities": ["event_driven", "multi_agent", "interrupt", "resume", "state_management"],
+      "why_it_matters_to_alice": "它強調事件驅動、中斷、跳轉與恢復，這正是 Alice 長任務和多使用者時需要補的能力。",
+      "alice_integration": {
+        "priority": "P0",
+        "use": "Implement Alice job state machine: queued/running/waiting_confirmation/resumed/completed/failed.",
+        "candidate_modules": ["job_queue", "workflow", "line_gateway"]
+      },
+      "risks": ["需確認是否開源與可用範圍"]
+    },
+    {
+      "id": "coze",
+      "name": "Coze 扣子",
+      "type": "commercial_platform",
+      "category": "low_code_agent_platform",
+      "urls": ["https://www.coze.cn/"],
+      "aliases": ["扣子", "Coze", "工作流", "智能体平台"],
+      "capabilities": ["workflow", "plugins", "knowledge_base", "agent_market", "low_code"],
+      "why_it_matters_to_alice": "雖非開源，但適合觀察工作流、插件、知識庫、Agent 市場與非工程師配置體驗。",
+      "alice_integration": {
+        "priority": "P2",
+        "use": "Reference UX and workflow concepts only.",
+        "candidate_modules": ["admin_ui", "workflow", "skill_market"]
+      },
+      "risks": ["非自託管核心，不適合 Alice 的資料自主要求"]
+    },
+    {
+      "id": "camel-ai-cn",
+      "name": "CAMEL-AI 中文社群",
+      "type": "research_community",
+      "category": "multi_agent_research",
+      "urls": ["https://camel-ai.cn/"],
+      "aliases": ["CAMEL", "多智能体", "智能体扩展法则"],
+      "capabilities": ["multi_agent", "simulation", "data_generation", "agent_benchmark"],
+      "why_it_matters_to_alice": "偏研究，不是秘書產品，但可參考多 Agent 分工、評測和資料生成。",
+      "alice_integration": {
+        "priority": "P2",
+        "use": "Use for evaluation and multi-agent research, not as runtime dependency.",
+        "candidate_modules": ["evaluation", "multi_agent"]
+      },
+      "risks": ["不直接解決 Alice 的辦公室工作流"]
+    }
+  ],
+  "capability_to_alice_modules": {
+    "long_term_memory": ["scripts/memory/alice-long-term-memory.py", "OpenClaw memory bridge"],
+    "skills": ["OpenClaw skills", "Alice deterministic tool router"],
+    "job_queue": ["future alice_jobs worker", "LINE immediate reply + completion push"],
+    "browser": ["scripts/browser/alice-browser-task.py"],
+    "office_tools": ["calendar", "documents", "todo", "drive", "email"],
+    "home_automation": ["Home Assistant MCP/API bridge"],
+    "voice": ["future Xiaozhi/MCP voice endpoint"],
+    "workflow": ["future Alice checkpoint state machine"],
+    "rag": ["file map engine", "local law index", "drive summaries"]
+  }
+}

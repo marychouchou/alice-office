@@ -1,0 +1,63 @@
+{
+  "version": "2026.tw.v1",
+  "currency": "TWD",
+  "minimumWage": {
+    "monthly": 29500,
+    "hourly": 196,
+    "effectiveDate": "2026-01-01",
+    "source": "最低工資 115 年 1 月 1 日起月薪 29,500、時薪 196。實際仍以勞動部公告為準。"
+  },
+  "tax": {
+    "mealAllowanceMonthlyExemptCap": 3000,
+    "note": "伙食費免稅上限以年度稅法/解釋令設定為準；本參數可調整。"
+  },
+  "laborInsurance": {
+    "ordinaryAccidentRate": 0.115,
+    "employmentInsuranceRate": 0.01,
+    "employeeShare": 0.2,
+    "employerShare": 0.7,
+    "governmentShare": 0.1,
+    "salaryGrades": [29500, 31800, 33300, 34800, 36300, 38200, 40100, 42000, 43900, 45800],
+    "note": "115 年勞保普通事故保險費率實收 11.5%；就業保險 1%。投保薪資應覈實申報，不得以薪資拆分規避。"
+  },
+  "laborPension": {
+    "defaultEmployerRate": 0.06,
+    "wageGrades": [29500, 30300, 31800, 33300, 34800, 36300, 38200, 40100, 42000, 43900, 45800, 48200, 50600, 53000, 55400, 57800, 60800, 63800, 66800, 69800, 72800, 76500, 80200, 83900, 87600, 92100, 96600, 101100, 105600, 110100, 115500, 120900, 126300, 131700, 137100, 142500, 147900, 150000],
+    "note": "勞退月提繳工資分級表應隨年度更新。"
+  },
+  "nhi": {
+    "generalPremiumRate": 0.0517,
+    "supplementaryPremiumRate": 0.0211,
+    "employeeShareRatio": 0.3,
+    "averageDependents": 0.58,
+    "salaryGrades": [29500, 30300, 31800, 33300, 34800, 36300, 38200, 40100, 42000, 43900, 45800, 48200, 50600, 53000, 55400, 57800, 60800, 63800, 66800, 69800, 72800, 76500, 80200, 83900, 87600, 92100, 96600, 101100, 105600, 110100, 115500, 120900, 126300, 131700, 137100, 142500, 147900, 150000, 156400, 162800, 169200, 175600, 182000, 189500, 197000, 204500, 212000, 219500],
+    "note": "一般保費率、補充保費率與投保金額分級表應以健保署公告更新。"
+  },
+  "payrollPlans": {
+    "compliant_standard": {
+      "label": "正常合規版",
+      "description": "以月薪資總額/經常性薪資推定應申報投保級距，薪資明細透明列示。",
+      "mealAllowanceMode": "included_in_regular_wage",
+      "declaredSalaryPolicy": "computed_from_regular_wage",
+      "riskLevel": "low"
+    },
+    "tax_meal_allowance": {
+      "label": "伙食費稅務列示版",
+      "description": "伙食費列為獨立項，最多以免稅額度處理；投保級距仍以實質經常性薪資審核。",
+      "mealAllowanceMode": "tax_exempt_cap_then_taxable",
+      "declaredSalaryPolicy": "computed_from_regular_wage",
+      "riskLevel": "medium"
+    },
+    "declared_salary_review": {
+      "label": "申報級距審核版",
+      "description": "允許匯入既有申報投保薪資，但若低於依薪資組成推定之級距，會在 Excel 標紅與列入風險表。",
+      "mealAllowanceMode": "included_in_regular_wage",
+      "declaredSalaryPolicy": "use_employee_declared_with_audit",
+      "riskLevel": "high"
+    }
+  },
+  "rounding": {
+    "mode": "half_up",
+    "moneyDecimals": 0
+  }
+}

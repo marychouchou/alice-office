@@ -29,6 +29,24 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = ""
     LLM_API_KEY: str = ""
     LLM_MODEL: str = ""
+    # Optional: forwarded into each Hermes container so secretary-mcp's
+    # maps_search / maps_details tools can call Google Places API (New).
+    # Leave blank to disable maps tools (they return a config error when called).
+    GOOGLE_MAPS_API_KEY: str = ""
+    # Host-side path to the plugins directory. Used for Docker volume
+    # mounting into each Hermes container (mirrors HOST_DATA_DIR).
+    # In Docker mode, set this to the absolute host path (compose uses ${PWD}/plugins).
+    HOST_PLUGINS_DIR: Path = Path("plugins")
+    # Dev-only: host-side path to the secretary-mcp/ source directory. When
+    # set, server.mjs + tools/ are bind-mounted (read-only) over the copy
+    # baked into the Hermes image at /opt/secretary-mcp/, so source edits
+    # take effect on container restart without a rebuild. node_modules stays
+    # the image's baked-in copy (not mounted). Leave blank in production —
+    # customer hosts won't have this repo's source tree available.
+    HOST_SECRETARY_MCP_DIR: str = ""
+    # Comma-separated plugin names written into every new room's config.yaml
+    # under plugins.enabled. These become default tools for all containers.
+    DEFAULT_PLUGINS: str = "local-tools"
 
 
 def get_settings() -> Settings:

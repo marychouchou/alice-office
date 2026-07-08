@@ -1,0 +1,5 @@
+employee_id,name,plan,base_salary,meal_allowance,other_recurring_allowance,bonus,dependents,declared_labor_insurance_salary,declared_nhi_salary,pension_rate
+E001,王小明,compliant_standard,42000,2400,3000,5000,0,,,0.06
+E002,林美玲,tax_meal_allowance,36000,3000,2000,0,1,,,0.06
+E003,陳志強,declared_salary_review,52000,3000,5000,8000,0,45800,45800,0.06
+E004,周雅婷,declared_salary_review,42000,6000,2000,0,2,36300,36300,0.06
