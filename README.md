@@ -138,6 +138,7 @@ cp .env.example .env
 LINE_CHANNEL_SECRET=dev-fake-secret        # 開發用假值即可，test_webhook.py 用它算簽章
 LINE_CHANNEL_ACCESS_TOKEN=dev-fake-token   # 同上——接真 LINE 驗收才需要真憑證
 ROUTER_IN_DOCKER=false                     # 開發用 host 模式；容器化部署才設 true
+DATA_DIR=/absolute/path/to/alice-office-router/data       # host 模式下必填，見下方註解
 HOST_DATA_DIR=/absolute/path/to/alice-office-router/data
 HOST_PLUGINS_DIR=/absolute/path/to/alice-office-router/plugins
 HOST_SECRETARY_MCP_DIR=/absolute/path/to/alice-office-router/secretary-mcp  # 要改 MCP 才需要
@@ -149,6 +150,12 @@ LLM_MODEL=change-me
 ```
 
 > `HOST_*` 必須是**宿主機**的絕對路徑，Docker 掛載 volume 時需要用到。
+> `DATA_DIR` 預設是 `/app/data`（給 router 自己也跑在容器裡的部署模式用）——**host 模式
+> （`uv run fastapi dev`）下必須另外覆寫成跟 `HOST_DATA_DIR` 一樣的絕對路徑**，因為
+> router 進程會直接在宿主機上對這個路徑做 `mkdir`／寫 `config.yaml`；沒設的話會拿預設值
+> `/app/data`，在 macOS／Linux host 上通常不存在也不可寫，會在建立房間時整個失敗，
+> 且錯誤只會出現在 router 自己的 terminal（背景任務吞掉例外），對 `test_webhook.py` 呼叫方
+> 看起來像是「container 一直不存在」而非明確報錯。
 > `HERMES_API_SERVER_KEY` 是 router 與每個 Hermes 容器共用的密鑰。
 > `LLM_*` 是共用的 LLM 後端設定，會自動寫入每個新房間的 `config.yaml`。
 
@@ -405,6 +412,12 @@ uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
   先 `docker network create hermes_global_net`。
 - **host 模式連 Hermes 容器 timeout**：忘了把 `ROUTER_IN_DOCKER` 設 `false`，
   router 在用容器名連線，host 上解析不到。
+- **`test_webhook.py` 一直回報「Container 不存在」，router 回應卻是 200**：先看 router
+  自己的 terminal（不是 container log）——`_process_and_reply` 對容器編排失敗只會
+  log、不會讓 `/webhook` 的回應變成非 200，所以 `test_webhook.py` 看不到真正的錯誤。
+  最常見原因是 host 模式下沒設 `DATA_DIR`：預設值 `/app/data` 在宿主機上通常不存在也
+  不可寫，log 會看到 `[Errno 30] Read-only file system: '/app'`；解法是把 `DATA_DIR`
+  設成跟 `HOST_DATA_DIR` 一樣的絕對路徑（見上方環境變數說明）。
 - **第一次訊息很久才回**：Hermes 容器首次啟動要 30–60 秒（s6 + skill sync）屬正常；
   慢機器上 `_wait_until_ready` 的 60 秒 timeout 偶爾不夠，可調 `container_manager.py`。
 - **改了掛載來源的 symlink 沒生效**：Docker bind mount 在**建容器時**就把 symlink
@@ -476,7 +489,7 @@ alice-office-router/
 | `LINE_CHANNEL_ACCESS_TOKEN` | ✅ | Router 自己用來呼叫 LINE Push Message API（不會傳入 Hermes 容器） |
 | `HOST_DATA_DIR` | ✅ | 宿主機上 `data/` 的絕對路徑，用於 Docker Volume 掛載 |
 | `HERMES_API_SERVER_KEY` | ✅ | Router 與每個 Hermes 容器共用的 Bearer 密鑰（容器的 `api_server` platform 靠它啟用與驗證） |
-| `DATA_DIR` | | 容器內 data 目錄（預設 `/app/data`） |
+| `DATA_DIR` | ⚠️ | Router 進程自己讀寫房間資料夾（`mkdir`、寫 `config.yaml`）用的路徑，預設 `/app/data`。**Container 化部署免設**（router 自己也在容器裡，`/app/data` 就是掛載進來的路徑）；**host 模式（`ROUTER_IN_DOCKER=false`）必填**，要設成跟 `HOST_DATA_DIR` 一樣的絕對路徑，否則 router 會嘗試在宿主機上建立 `/app/data`（通常不存在也不可寫）而整個建房間失敗 |
 | `HERMES_IMAGE` | | Hermes Agent 映像（預設 `nousresearch/hermes-agent`，等同 `latest`——請改成 pin 版本 tag，如 `nousresearch/hermes-agent:v2026.4.16`） |
 | `HERMES_NETWORK` | | Docker 內網名稱（預設 `hermes_global_net`） |
 | `HERMES_INTERNAL_PORT` | | Hermes Agent `api_server` 監聽 Port（預設 `8642`） |
