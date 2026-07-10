@@ -501,6 +501,7 @@ alice-office-router/
 │   ├── test_router.py
 │   └── test_container_manager.py
 ├── src/hermes/                  # MCP / plugin 原始碼樣板（seed 進每個房間，見上方「C. Plugin / MCP」）
+│   ├── config.yaml.template     # 每個新房間 config.yaml 的樣板（_ensure_config_yaml 讀取後 .format() 填值）
 │   ├── mcp/
 │   │   ├── package.json         # 所有 MCP 共用依賴（烤進 image 的 /opt/node_modules）
 │   │   └── secretary/           # todo/meeting/translate/... MCP server（Node ESM stdio）

@@ -64,6 +64,33 @@ def _write_mcp_template(templates_dir: Path, name: str, manifest_yaml: str) -> P
     return mcp_dir
 
 
+def _write_config_template(templates_dir: Path) -> None:
+    """Write the config.yaml.format() template used by _ensure_config_yaml.
+
+    Mirrors src/hermes/config.yaml.template so tests exercise the same
+    placeholder shape without depending on the real repo file's content.
+
+    Args:
+        templates_dir: The HERMES_TEMPLATES_DIR root to write under.
+    """
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    (templates_dir / "config.yaml.template").write_text(
+        "model:\n"
+        "  default: {model}\n"
+        "  provider: custom\n"
+        "providers:\n"
+        "  custom:\n"
+        "    base_url: {base_url}\n"
+        "    key_env: LLM_API_KEY\n"
+        "    default_model: {model}\n"
+        "    models:\n"
+        "      - {model}\n"
+        "{plugins_section}\n"
+        "{mcp_section}\n",
+        encoding="utf-8",
+    )
+
+
 def _make_running_container(host_port: str = "54321") -> MagicMock:
     """Return a mock container that is running and has a published port.
 
@@ -259,11 +286,14 @@ def test_ensure_plugin_seed_copies_template(tmp_path: Path) -> None:
 
 def test_ensure_config_yaml_writes_provider_block(tmp_path: Path) -> None:
     """When no config.yaml exists yet, one is written with the shared LLM provider."""
+    templates_dir = tmp_path / "templates"
+    _write_config_template(templates_dir)
     settings = Settings(
         LINE_CHANNEL_SECRET="test_secret",
         LINE_CHANNEL_ACCESS_TOKEN="test_token",
         DATA_DIR=tmp_path,
         HOST_DATA_DIR=tmp_path,
+        HERMES_TEMPLATES_DIR=templates_dir,
         HERMES_API_SERVER_KEY="test_api_server_key",
         LLM_BASE_URL="https://spark2-vllm.dalue.co/v1",
         LLM_MODEL="qwen3-next",
@@ -278,6 +308,25 @@ def test_ensure_config_yaml_writes_provider_block(tmp_path: Path) -> None:
     assert "key_env: LLM_API_KEY" in written
 
 
+def test_ensure_config_yaml_skips_when_template_missing(tmp_path: Path) -> None:
+    """No config.yaml is written if config.yaml.template doesn't exist under HERMES_TEMPLATES_DIR."""
+    settings = Settings(
+        LINE_CHANNEL_SECRET="test_secret",
+        LINE_CHANNEL_ACCESS_TOKEN="test_token",
+        DATA_DIR=tmp_path,
+        HOST_DATA_DIR=tmp_path,
+        HERMES_TEMPLATES_DIR=tmp_path / "nonexistent_templates",
+        HERMES_API_SERVER_KEY="test_api_server_key",
+        LLM_BASE_URL="https://spark2-vllm.dalue.co/v1",
+        LLM_MODEL="qwen3-next",
+    )
+    (tmp_path / "room_AAA").mkdir()
+
+    _ensure_config_yaml("room_AAA", settings)
+
+    assert not (tmp_path / "room_AAA" / "config.yaml").exists()
+
+
 def test_ensure_config_yaml_writes_seeded_mcp(tmp_path: Path) -> None:
     """Every MCP seeded under the room's mcp/ dir gets an mcp_servers entry.
 
@@ -289,6 +338,7 @@ def test_ensure_config_yaml_writes_seeded_mcp(tmp_path: Path) -> None:
     - toolsets gets a mcp-<name> entry
     """
     templates_dir = tmp_path / "templates"
+    _write_config_template(templates_dir)
     _write_mcp_template(
         templates_dir,
         "secretary",
@@ -326,11 +376,14 @@ tools:
 
 def test_ensure_config_yaml_writes_default_plugins(tmp_path: Path) -> None:
     """The default plugins list is written into config.yaml under plugins.enabled."""
+    templates_dir = tmp_path / "templates"
+    _write_config_template(templates_dir)
     settings = Settings(
         LINE_CHANNEL_SECRET="test_secret",
         LINE_CHANNEL_ACCESS_TOKEN="test_token",
         DATA_DIR=tmp_path,
         HOST_DATA_DIR=tmp_path,
+        HERMES_TEMPLATES_DIR=templates_dir,
         HERMES_API_SERVER_KEY="test_api_server_key",
         LLM_BASE_URL="https://spark2-vllm.dalue.co/v1",
         LLM_MODEL="qwen3-next",

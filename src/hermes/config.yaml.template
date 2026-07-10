@@ -1,0 +1,15 @@
+model:
+  default: {model}
+  provider: custom
+providers:
+  custom:
+    base_url: {base_url}
+    key_env: LLM_API_KEY
+    default_model: {model}
+    models:
+      - {model}
+{plugins_section}
+{mcp_section}
+tools:
+  tool_search:
+    threshold_pct: 20

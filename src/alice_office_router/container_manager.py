@@ -287,23 +287,13 @@ def _format_mcp_section(room_id: str, config: Settings) -> str:
     return str(yaml.safe_dump(section, sort_keys=False, default_flow_style=False))
 
 
-_CONFIG_YAML_TEMPLATE = """\
-model:
-  default: {model}
-  provider: custom
-providers:
-  custom:
-    base_url: {base_url}
-    key_env: LLM_API_KEY
-    default_model: {model}
-    models:
-      - {model}
-{plugins_section}
-{mcp_section}
-tools:
-  tool_search:
-    threshold_pct: 20
-"""
+# Filename of the config.yaml template under HERMES_TEMPLATES_DIR (repo path:
+# src/hermes/config.yaml.template), alongside the mcp/ and plugin/ template
+# dirs. Unlike those, it isn't seeded verbatim — it's a str.format() template
+# with {model}/{base_url}/{plugins_section}/{mcp_section} placeholders filled
+# in at write time, since a room's actual values (LLM settings, which MCPs
+# got seeded) aren't known until then.
+_CONFIG_YAML_TEMPLATE_FILENAME = "config.yaml.template"
 
 
 def _ensure_config_yaml(room_id: str, config: Settings) -> None:
@@ -324,9 +314,13 @@ def _ensure_config_yaml(room_id: str, config: Settings) -> None:
     config_path = config.DATA_DIR / room_id / "config.yaml"
     if config_path.exists() or not config.LLM_BASE_URL or not config.LLM_MODEL:
         return
+    template_path = config.HERMES_TEMPLATES_DIR / _CONFIG_YAML_TEMPLATE_FILENAME
+    if not template_path.exists():
+        logger.error(f"Missing config.yaml template at {template_path}; skipping room [{room_id}]")
+        return
     plugins = [p.strip() for p in config.DEFAULT_PLUGINS.split(",") if p.strip()]
     config_path.write_text(
-        _CONFIG_YAML_TEMPLATE.format(
+        template_path.read_text(encoding="utf-8").format(
             model=config.LLM_MODEL,
             base_url=config.LLM_BASE_URL,
             plugins_section=_format_plugins_yaml(plugins),

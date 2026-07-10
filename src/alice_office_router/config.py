@@ -31,12 +31,14 @@ class Settings(BaseSettings):
     LLM_MODEL: str = ""
     # Router-local path (like DATA_DIR — the router's own filesystem view,
     # NOT a host path for Docker volume mounting) to this repo's src/hermes/
-    # directory, containing mcp/<name>/ and plugin/<name>/ source templates.
-    # _ensure_mcp_seed / _ensure_plugin_seed copy each template into a room's
+    # directory. Holds mcp/<name>/ and plugin/<name>/ source templates —
+    # _ensure_mcp_seed / _ensure_plugin_seed copy each one into a room's
     # data dir (data/<room_id>/mcp/<name>/, data/<room_id>/plugins/<name>/)
     # the first time that room's container is created, then never touch it
-    # again — the room's copy is the room's own to edit from then on. In
-    # Docker mode, docker-compose.yml mounts ./src/hermes here read-only.
+    # again — the room's copy is the room's own to edit from then on. Also
+    # holds config.yaml.template (see _ensure_config_yaml), which unlike
+    # those is a str.format() template rather than something copied verbatim.
+    # In Docker mode, docker-compose.yml mounts ./src/hermes here read-only.
     # Host-dev mode must point this at the repo's actual src/hermes path.
     HERMES_TEMPLATES_DIR: Path = Path("/app/hermes-templates")
     # Comma-separated plugin names written into every new room's config.yaml
