@@ -12,9 +12,9 @@ from httpx import ASGITransport, AsyncClient
 from alice_office_router.config import Settings
 
 # Unit tests must be hermetic: never read the developer's real .env, whose
-# optional keys (HOST_SECRETARY_MCP_DIR, GOOGLE_MAPS_API_KEY, …) would leak
-# into Settings() instances constructed by tests. Must run before test modules
-# import — module-level Settings (e.g. SETTINGS_IN_DOCKER) are built at import time.
+# optional keys (HERMES_TEMPLATES_DIR, …) would leak into Settings()
+# instances constructed by tests. Must run before test modules import —
+# module-level Settings (e.g. SETTINGS_IN_DOCKER) are built at import time.
 Settings.model_config["env_file"] = None
 
 from alice_office_router.main import app  # noqa: E402

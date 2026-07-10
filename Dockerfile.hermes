@@ -1,16 +1,16 @@
-# Derivative Hermes Agent image with local-tools + secretary-mcp dependencies
+# Derivative Hermes Agent image with plugin + MCP runtime dependencies
 # pre-installed.
 #
-# Plugin SOURCE CODE is NOT baked in — it's volume-mounted at runtime from
-# the repo's plugins/ directory (see docker-compose.yml HOST_PLUGINS_DIR).
-# This separation lets you update plugin code by simply restarting containers,
-# without rebuilding the image. Only rebuild when Python/Node DEPENDENCIES
-# change.
-#
-# secretary-mcp source IS baked in (under /opt/secretary-mcp/) because it is
-# an MCP server, not a Hermes plugin — Hermes connects to it via mcp_servers
-# in config.yaml. Its node_modules are also baked in so container startup
-# doesn't pay the npm install cost.
+# Plugin and MCP SOURCE CODE are NOT baked in — each room gets its own
+# writable copy, seeded once from src/hermes/plugin/<name>/ and
+# src/hermes/mcp/<name>/ into its data dir the first time its container is
+# created (see container_manager.py _ensure_plugin_seed / _ensure_mcp_seed),
+# so every room can independently edit its own copy. Only the shared
+# DEPENDENCIES those sources need are baked into this image — Python
+# packages into Hermes's venv (for plugins) and a shared node_modules (for
+# MCP servers, see the ESM note below) — so a room's first boot doesn't pay
+# an install cost, and rebuilding this image is only needed when
+# dependencies change, not when a room's plugin/MCP source does.
 #
 # Usage:
 #   docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
@@ -57,16 +57,24 @@ RUN /usr/local/bin/uv pip install \
     --no-cache-dir \
     sympy pymupdf pyyaml selenium
 
-# ── secretary-mcp MCP server ───────────────────────────────────────────────
+# ── Shared MCP runtime dependencies ────────────────────────────────────────
 # Node.js is already in the Hermes base image (v22 for browser automation).
-# We bake the secretary-mcp source + node_modules into /opt/secretary-mcp/
-# so every Hermes container can spawn it without re-installing at runtime.
-# Container's generated config.yaml points mcp_servers.secretary at this path.
-COPY secretary-mcp/ /opt/secretary-mcp/
-RUN cd /opt/secretary-mcp && npm install --omit=dev
+# Every MCP server template under src/hermes/mcp/<name>/ is ESM
+# ("type": "module") and bare-imports its deps (e.g. `import ... from
+# "@modelcontextprotocol/sdk/..."`) — ESM ignores NODE_PATH, so deps are
+# found only by walking node_modules up from the importing file. Each room's
+# seeded copy lives at /opt/data/mcp/<name>/server.mjs (that whole /opt/data
+# subtree is overlaid by the room's own bind mount), so we bake the shared
+# dependency set one level up, at /opt/node_modules — a path every room's
+# server.mjs will find via that walk-up, regardless of which room is mounted.
+# Keep src/hermes/mcp/package.json in sync with the union of every MCP
+# template's own package.json dependencies.
+COPY src/hermes/mcp/package.json /opt/package.json
+RUN cd /opt && npm install --omit=dev
 
-# Smoke-test: geckodriver + firefox + node + npm all on PATH, and secretary-mcp's
-# runtime deps (MCP SDK + zod) are installed under node_modules.
+# Smoke-test: geckodriver + firefox + node + npm all on PATH, and the shared
+# MCP runtime deps (MCP SDK + zod) are installed where ESM's node_modules
+# walk-up will find them.
 RUN which geckodriver firefox node npm \
-    && test -d /opt/secretary-mcp/node_modules/@modelcontextprotocol/sdk \
-    && test -d /opt/secretary-mcp/node_modules/zod
+    && test -d /opt/node_modules/@modelcontextprotocol/sdk \
+    && test -d /opt/node_modules/zod

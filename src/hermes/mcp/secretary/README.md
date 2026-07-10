@@ -81,14 +81,21 @@ secretary-mcp/
 | 變數 | 必填 | 說明 |
 |------|------|------|
 | `SECRETARY_LINE_USER_ID` | 是 | LINE user id（`U…`）—— 個人狀態的儲存鍵，也是 `line_*` 工具的預設收件對象 |
-| `GOOGLE_MAPS_API_KEY` | 是 | 已啟用 Places API（新版）的 Google Maps 金鑰；未設定時地圖工具會回設定錯誤 |
+| `GOOGLE_MAPS_API_KEY` | 否 | 已啟用 Places API（新版）的 Google Maps 金鑰；未設定時地圖工具會回設定錯誤，其他工具不受影響 |
 | `SECRETARY_LINE_CHANNEL_ACCESS_TOKEN` | 是 | LINE Messaging API 的 channel token；`line_*` 傳送工具需要 |
 | `SECRETARY_FILE_HOST_BASE_URL` | 是 | file-host 的公開網址（**不含** `/files` 後綴）；`line_send_media` / `line_send_file` 需要 |
 | `FILE_CACHE_DIR` | 否 | 暫存檔案的共用快取目錄。**必須和 file-host 服務設成同一個路徑。** 未設定時預設為 `~/.cache/secretary-mcp/file-cache`（或 `$XDG_CACHE_HOME/secretary-mcp/file-cache`） |
 | `HERMES_BIN` | 否 | `reminder_*` 用來呼叫的 hermes 執行檔路徑；未設定時依序找 `~/.local/bin/hermes` → PATH |
 
-> 慣例：像 `GOOGLE_MAPS_API_KEY`、`LINE_CHANNEL_ACCESS_TOKEN` 這類機密，請設在系統環境
-> （`~/.profile` / `~/.bashrc`），再於 `config.yaml` 用 `${VAR}` 參照，**不要**把明碼寫進 `config.yaml`。
+> 慣例：像 `GOOGLE_MAPS_API_KEY`、`LINE_CHANNEL_ACCESS_TOKEN` 這類機密，**不要**把明碼寫進
+> `config.yaml`。兩種設定方式都支援（`server.mjs` 啟動時用 Node 內建的
+> `process.loadEnvFile()` 讀本目錄的 `.env`，已存在的系統環境變數優先、不會被覆蓋）：
+> - **本目錄 `.env`**（建議）：複製 `.env.example` 成 `.env` 填值，`server.mjs` 自己讀，
+>   不用碰 `~/.hermes/config.yaml` 或 `~/.profile`。這個 repo 用 Docker 部署時（見根目錄
+>   README）就是走這條路——房間第一次建立時，router 會把這個目錄的 `.env.example` seed
+>   成該房間自己的 `data/<room_id>/mcp/secretary/.env`，每個房間可各自改自己的密鑰。
+> - **系統環境**（`~/.profile` / `~/.bashrc`）＋ `config.yaml` 用 `${VAR}` 參照：適合
+>   下面「首次安裝（在 VM 上）」這種沒有本 repo 原始碼、直接把 `secretary-mcp/` 複製上去的部署。
 
 ---
 
@@ -108,6 +115,8 @@ SECRETARY_LINE_USER_ID=你的LINE_USER_ID node server.mjs
 # 預期 stderr： [secretary-mcp] ready; lineUserId=你的LINE_USER_ID
 
 # 5. 把機密設進系統環境（不要寫進 config.yaml 的明碼）
+#    替代做法：改在 ~/secretary-mcp/.env 放 GOOGLE_MAPS_API_KEY=AIzaSy...，
+#    server.mjs 啟動時會自己讀，不用 export、也不用改 config.yaml 的 ${VAR}
 echo 'export GOOGLE_MAPS_API_KEY="AIzaSy..."' >> ~/.profile
 echo 'export LINE_CHANNEL_ACCESS_TOKEN="你的LINE_channel_token"' >> ~/.profile
 source ~/.profile
@@ -187,9 +196,10 @@ hermes -z "把這份 PDF /path/to/doc.pdf 用連結傳到 LINE"
 | 症狀 | 檢查方向 |
 |------|----------|
 | `hermes mcp list` 沒有出現 secretary | 看 `/tmp/hermes_gateway.log` 是否有 spawn 錯誤；確認 `args` 路徑正確；確認 `node -v` ≥ 18 |
+| Docker 部署下容器 log 出現 `MCP server 'secretary' ... Connection closed` / `Cannot find package '@modelcontextprotocol/sdk'` | 每個房間 seed 的只有 `server.mjs`／`tools`／`.env`（原始碼），依賴一律靠 ESM 從檔案位置往上找 `node_modules`、共用烤在 `/opt/node_modules`——如果 `HERMES_IMAGE` 還是原生 `nousresearch/hermes-agent`（沒 build 過 `Dockerfile.hermes` 衍生版），`/opt/node_modules` 根本不存在。用 `docker exec hermes_<room_id> node --version` 能跑但 `docker exec hermes_<room_id> ls /opt/node_modules` 找不到東西就是這個原因；照根目錄 README「Production 建法」build `Dockerfile.hermes` 並把 `.env` 的 `HERMES_IMAGE` 指過去即可 |
 | 工具有被呼叫但狀態檔沒寫入 | 確認 `~/.hermes/` 可寫入；目錄與檔案會自動建立 |
 | 模型都不呼叫這些工具 | 確認 `~/.hermes/config.yaml` 的 `toolsets` 有包含 `mcp-secretary` |
-| 地圖回 `GOOGLE_MAPS_API_KEY is not configured` | 在 `~/.profile` 設好環境變數，並重啟 hermes gateway 行程 |
+| 地圖回 `GOOGLE_MAPS_API_KEY is not configured` | 確認本目錄 `.env` 有這個值，或在 `~/.profile` 設好環境變數；改完都要重啟 hermes gateway 行程（Docker 部署則是 `docker restart hermes_<room_id>`） |
 | 地圖回 API error 403 | 金鑰沒有啟用 Places API（新版）；到 GCP Console → APIs & Services 啟用 Places API (New) |
 | 地圖回 API error 400 | 檢查 `X-Goog-FieldMask` 的欄位是否對；通常是混進了舊版 API 的欄位名 |
 | `line_*` 回 `SECRETARY_LINE_CHANNEL_ACCESS_TOKEN is not configured` | 設定 LINE channel token 環境變數並重啟 gateway |
@@ -203,8 +213,8 @@ hermes -z "把這份 PDF /path/to/doc.pdf 用連結傳到 LINE"
 
 1. **相依極少**：只要 Node ≥ 18 + `npm install`，沒有原生編譯、沒有資料庫。
 2. **狀態可攜**：待辦/出勤/費用都存在 `~/.hermes/secretary-*.json`，複製這幾個檔即可搬資料。
-3. **機密走環境變數**：`GOOGLE_MAPS_API_KEY`、`LINE_CHANNEL_ACCESS_TOKEN` 設在系統環境，
-   `config.yaml` 只用 `${VAR}` 參照，搬機器時重設環境即可。
+3. **機密不進 `config.yaml`**：搬 `.env`（複製 `.env.example` 建立，見上方「環境變數」）跟著
+   `server.mjs` 一起過去即可，不用改 `config.yaml`；或維持系統環境變數 + `${VAR}` 參照的舊做法。
 4. **file-host 要一起搬**：若用到 LINE 媒體/檔案，file-host 是獨立服務，需另外部署並公開一個
    HTTPS 網址；且 **file-host 與本專案 `line.mjs` 必須共用同一個 `FILE_CACHE_DIR`**。
 5. **時區固定**：`reminder` 的時鐘時間寫死為 Asia/Taipei（UTC+8），不受 MCP 主機時區影響。

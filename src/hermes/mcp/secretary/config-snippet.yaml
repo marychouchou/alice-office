@@ -15,9 +15,11 @@ mcp_servers:
       - /home/YOUR_USER/secretary-mcp/server.mjs
     env:
       SECRETARY_LINE_USER_ID: YOUR_LINE_USER_ID                      # e.g. U196d1445f7fe156eac44c02106f364ec
-      GOOGLE_MAPS_API_KEY: "${GOOGLE_MAPS_API_KEY}"                  # from system env; blank disables maps tools
       SECRETARY_LINE_CHANNEL_ACCESS_TOKEN: "${LINE_CHANNEL_ACCESS_TOKEN}"  # from system env; blank disables line_* tools
       SECRETARY_FILE_HOST_BASE_URL: "https://files.example.com"      # public URL of the file-host (no /files suffix)
+      # GOOGLE_MAPS_API_KEY is intentionally NOT set here — server.mjs loads
+      # it itself from a .env file next to server.mjs (see README.md
+      # "環境變數"). Drop a .env there instead of exporting it system-wide.
 
 # 3. agent：啟用 tool_use_enforcement、停用部分內建工具、調整 tool_search 門檻
 agent:

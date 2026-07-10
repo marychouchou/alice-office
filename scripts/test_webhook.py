@@ -35,6 +35,10 @@ Router 必須先啟動：
 [8] LLM 回應較慢時，延長等待時間（預設 8 秒）
     uv run python scripts/test_webhook.py --text "寫一首關於秋天的詩" --wait 20
 
+[8b] 第一次對全新房間送訊息常會撞到 client 端 ReadTimeout（建容器 + 等 Hermes
+     health check最多 60 秒，預設 --send-timeout 65 秒理論上夠用，仍嫌不夠可再調高）
+    uv run python scripts/test_webhook.py --user-id "U_NEW_ROOM" --send-timeout 120
+
 [9] 測試貼圖事件（驗證佔位文字轉換，不需要真實 LINE 媒體）
     uv run python scripts/test_webhook.py --sticker
 
@@ -89,6 +93,10 @@ import httpx
 ENV_FILE = Path(__file__).parent.parent / ".env"
 ROUTER_URL = "http://localhost:8000/webhook"
 WAIT_SECONDS = 8  # how long to wait for LLM to respond before checking logs
+# POST /webhook 本身的 client 端逾時。router 立刻回 200，但第一次對一個全新房間
+# 送訊息時，建容器 + 等 Hermes health check 最多可能到 60 秒（見 README），這條
+# 同步阻塞的路徑會延遲 event loop 把回應完整送出，所以這裡故意抓比 60 秒長一點。
+SEND_TIMEOUT_SECONDS = 65.0
 
 
 def load_env(path: Path) -> dict[str, str]:
@@ -350,12 +358,15 @@ def list_hermes_containers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def send_webhook(body: str, secret: str) -> tuple[int, str]:
+def send_webhook(
+    body: str, secret: str, timeout: float = SEND_TIMEOUT_SECONDS
+) -> tuple[int, str]:
     """POST a signed webhook body to the local router.
 
     Args:
         body: Raw JSON string to send.
         secret: LINE Channel Secret for signing.
+        timeout: Client-side read timeout in seconds.
 
     Returns:
         Tuple of (HTTP status code, response text).
@@ -369,7 +380,7 @@ def send_webhook(body: str, secret: str) -> tuple[int, str]:
                 "Content-Type": "application/json",
                 "x-line-signature": sig,
             },
-            timeout=10,
+            timeout=timeout,
         )
     return resp.status_code, resp.text
 
@@ -380,6 +391,7 @@ def run_test(
     room_id: str,
     label: str,
     wait: int = WAIT_SECONDS,
+    send_timeout: float = SEND_TIMEOUT_SECONDS,
 ) -> None:
     """Send one webhook and report results.
 
@@ -389,6 +401,7 @@ def run_test(
         room_id: Expected room_id (for container lookup).
         label: Test label shown in output.
         wait: Seconds to wait before checking logs.
+        send_timeout: Client-side read timeout for the POST /webhook call.
     """
     print(f"\n{'=' * 60}")
     print(f"  {label}")
@@ -398,10 +411,19 @@ def run_test(
 
     # Send
     try:
-        status, text = send_webhook(body, secret)
+        status, text = send_webhook(body, secret, timeout=send_timeout)
     except httpx.ConnectError:
         print("\n  [ERROR] Router に接続できません。サーバーが起動していますか？")
         print("  → uv run uvicorn alice_office_router.main:app --host 0.0.0.0 --port 8000")
+        return
+    except httpx.ReadTimeout:
+        print(f"\n  [ERROR] {send_timeout:.0f} 秒內沒有收到 router 回應。")
+        print("  → 先看 router log（host 模式看 terminal，container 模式")
+        print("     `docker compose logs webhook_router`）：如果有看到")
+        print("     'POST /webhook' 200 與 '/v1/chat/completions' 200，代表其實")
+        print("     有處理成功，只是 client 端等太久——重送一次（房間容器已建立，")
+        print("     warm start）通常就會秒回。真的常態性 timeout 才需要調高")
+        print("     --send-timeout。")
         return
 
     print(f"\n  Router response : {status} {text}")
@@ -461,6 +483,13 @@ def build_args() -> argparse.Namespace:
     parser.add_argument("--user-id", default="U_LOCAL_TEST", help="模擬的 LINE userId")
     parser.add_argument("--group-id", default="", help="改用 groupId（設定後忽略 --user-id）")
     parser.add_argument("--wait", type=int, default=WAIT_SECONDS, help="等待 LLM 回應的秒數")
+    parser.add_argument(
+        "--send-timeout",
+        type=float,
+        default=SEND_TIMEOUT_SECONDS,
+        help=f"POST /webhook 的 client 端逾時秒數（預設 {SEND_TIMEOUT_SECONDS:.0f}，"
+        "蓋過房間第一次建容器的冷啟動時間）",
+    )
     parser.add_argument("--list-containers", action="store_true", help="列出所有 hermes 容器後離開")
     parser.add_argument("--ping", action="store_true", help="只發一個空 events ping 測 router 連線")
     parser.add_argument(
@@ -493,7 +522,7 @@ def main() -> None:
 
     if args.ping:
         body = make_verification_ping()
-        status, text = send_webhook(body, secret)
+        status, text = send_webhook(body, secret, timeout=args.send_timeout)
         print(f"Ping → {status} {text}")
         return
 
@@ -518,7 +547,7 @@ def main() -> None:
         room_id = args.user_id
         label = f"User 訊息測試（userId={args.user_id}）"
 
-    run_test(secret, body, room_id, label, wait=args.wait)
+    run_test(secret, body, room_id, label, wait=args.wait, send_timeout=args.send_timeout)
 
 
 if __name__ == "__main__":

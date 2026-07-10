@@ -1,12 +1,13 @@
-"""Watch plugins/ and secretary-mcp/ source for changes, auto-restart on save.
+"""Watch a room's seeded mcp/plugins source for changes, auto-restart on save.
 
 存檔後自動 `docker restart hermes_<room_id>`，取代手動輸入 restart 指令。
-只監看實際會被 bind-mount 進容器的路徑（照 container_manager.py 的掛載規則）：
 
-- `HOST_PLUGINS_DIR`：一定監看（plugins 本來就是 hot-mount）
-- `HOST_SECRETARY_MCP_DIR/server.mjs` + `.../tools/`：只有 `.env` 有設
-  `HOST_SECRETARY_MCP_DIR` 才監看（沒設就代表容器內吃的是 image 烤好的版本，
-  改本機檔案不會反映，監看也沒意義）
+MCP／plugin 原始碼不再是共用的 repo-level bind mount：每個房間第一次建立
+container 時，會各自從 src/hermes/{mcp,plugin}/ seed 出一份自己的、可自由編輯
+的副本，放在 data/<room_id>/{mcp,plugins}/ 底下（見 container_manager.py 的
+_ensure_mcp_seed / _ensure_plugin_seed）。所以要監看的是**這個房間自己的
+seed 副本**，不是 repo 裡的樣板——改 repo 樣板不會影響已建立的房間（write-once
+/ frozen），只有改房間自己 data/ 底下那份才會在 restart 後生效。
 
 前置條件
 --------
@@ -54,27 +55,24 @@ def load_env(path: Path) -> dict[str, str]:
     return result
 
 
-def resolve_watch_paths(env: dict[str, str]) -> list[Path]:
-    """Determine which paths are actually bind-mounted into the room's container.
+def resolve_watch_paths(env: dict[str, str], room_id: str) -> list[Path]:
+    """Determine the room's own seeded mcp/plugins directories to watch.
 
-    Mirrors container_manager._build_volume_config: plugins/ is always mounted;
-    secretary-mcp source is only mounted when HOST_SECRETARY_MCP_DIR is set.
+    Mirrors container_manager._ensure_mcp_seed / _ensure_plugin_seed's
+    destination paths: data/<room_id>/mcp/ and data/<room_id>/plugins/.
+    Neither exists until the room's container has been created at least
+    once (that's what seeds them) — see this module's docstring.
 
     Args:
         env: Parsed .env key/value pairs.
+        room_id: The room whose seeded source directories should be watched.
 
     Returns:
         List of existing paths to watch (missing paths are skipped).
     """
     repo_root = Path(__file__).parent.parent
-    plugins_dir = Path(env.get("HOST_PLUGINS_DIR") or (repo_root / "plugins"))
-    paths = [plugins_dir]
-
-    secretary_dir = env.get("HOST_SECRETARY_MCP_DIR", "").strip()
-    if secretary_dir:
-        paths.append(Path(secretary_dir) / "server.mjs")
-        paths.append(Path(secretary_dir) / "tools")
-
+    data_dir = Path(env.get("HOST_DATA_DIR") or (repo_root / "data")) / room_id
+    paths = [data_dir / "mcp", data_dir / "plugins"]
     return [p for p in paths if p.exists()]
 
 
@@ -145,7 +143,7 @@ def build_args() -> argparse.Namespace:
         Parsed argument namespace.
     """
     parser = argparse.ArgumentParser(
-        description="監看 plugins/secretary-mcp 原始碼，存檔自動 restart 指定房間的 hermes 容器"
+        description="監看指定房間已 seed 的 mcp/plugins 原始碼，存檔自動 restart 該房間的 hermes 容器"
     )
     parser.add_argument(
         "--room-id",
@@ -160,19 +158,20 @@ def main() -> None:
     """Entry point."""
     args = build_args()
     env = load_env(ENV_FILE)
-    paths = resolve_watch_paths(env)
+    paths = resolve_watch_paths(env, args.room_id)
 
     if not paths:
-        print("[ERROR] 找不到任何要監看的路徑，確認 .env 設定或路徑是否存在。")
+        print(
+            f"[ERROR] 找不到房間 {args.room_id} 已 seed 的 mcp/plugins 目錄。"
+            f"確認房間的 container 至少建立過一次"
+            f"（uv run python scripts/test_webhook.py --user-id {args.room_id}），"
+            f"或確認 .env 的 HOST_DATA_DIR 是否設對。"
+        )
         return
 
     print(f"監看房間: hermes_{args.room_id}")
     for p in paths:
         print(f"  - {p}")
-    if not env.get("HOST_SECRETARY_MCP_DIR", "").strip():
-        print(
-            "  [提示] 未設定 HOST_SECRETARY_MCP_DIR，secretary-mcp 修改不會被監看／不會反映到容器內。"
-        )
     # flush also covers the buffered banner lines above when stdout is a pipe.
     print("按 Ctrl+C 停止。\n", flush=True)
 

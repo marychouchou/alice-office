@@ -7,7 +7,11 @@ RUN pip install uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-COPY src/ ./src/
+# Only the router's own package — src/hermes/ (MCP/plugin templates seeded
+# into rooms at runtime, see docker-compose.yml's hermes-templates mount) is
+# irrelevant to the router image and would only bloat it / bust this layer's
+# cache on every unrelated template edit.
+COPY src/alice_office_router/ ./src/alice_office_router/
 RUN uv sync --frozen --no-dev
 
 # --no-sync: the venv is already fully synced at build time: starting the

@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 // secretary-mcp — an MCP server exposing secretary tools (todo, meeting,
 // translate) to an agent over stdio.
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerTodoTools } from "./tools/todo.mjs";
@@ -11,6 +13,25 @@ import { registerExpenseTools } from "./tools/expense.mjs";
 import { registerMapsTools } from "./tools/maps.mjs";
 import { registerLineTools } from "./tools/line.mjs";
 import { registerReminderTools } from "./tools/reminder.mjs";
+
+// Load secrets from a .env file sitting next to this script (not cwd — the
+// Hermes gateway spawns this process with an unpredictable cwd). Values
+// already present in process.env (e.g. injected by a host-mode VM install
+// via ~/.profile) take precedence; loadEnvFile never overwrites them.
+//
+// Any failure here is swallowed, not just missing-file (ENOENT): the router
+// always bind-mounts this path when HOST_SECRETARY_MCP_DIR is set (it can't
+// reliably check host-side existence from inside its own container — see
+// container_manager.py's _build_volume_config), so if the file was actually
+// absent on the host, Docker may have auto-vivified an empty directory here
+// instead (read fails with EISDIR, not ENOENT). Either way every secret
+// below already has an env-var fallback (empty string), so failing to load
+// this file must never crash the whole MCP server.
+try {
+  process.loadEnvFile(join(dirname(fileURLToPath(import.meta.url)), ".env"));
+} catch (err) {
+  console.error(`[secretary-mcp] no .env loaded (${err.code ?? err.message}); using process env only`);
+}
 
 // Single-tenant server: SECRETARY_LINE_USER_ID identifies the user that owns
 // per-user state (todos, attendance, expenses) and is the default file_send target.

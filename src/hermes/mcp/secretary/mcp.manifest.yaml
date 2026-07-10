@@ -1,0 +1,27 @@
+# Hermes mcp_servers registration for this MCP, read once by
+# alice_office_router.container_manager._format_mcp_section() when a room's
+# config.yaml is first written (see _ensure_mcp_seed / _ensure_config_yaml).
+# Not re-read afterward — config.yaml is the source of truth from then on,
+# and operators/rooms may hand-edit it freely.
+#
+# `{room_id}` in any string value is substituted with the room's chatroom id
+# before parsing. `args` are paths relative to this MCP's seeded directory
+# (data/<room_id>/mcp/secretary/) — the router prefixes them with the
+# in-container mount path.
+command: node
+args:
+  - server.mjs
+env:
+  # room_id doubles as the per-room state key for secretary-mcp's
+  # todo / attendance / expense tools (stored under ~/.hermes/secretary-*.json).
+  SECRETARY_LINE_USER_ID: "{room_id}"
+tools:
+  # LINE tools are disabled: the router owns all LINE communication.
+  # Reminder tools are disabled: they depend on line_send_message to deliver.
+  exclude:
+    - line_send_message
+    - line_send_media
+    - line_send_file
+    - reminder_set
+    - reminder_list
+    - reminder_cancel

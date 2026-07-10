@@ -3,14 +3,13 @@ services:
     build: .
     volumes:
       - ./data:/app/data
-      - ./plugins:/app/plugins
+      - ./src/hermes:/app/hermes-templates:ro
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
       - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
       - HOST_DATA_DIR=${PWD}/data
-      - HOST_PLUGINS_DIR=${PWD}/plugins
-      - HOST_SECRETARY_MCP_DIR=${HOST_SECRETARY_MCP_DIR:-}
+      - HERMES_TEMPLATES_DIR=/app/hermes-templates
       - HERMES_IMAGE=${HERMES_IMAGE}
       - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
       - LLM_BASE_URL=${LLM_BASE_URL}

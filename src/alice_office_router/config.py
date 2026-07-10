@@ -29,23 +29,19 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = ""
     LLM_API_KEY: str = ""
     LLM_MODEL: str = ""
-    # Optional: forwarded into each Hermes container so secretary-mcp's
-    # maps_search / maps_details tools can call Google Places API (New).
-    # Leave blank to disable maps tools (they return a config error when called).
-    GOOGLE_MAPS_API_KEY: str = ""
-    # Host-side path to the plugins directory. Used for Docker volume
-    # mounting into each Hermes container (mirrors HOST_DATA_DIR).
-    # In Docker mode, set this to the absolute host path (compose uses ${PWD}/plugins).
-    HOST_PLUGINS_DIR: Path = Path("plugins")
-    # Dev-only: host-side path to the secretary-mcp/ source directory. When
-    # set, server.mjs + tools/ are bind-mounted (read-only) over the copy
-    # baked into the Hermes image at /opt/secretary-mcp/, so source edits
-    # take effect on container restart without a rebuild. node_modules stays
-    # the image's baked-in copy (not mounted). Leave blank in production —
-    # customer hosts won't have this repo's source tree available.
-    HOST_SECRETARY_MCP_DIR: str = ""
+    # Router-local path (like DATA_DIR — the router's own filesystem view,
+    # NOT a host path for Docker volume mounting) to this repo's src/hermes/
+    # directory, containing mcp/<name>/ and plugin/<name>/ source templates.
+    # _ensure_mcp_seed / _ensure_plugin_seed copy each template into a room's
+    # data dir (data/<room_id>/mcp/<name>/, data/<room_id>/plugins/<name>/)
+    # the first time that room's container is created, then never touch it
+    # again — the room's copy is the room's own to edit from then on. In
+    # Docker mode, docker-compose.yml mounts ./src/hermes here read-only.
+    # Host-dev mode must point this at the repo's actual src/hermes path.
+    HERMES_TEMPLATES_DIR: Path = Path("/app/hermes-templates")
     # Comma-separated plugin names written into every new room's config.yaml
     # under plugins.enabled. These become default tools for all containers.
+    # Names must match seeded plugin directory names under HERMES_TEMPLATES_DIR/plugin/.
     DEFAULT_PLUGINS: str = "local-tools"
 
 

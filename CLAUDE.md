@@ -16,6 +16,30 @@ LINE Platform → FastAPI Router → Container A
 
 → Container C
 
+## Hermes Container Model
+
+- 每個 LINE 聊天室對應一個獨立的 Hermes Agent container（`hermes_<room_id>`），由
+  `container_manager.py` 動態建立，不是寫死的固定 container。
+- **`/opt/data` = Hermes 的 `HERMES_HOME`**（官方環境變數，見
+  `NousResearch/hermes-agent` 的 `get_hermes_home()`）。每個房間的 `data/<room_id>/`
+  bind mount 到這裡（rw，每房間各自一份，容器間互不共用）。
+- **Hermes 自己的 `gateway run` 每次開機都會把這個目錄補完整**：`sessions/`、
+  `skills/`、`kanban.db`、`state.db`、`logs/`、各種 `.lock` 都是 Hermes 自己寫的，
+  不是這個 repo 寫的。`skills/` 每次開機會做 manifest-based sync（`.bundled_manifest`
+  記錄來源 hash），把 image 內建 skill 複製進來但跳過使用者已改過的——房間可以直接
+  編輯 `data/<room_id>/skills/<name>/SKILL.md` 客製化，不會被下次開機蓋掉。
+- 這個 repo 只負責 write-once 的初始化：`config.yaml`（`_ensure_config_yaml`）、
+  MCP／plugin 原始碼（`_ensure_mcp_seed` / `_ensure_plugin_seed`，從
+  `src/hermes/{mcp,plugin}/` seed 到 `data/<room_id>/{mcp,plugins}/`）——都只在房間
+  第一次建立時寫一次，之後永不覆蓋，讓房間可以自由編輯自己的副本；改 repo 樣板只影響
+  之後新建立的房間。除此之外 `data/<room_id>/` 底下其他所有東西都是 Hermes 執行期
+  自己長出來的。
+- **沒有熱載入**：改 `config.yaml`／skills／mcp／plugins 都要
+  `docker restart hermes_<room_id>` 才會生效。
+- MCP 是 Node ESM，依賴解析靠從檔案位置往上找 `node_modules`（ESM 不吃
+  `NODE_PATH`），所以共用依賴烤在 image 的 `/opt/node_modules`，不放進各房間自己的
+  `mcp/<name>/` 底下（見 `Dockerfile.hermes`）。
+
 ## Commands
 
 - `uv sync` — 安裝依賴

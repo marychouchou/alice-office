@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import socket
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import docker
 import docker.errors
 import docker.models.containers
 import httpx
+import yaml
 
 from alice_office_router.config import Settings
 
@@ -28,16 +31,28 @@ _READY_POLL_INTERVAL_SECONDS = 1.0
 # duplicating the string.
 CONTAINER_DATA_DIR = "/opt/data"
 
-# Bind path for the shared, repo-managed plugins directory. Mounted read-only
-# into every Hermes container so plugin source code is shared across rooms.
-# Room-specific plugin runtime data (SQLite DBs, caches, etc.) lives under
-# each room's writable CONTAINER_DATA_DIR (e.g. /opt/data/local-tools-data/).
+# Path (inside CONTAINER_DATA_DIR, so already covered by its rw bind mount —
+# no separate mount needed) where each room's own seeded copy of every
+# enabled plugin's source lives. Room-specific plugin runtime data (SQLite
+# DBs, caches, etc.) lives alongside it, e.g. /opt/data/local-tools-data/.
 CONTAINER_PLUGINS_DIR = f"{CONTAINER_DATA_DIR}/plugins"
 
-# Bind path for secretary-mcp inside the Hermes image (baked in by
-# Dockerfile.hermes). Dev mode overlays just server.mjs + tools/ here,
-# leaving the image's baked-in node_modules untouched.
-CONTAINER_SECRETARY_MCP_DIR = "/opt/secretary-mcp"
+# Path (also inside CONTAINER_DATA_DIR) where each room's own seeded copy of
+# every configured MCP server's source lives — see _ensure_mcp_seed. Node
+# ESM dependency resolution for these walks up from here to /opt/node_modules
+# (baked into the image by Dockerfile.hermes; NODE_PATH is ignored by ESM).
+CONTAINER_MCP_DIR = f"{CONTAINER_DATA_DIR}/mcp"
+
+# Filenames/patterns _seed_templates never copies from a template into a
+# room: node_modules/package-lock.json are shared via /opt/node_modules (see
+# CONTAINER_MCP_DIR) rather than duplicated per room; __pycache__/*.pyc are
+# build artifacts; .env is handled explicitly (seeded from .env.example, see
+# _seed_templates' seed_dotenv) rather than copied verbatim, since a real
+# .env sitting in a dev checkout of the template must never leak into a
+# room's seeded copy.
+_SEED_IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", ".env", "node_modules", "package-lock.json"
+)
 
 
 def _find_free_port() -> int:
@@ -63,6 +78,80 @@ def _ensure_data_dir(room_id: str, config: Settings) -> None:
     logger.info(f"Ensured data directory exists: {data_path}")
 
 
+def _seed_templates(templates_root: Path, dest_root: Path, *, seed_dotenv: bool) -> None:
+    """Copy each template subdirectory into dest_root, once per name.
+
+    Write-once: a name already present under dest_root is left completely
+    untouched, so a room's own edits to its seeded copy — or a room created
+    before a template was added/changed — never get silently overwritten.
+    Mirrors how _ensure_config_yaml treats config.yaml.
+
+    Args:
+        templates_root: Directory holding one subdirectory per template
+            (e.g. HERMES_TEMPLATES_DIR/mcp or HERMES_TEMPLATES_DIR/plugin).
+        dest_root: Room-local destination directory (e.g.
+            DATA_DIR/<room_id>/mcp or DATA_DIR/<room_id>/plugins).
+        seed_dotenv: When True, a template's .env.example (if present) is
+            also seeded as a sibling .env in the destination — for MCP
+            servers that load their own secrets from a .env file next to
+            their source.
+    """
+    if not templates_root.is_dir():
+        return
+    dest_root.mkdir(parents=True, exist_ok=True)
+    for template_dir in sorted(templates_root.iterdir()):
+        if not template_dir.is_dir():
+            continue
+        dest_dir = dest_root / template_dir.name
+        if dest_dir.exists():
+            continue
+        shutil.copytree(template_dir, dest_dir, ignore=_SEED_IGNORE)
+        if seed_dotenv:
+            env_example = dest_dir / ".env.example"
+            env_path = dest_dir / ".env"
+            if env_example.exists() and not env_path.exists():
+                shutil.copyfile(env_example, env_path)
+        logger.info(f"Seeded template [{template_dir.name}] into {dest_dir}")
+
+
+def _ensure_mcp_seed(room_id: str, config: Settings) -> None:
+    """Seed every MCP server template into a room's data dir, once.
+
+    After this runs, data/<room_id>/mcp/<name>/ is the room's own editable
+    copy of that MCP's source — the room may freely modify it (a container
+    restart is required for Hermes to pick up changes; it has no hot-reload).
+    Repo template updates never reach a room that already has a seeded copy.
+
+    Args:
+        room_id: Unique identifier for the chatroom.
+        config: Application settings containing the templates and data directories.
+    """
+    _seed_templates(
+        config.HERMES_TEMPLATES_DIR / "mcp",
+        config.DATA_DIR / room_id / "mcp",
+        seed_dotenv=True,
+    )
+
+
+def _ensure_plugin_seed(room_id: str, config: Settings) -> None:
+    """Seed every plugin template into a room's data dir, once.
+
+    Same write-once semantics as _ensure_mcp_seed. The plugin's own
+    executable dependencies (sympy, pymupdf, etc.) resolve via Hermes's
+    Python venv baked into the image, not anything seeded here — only the
+    plugin's own source (tools.py, scripts/, ...) is per-room.
+
+    Args:
+        room_id: Unique identifier for the chatroom.
+        config: Application settings containing the templates and data directories.
+    """
+    _seed_templates(
+        config.HERMES_TEMPLATES_DIR / "plugin",
+        config.DATA_DIR / room_id / "plugins",
+        seed_dotenv=False,
+    )
+
+
 def _build_container_env(config: Settings) -> dict[str, str]:
     """Build environment variable dict for a new Hermes agent container.
 
@@ -83,46 +172,30 @@ def _build_container_env(config: Settings) -> dict[str, str]:
     }
     if config.LLM_API_KEY:
         env["LLM_API_KEY"] = config.LLM_API_KEY
-    # Forwarded so secretary-mcp's maps_* tools can reach Google Places API.
-    # Hermes expands ${GOOGLE_MAPS_API_KEY} in config.yaml from the container env.
-    if config.GOOGLE_MAPS_API_KEY:
-        env["GOOGLE_MAPS_API_KEY"] = config.GOOGLE_MAPS_API_KEY
     return env
 
 
 def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, str]]:
     """Build Docker volume configuration for a room's container.
 
-    Mounts two volumes always:
-    1. The room's data directory (read-write, room-isolated).
-    2. The shared plugins directory (read-only, repo-managed source code).
-
-    When HOST_SECRETARY_MCP_DIR is set (dev only), server.mjs and tools/ are
-    additionally bind-mounted (read-only) over the copy baked into the Hermes
-    image, so MCP source edits take effect on container restart without an
-    image rebuild. node_modules stays the image's baked-in copy.
+    Mounts exactly one volume: the room's data directory (read-write,
+    room-isolated) at CONTAINER_DATA_DIR. Plugin and MCP server source used
+    to be separate shared, read-only mounts; both are now seeded once into
+    this same data directory instead (see _ensure_plugin_seed,
+    _ensure_mcp_seed), so each room can edit its own copy independently —
+    no extra mount is needed since they already live under the rw mount.
 
     Args:
         room_id: Unique identifier for the chatroom.
-        config: Application settings containing host data/plugins paths.
+        config: Application settings containing the host data path.
 
     Returns:
         Docker volumes mapping dict for use with containers.run().
     """
     host_data_path = str(config.HOST_DATA_DIR / room_id)
-    host_plugins_path = str(config.HOST_PLUGINS_DIR)
-    volumes = {
+    return {
         host_data_path: {"bind": CONTAINER_DATA_DIR, "mode": "rw"},
-        host_plugins_path: {"bind": CONTAINER_PLUGINS_DIR, "mode": "ro"},
     }
-    if config.HOST_SECRETARY_MCP_DIR:
-        secretary_dir = Path(config.HOST_SECRETARY_MCP_DIR)
-        for entry in ("server.mjs", "tools"):
-            volumes[str(secretary_dir / entry)] = {
-                "bind": f"{CONTAINER_SECRETARY_MCP_DIR}/{entry}",
-                "mode": "ro",
-            }
-    return volumes
 
 
 def _format_plugins_yaml(plugins: list[str]) -> str:
@@ -140,55 +213,78 @@ def _format_plugins_yaml(plugins: list[str]) -> str:
     return f"plugins:\n  enabled:\n{items}"
 
 
-# MCP server section written into every room's config.yaml. The secretary MCP
-# server source is baked into the image at /opt/secretary-mcp/ (see Dockerfile.hermes);
-# each room's container spawns its own instance with per-room state keyed by room_id.
-#
-# NOTE on escaping: this string is consumed by str.format(), so the literal
-# ${GOOGLE_MAPS_API_KEY} that Hermes itself expands at MCP-spawn time must be
-# written as ${{GOOGLE_MAPS_API_KEY}} here — .format() collapses {{ }} to { }.
-_MCP_SECTION_TEMPLATE = """\
-mcp_servers:
-  secretary:
-    command: node
-    args:
-      - /opt/secretary-mcp/server.mjs
-    env:
-      # room_id doubles as the per-room state key for secretary-mcp's
-      # todo / attendance / expense tools (stored under ~/.hermes/secretary-*.json).
-      SECRETARY_LINE_USER_ID: {room_id}
-      # Hermes expands the GOOGLE_MAPS_API_KEY env var (forwarded by the
-      # router) at MCP spawn time. Blank disables maps_* tools.
-      GOOGLE_MAPS_API_KEY: ${{GOOGLE_MAPS_API_KEY}}
-    # LINE tools are disabled: the router owns all LINE communication.
-    # Reminder tools are disabled: they depend on line_send_message to deliver.
-    tools:
-      exclude:
-        - line_send_message
-        - line_send_media
-        - line_send_file
-        - reminder_set
-        - reminder_list
-        - reminder_cancel
-toolsets:
-  - mcp-secretary
-tools:
-  tool_search:
-    threshold_pct: 20
-"""
+def _load_mcp_manifest(mcp_dir: Path, room_id: str) -> dict[str, Any] | None:
+    """Load one MCP's seeded mcp.manifest.yaml, substituting {room_id}.
 
-
-def _format_mcp_section(room_id: str) -> str:
-    """Render the MCP servers / toolsets block for a room's config.yaml.
+    A missing or malformed manifest is logged and skipped rather than
+    raised — one broken MCP must not stop config.yaml from being written
+    for the room's other MCPs (or with no MCPs at all).
 
     Args:
-        room_id: Unique chatroom identifier, used as secretary-mcp's per-user
-            state key (so each room has isolated todo/attendance/expense state).
+        mcp_dir: The room's seeded copy of one MCP, e.g. data/<room_id>/mcp/secretary/.
+        room_id: Unique chatroom identifier substituted for ``{room_id}`` in
+            the manifest (e.g. secretary-mcp's per-user state key).
 
     Returns:
-        YAML string for the ``mcp_servers`` / ``toolsets`` / ``tools`` blocks.
+        The parsed manifest mapping, or None if it could not be loaded.
     """
-    return _MCP_SECTION_TEMPLATE.format(room_id=room_id)
+    manifest_path = mcp_dir / "mcp.manifest.yaml"
+    if not manifest_path.exists():
+        logger.error(f"MCP [{mcp_dir.name}] has no mcp.manifest.yaml; skipping")
+        return None
+    try:
+        raw = manifest_path.read_text(encoding="utf-8").replace("{room_id}", room_id)
+        manifest = yaml.safe_load(raw)
+    except (OSError, yaml.YAMLError) as exc:
+        logger.error(f"Failed to load MCP manifest {manifest_path}: {exc}")
+        return None
+    if not isinstance(manifest, dict):
+        logger.error(f"MCP manifest {manifest_path} is not a mapping; skipping")
+        return None
+    return manifest
+
+
+def _format_mcp_section(room_id: str, config: Settings) -> str:
+    """Render the mcp_servers / toolsets block for a room's config.yaml.
+
+    Reads every MCP already seeded under data/<room_id>/mcp/ (_ensure_mcp_seed
+    must run first) and emits one mcp_servers.<name> entry per MCP, with args
+    rewritten to that MCP's in-container seeded path (CONTAINER_MCP_DIR/<name>/...).
+
+    Args:
+        room_id: Unique chatroom identifier, substituted into each MCP's
+            manifest (e.g. secretary-mcp's per-user state key).
+        config: Application settings containing the room's data directory.
+
+    Returns:
+        YAML string for the ``mcp_servers`` / ``toolsets`` blocks, or an
+        empty string if the room has no seeded MCPs.
+    """
+    mcp_root = config.DATA_DIR / room_id / "mcp"
+    if not mcp_root.is_dir():
+        return ""
+
+    servers: dict[str, Any] = {}
+    toolsets: list[str] = []
+    for mcp_dir in sorted(mcp_root.iterdir()):
+        if not mcp_dir.is_dir():
+            continue
+        manifest = _load_mcp_manifest(mcp_dir, room_id)
+        if manifest is None:
+            continue
+        name = mcp_dir.name
+        args = [f"{CONTAINER_MCP_DIR}/{name}/{arg}" for arg in manifest.get("args", [])]
+        servers[name] = {
+            "command": manifest.get("command", "node"),
+            "args": args,
+            **{k: v for k, v in manifest.items() if k not in ("command", "args")},
+        }
+        toolsets.append(f"mcp-{name}")
+
+    if not servers:
+        return ""
+    section = {"mcp_servers": servers, "toolsets": toolsets}
+    return str(yaml.safe_dump(section, sort_keys=False, default_flow_style=False))
 
 
 _CONFIG_YAML_TEMPLATE = """\
@@ -204,20 +300,24 @@ providers:
       - {model}
 {plugins_section}
 {mcp_section}
+tools:
+  tool_search:
+    threshold_pct: 20
 """
 
 
 def _ensure_config_yaml(room_id: str, config: Settings) -> None:
     """Write a default Hermes config.yaml for a room if one doesn't already exist.
 
-    Configures the shared LLM provider, default plugins, and secretary MCP
-    server so the agent can answer without any manual per-room setup. Left
-    untouched on subsequent calls so operators can hand-edit a room's config
-    without it being overwritten on container recreation.
+    Configures the shared LLM provider, default plugins, and every MCP
+    server already seeded for this room (see _ensure_mcp_seed, which must
+    run first) so the agent can answer without any manual per-room setup.
+    Left untouched on subsequent calls so operators can hand-edit a room's
+    config without it being overwritten on container recreation.
 
     Args:
-        room_id: Unique identifier for the chatroom (also secretary-mcp's
-            per-user state key).
+        room_id: Unique identifier for the chatroom (also each MCP's
+            per-user state key, via {room_id} substitution in its manifest).
         config: Application settings containing the shared LLM provider details
             and default plugin list.
     """
@@ -230,7 +330,7 @@ def _ensure_config_yaml(room_id: str, config: Settings) -> None:
             model=config.LLM_MODEL,
             base_url=config.LLM_BASE_URL,
             plugins_section=_format_plugins_yaml(plugins),
-            mcp_section=_format_mcp_section(room_id),
+            mcp_section=_format_mcp_section(room_id, config),
         ),
         encoding="utf-8",
     )
@@ -314,6 +414,11 @@ def _create_container(
     """
     logger.info(f"Creating new container for room [{room_id}]: {container_name}")
     _ensure_data_dir(room_id, config)
+    # MCP/plugin seeding must happen before config.yaml is written:
+    # _format_mcp_section reads each MCP's manifest from its just-seeded
+    # directory to know what to register.
+    _ensure_mcp_seed(room_id, config)
+    _ensure_plugin_seed(room_id, config)
     _ensure_config_yaml(room_id, config)
 
     ports: dict[str, int] | None = None

@@ -1,4 +1,4 @@
-.env
+**/.env
 .venv
 data/
 docs/
@@ -13,3 +13,9 @@ scripts/
 README.md
 CLAUDE.md
 CLAUDE.local.md
+# Dev-checkout artifacts under src/hermes/mcp/<name>/. Never needed in a
+# build context: the router only reads templates via a runtime volume mount
+# (never bakes them in — see Dockerfile's scoped COPY), and Dockerfile.hermes
+# generates its own shared /opt/node_modules from src/hermes/mcp/package.json
+# rather than copying any template's local node_modules.
+**/node_modules/
