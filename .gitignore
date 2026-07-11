@@ -1,13 +1,35 @@
-.env
-data/
+# --- Python ---
 __pycache__/
+*.py[codz]
+build/
+dist/
+*.egg-info/
+
+# --- 型別檢查／lint／測試 ---
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
-*.pyc
-dist/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- 虛擬環境 ---
 .venv/
-.DS_Store
-CLAUDE.local.md
+
+# --- Node（src/hermes/mcp/ 下的 package.json 是有 commit 的樣板；
+#     node_modules 只烤進 Dockerfile.hermes 的 image，不落地） ---
 node_modules/
+
+# --- 編輯器 ---
+.vscode/
+.idea/
+
+# --- macOS ---
+.DS_Store
+
+# --- 本專案 runtime／私人設定 ---
+.env
+data/
 tmp/
+CLAUDE.local.md
