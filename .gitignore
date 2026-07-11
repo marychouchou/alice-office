@@ -9,5 +9,5 @@ dist/
 .venv/
 .DS_Store
 CLAUDE.local.md
-docs/
 node_modules/
+tmp/
