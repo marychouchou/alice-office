@@ -358,9 +358,7 @@ def list_hermes_containers() -> None:
 # ---------------------------------------------------------------------------
 
 
-def send_webhook(
-    body: str, secret: str, timeout: float = SEND_TIMEOUT_SECONDS
-) -> tuple[int, str]:
+def send_webhook(body: str, secret: str, timeout: float = SEND_TIMEOUT_SECONDS) -> tuple[int, str]:
     """POST a signed webhook body to the local router.
 
     Args:

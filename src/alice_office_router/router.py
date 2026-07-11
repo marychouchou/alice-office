@@ -266,9 +266,7 @@ async def _deliver_reply(
         logger.error(f"Failed to push LINE reply for room {room_id}: {exc}")
 
 
-async def _apply_google_gate(
-    room_id: str, config: Settings, reply_token: str | None
-) -> bool:
+async def _apply_google_gate(room_id: str, config: Settings, reply_token: str | None) -> bool:
     """Check Google OAuth authorization for a room and act on the result.
 
     Args:

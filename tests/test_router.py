@@ -593,12 +593,13 @@ class TestProcessAndReplyGoogleGate:
         with (
             patch(
                 "alice_office_router.router.check_google_authorization",
-                return_value=("blocked", "請先授權 Google 帳號：https://example.com/oauth/start?user_id=room_aaa"),
+                return_value=(
+                    "blocked",
+                    "請先授權 Google 帳號：https://example.com/oauth/start?user_id=room_aaa",
+                ),
             ),
             patch("alice_office_router.router.get_or_create_container") as mock_get_container,
-            patch(
-                "alice_office_router.router.ask_hermes_agent", new=AsyncMock()
-            ) as mock_ask,
+            patch("alice_office_router.router.ask_hermes_agent", new=AsyncMock()) as mock_ask,
             patch("alice_office_router.router.push_line_message", new=AsyncMock()) as mock_push,
         ):
             await _process_and_reply("room_AAA", "哈囉", settings)
@@ -641,7 +642,10 @@ class TestProcessAndReplyGoogleGate:
         with (
             patch(
                 "alice_office_router.router.check_google_authorization",
-                return_value=("notice", "缺少 Drive 授權：https://example.com/oauth/start?user_id=room_aaa"),
+                return_value=(
+                    "notice",
+                    "缺少 Drive 授權：https://example.com/oauth/start?user_id=room_aaa",
+                ),
             ),
             patch(
                 "alice_office_router.router.get_or_create_container",
