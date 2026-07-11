@@ -299,6 +299,13 @@ gateway 直接 spawn `node server.mjs` 子進程），每個房間各自一份 p
 自己去改它自己 `data/<room_id>/mcp/<name>/` 底下的那份，要嘛整個重建（見下方
 「測試 MCP 修改」）。
 
+> **開發時想把樣板一次推到所有已存在房間**（不逐房手改、也不整個重建）：
+> `uv run python scripts/dev_sync_src.py`——監看 `src/hermes/{mcp,plugin}/` 與
+> `config.template.yml`，變動時把樣板**強制覆蓋**每個房間的副本（含 config.yaml，
+> 只保留房間各自的 `mcp/<name>/.env`）再 restart 所有 running 容器。dev 專用、
+> **production 勿用**。跟 `watch_restart.py`（監看**單一房間自己的副本**）分工相反，
+> 兩者服務不同開發流，見腳本 docstring。
+
 MCP server 是 ESM（`"type": "module"`），依賴解析靠從檔案位置往上找 `node_modules`
 （ESM 不吃 `NODE_PATH`）。每個房間的副本落在 `/opt/data/mcp/<name>/`（被房間自己的
 bind mount 蓋住），所以共用的相依套件改烤在再上一層的 `/opt/node_modules`（見
@@ -680,7 +687,8 @@ uv run python scripts/google_reauth.py U_LOCAL_TEST
 | `uv run ruff format .` | 格式化 |
 | `uv run fastapi dev src/alice_office_router/main.py` | 開發伺服器（host 模式） |
 | `uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "..."` | 模擬 LINE 訊息打整條路 |
-| `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看 extension 原始碼，存檔自動 restart |
+| `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看**單一房間自己的副本**，存檔自動 restart 該房間 |
+| `uv run python scripts/dev_sync_src.py` | 監看 **repo 樣板**，變動時強制推到**所有已存在房間**再 restart（dev 專用，會覆蓋房間副本） |
 | `uv run python scripts/google_reauth.py <room_id>` | 本機一次性 Google 授權（見「Google Workspace 整合」） |
 
 提交前必跑：
