@@ -27,32 +27,15 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_env  # noqa: E402
+
 ENV_FILE = Path(__file__).parent.parent / ".env"
 DEBOUNCE_SECONDS = 0.4  # let rapid multi-file saves (editor tmp+rename) settle
-
-
-def load_env(path: Path) -> dict[str, str]:
-    """Load key=value pairs from a .env file, ignoring comments and blanks.
-
-    Args:
-        path: Path to the .env file.
-
-    Returns:
-        Dictionary of env var names to values.
-    """
-    if not path.exists():
-        return {}
-    result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        result[key.strip()] = value.strip()
-    return result
 
 
 def resolve_watch_paths(env: dict[str, str], room_id: str) -> list[Path]:

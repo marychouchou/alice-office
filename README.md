@@ -622,6 +622,11 @@ uv run python scripts/google_reauth.py U_LOCAL_TEST
 
 ## 疑難排解
 
+> 這節是**部署/建置期**一次性的坑。服務跑起來之後，日常「這則訊息為什麼卡住／
+> agent 用了什麼工具／MCP 為什麼噴錯」這類**運行期** debug，見
+> [`docs/troubleshooting.md`](docs/troubleshooting.md)（含一鍵診斷腳本
+> `scripts/debug_room.py`）。
+
 - **compose 啟動直接失敗**：`hermes_global_net` 沒建（network 宣告為 `external`），
   先 `docker network create hermes_global_net`。
 - **host 模式連 Hermes 容器 timeout**：忘了把 `ROUTER_IN_DOCKER` 設 `false`，
@@ -690,6 +695,7 @@ uv run python scripts/google_reauth.py U_LOCAL_TEST
 | `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看**單一房間自己的副本**，存檔自動 restart 該房間 |
 | `uv run python scripts/dev_sync_src.py` | 監看 **repo 樣板**，變動時強制推到**所有已存在房間**再 restart（dev 專用，會覆蓋房間副本） |
 | `uv run python scripts/google_reauth.py <room_id>` | 本機一次性 Google 授權（見「Google Workspace 整合」） |
+| `uv run python scripts/debug_room.py <room_id>` | 印出單一房間的診斷快照（container 狀態、docker logs、各 log 檔 tail、關鍵檔案存在性，見 `docs/troubleshooting.md`） |
 
 提交前必跑：
 

@@ -44,15 +44,18 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_env  # noqa: E402
+
 from alice_office_router.config import Settings
 
 ENV_FILE = Path(__file__).parent.parent / ".env"
-# 與 watch_restart.py 相同（sibling 腳本各自獨立、無共用模組），改一邊記得改另一邊。
 DEBOUNCE_SECONDS = 0.4  # let rapid multi-file saves (editor tmp+rename) settle
 
 # 忽略清單與 container_manager._SEED_IGNORE 相同（複本；那份是 seed 用、這份是 sync
@@ -62,30 +65,6 @@ DEBOUNCE_SECONDS = 0.4  # let rapid multi-file saves (editor tmp+rename) settle
 _SEED_IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".env", "node_modules", "package-lock.json"
 )
-
-
-def load_env(path: Path) -> dict[str, str]:
-    """Load key=value pairs from a .env file, ignoring comments and blanks.
-
-    Copy of watch_restart.load_env (sibling scripts share no module). Keep the
-    two in sync if the parsing rules change.
-
-    Args:
-        path: Path to the .env file.
-
-    Returns:
-        Dictionary of env var names to values.
-    """
-    if not path.exists():
-        return {}
-    result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        result[key.strip()] = value.strip()
-    return result
 
 
 def snapshot(paths: list[Path]) -> dict[str, float]:
