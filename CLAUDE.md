@@ -39,6 +39,11 @@ LINE Platform → FastAPI Router → Container A
 - MCP 是 Node ESM，依賴解析靠從檔案位置往上找 `node_modules`（ESM 不吃
   `NODE_PATH`），所以共用依賴烤在 image 的 `/opt/node_modules`，不放進各房間自己的
   `mcp/<name>/` 底下（見 `Dockerfile.hermes`）。
+- Python 第三方套件（sympy／pymupdf／selenium）跟 hermes-agent 自己的 venv 隔離，烤在
+  獨立的 `/opt/tools/.venv`（由 `src/hermes/runtime/pyproject.toml` + `uv.lock` 驅動）：
+  plugin 進程用 `TOOLS_PYTHON` 環境變數解析到這個 venv，skill 的 terminal session 用
+  `tools-python` 指令；`/opt/hermes/.venv`（hermes-agent 自己的 venv）只留 `pyyaml`
+  給 in-process 的 plugin 層（`tools.py` 讀 `config.yaml`）用。
 
 ## Commands
 

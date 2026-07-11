@@ -1,0 +1,13 @@
+[project]
+name = "hermes-tools-runtime"
+version = "0.1.0"
+description = "Third-party Python packages for skills, plugin scripts, and Python MCPs inside the Hermes container. Baked into /opt/tools/.venv by Dockerfile.hermes. NOT the router's env."
+requires-python = ">=3.12"
+dependencies = [
+    "sympy>=1.12",     # local-tools math
+    "pymupdf>=1.24",   # local-tools image_ocr
+    "selenium>=4.21",  # local-tools webdriver
+]
+
+[tool.uv]
+package = false

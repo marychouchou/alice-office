@@ -6,10 +6,12 @@
 # src/hermes/mcp/<name>/ into its data dir the first time its container is
 # created (see container_manager.py _ensure_plugin_seed / _ensure_mcp_seed),
 # so every room can independently edit its own copy. Only the shared
-# DEPENDENCIES those sources need are baked into this image — Python
-# packages into Hermes's venv (for plugins) and a shared node_modules (for
-# MCP servers, see the ESM note below) — so a room's first boot doesn't pay
-# an install cost, and rebuilding this image is only needed when
+# DEPENDENCIES those sources need are baked into this image — a dedicated
+# Python tools venv at /opt/tools/.venv (for plugin scripts, skills, and
+# Python MCPs; see src/hermes/runtime/), pyyaml in Hermes's own venv (the
+# one in-process import the plugin layer needs), and a shared node_modules
+# (for MCP servers, see the ESM note below) — so a room's first boot doesn't
+# pay an install cost, and rebuilding this image is only needed when
 # dependencies change, not when a room's plugin/MCP source does.
 #
 # Usage:
@@ -42,22 +44,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chmod +x /usr/local/bin/geckodriver \
     && geckodriver --version
 
-# ── Python packages (into Hermes's venv) ───────────────────────────────────
-# sympy    — math tool (engineering calculator)
-# pymupdf  — image_ocr tool (PDF page extraction)
-# pyyaml   — plugin layer (tools.py reads config.yaml); likely already
-#             present in Hermes, but included for safety.
-# selenium — webdriver tool (Firefox remote driver)
-#
-# Hermes uses uv (not pip) and keeps Python in /opt/hermes/.venv.
-# We install into that venv so plugin scripts (run via sys.executable)
-# can import these packages.
+# ── Python: Hermes-venv (in-process plugin deps ONLY) ──────────────────────
+# tools.py runs inside the Hermes agent process and imports yaml — this is
+# the ONLY package that belongs in Hermes's own venv. Everything else a
+# plugin script/skill/Python MCP needs lives in the separate /opt/tools venv
+# below, so it stays isolated from Hermes's own pinned deps and survives a
+# base image rebase untouched.
 RUN /usr/local/bin/uv pip install \
     --python /opt/hermes/.venv/bin/python3 \
     --no-cache-dir \
-    sympy pymupdf pyyaml selenium
+    pyyaml
 
-# ── Shared MCP runtime dependencies ────────────────────────────────────────
+# ── Python: shared tools venv (/opt/tools/.venv) ───────────────────────────
+# Declarative + locked: edit src/hermes/runtime/pyproject.toml, `uv lock`,
+# rebuild. This is the venv plugin scripts (via TOOLS_PYTHON), skills (via
+# the `tools-python` command), and Python MCPs should use — sympy, pymupdf,
+# selenium and any future third-party Python deps go here, never into
+# Hermes's own venv above.
+COPY src/hermes/runtime/pyproject.toml src/hermes/runtime/uv.lock /opt/tools/
+# tools-python must be a wrapper script, NOT a symlink: CPython fully
+# resolves argv[0] symlinks, so a symlink here would land on the base
+# interpreter and skip pyvenv.cfg detection (sys.prefix=/usr, no packages).
+RUN cd /opt/tools \
+    && /usr/local/bin/uv sync --locked --no-dev --no-cache \
+    && printf '#!/bin/sh\nexec /opt/tools/.venv/bin/python3 "$@"\n' \
+        > /usr/local/bin/tools-python \
+    && chmod +x /usr/local/bin/tools-python
+ENV TOOLS_PYTHON=/opt/tools/.venv/bin/python3
+ENV PATH="${PATH}:/opt/node_modules/.bin"
+
+# Login shells (e.g. a skill's terminal tool) go through /etc/profile, which
+# resets PATH and only re-applies exports sourced from /etc/profile.d/*.sh —
+# the Dockerfile ENV lines above don't reach that session, so mirror them
+# here too.
+COPY src/hermes/runtime/profile-tools.sh /etc/profile.d/90-alice-tools.sh
+
+# ── Shared MCP runtime dependencies (locked) ───────────────────────────────
 # Node.js is already in the Hermes base image (v22 for browser automation).
 # Every MCP server template under src/hermes/mcp/<name>/ is ESM
 # ("type": "module") and bare-imports its deps (e.g. `import ... from
@@ -68,13 +90,18 @@ RUN /usr/local/bin/uv pip install \
 # dependency set one level up, at /opt/node_modules — a path every room's
 # server.mjs will find via that walk-up, regardless of which room is mounted.
 # Keep src/hermes/mcp/package.json in sync with the union of every MCP
-# template's own package.json dependencies.
-COPY src/hermes/mcp/package.json /opt/package.json
-RUN cd /opt && npm install --omit=dev
+# template's own package.json dependencies (enforced by
+# tests/test_hermes_shared_node_deps.py) and commit package-lock.json
+# whenever it changes, so `npm ci` here is reproducible.
+COPY src/hermes/mcp/package.json src/hermes/mcp/package-lock.json /opt/
+RUN cd /opt && npm ci --omit=dev
 
-# Smoke-test: geckodriver + firefox + node + npm all on PATH, and the shared
-# MCP runtime deps (MCP SDK + zod) are installed where ESM's node_modules
-# walk-up will find them.
-RUN which geckodriver firefox node npm \
+# Smoke-test: geckodriver + firefox + node + npm + tools-python all on PATH,
+# the /opt/tools venv has the expected third-party packages, Hermes's own
+# venv still has yaml, and the shared MCP runtime deps (MCP SDK + zod) are
+# installed where ESM's node_modules walk-up will find them.
+RUN which geckodriver firefox node npm tools-python \
+    && tools-python -c "import sympy, fitz, selenium, sys; assert sys.prefix == '/opt/tools/.venv', sys.prefix" \
+    && /opt/hermes/.venv/bin/python3 -c "import yaml" \
     && test -d /opt/node_modules/@modelcontextprotocol/sdk \
     && test -d /opt/node_modules/zod

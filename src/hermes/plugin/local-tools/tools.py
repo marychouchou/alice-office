@@ -1,7 +1,12 @@
 """Tool handlers for the local-tools plugin.
 
-Each handler runs its corresponding alice-tools-pack script via subprocess
-(/usr/bin/python3), parses the JSON stdout, and returns a JSON string.
+Each handler runs its corresponding alice-tools-pack script via subprocess,
+parses the JSON stdout, and returns a JSON string. Scripts run under the
+shared tools venv at /opt/tools/.venv (see src/hermes/runtime/), which is
+baked into the Hermes image by Dockerfile.hermes and exposed to this
+process via the TOOLS_PYTHON env var — NOT Hermes's own venv/interpreter
+(sys.executable), which only carries pyyaml for the in-process plugin
+layer itself.
 """
 from __future__ import annotations
 
@@ -16,9 +21,11 @@ from typing import Any
 import yaml
 
 TOOLS_ROOT = Path(__file__).parent / "scripts"
-# Use the same interpreter that runs the Hermes agent process — the plugin
-# scripts share Hermes's Python (and its installed packages like sympy/fitz).
-PYTHON = sys.executable
+# Prefer the shared tools venv (sympy/fitz/selenium live there — see
+# src/hermes/runtime/pyproject.toml); fall back to the current interpreter
+# for host-side Level-0 testing or older images that predate TOOLS_PYTHON.
+_TOOLS_PYTHON = os.environ.get("TOOLS_PYTHON", "/opt/tools/.venv/bin/python3")
+PYTHON = _TOOLS_PYTHON if Path(_TOOLS_PYTHON).is_file() else sys.executable
 
 # Plugin data lives under HERMES_HOME/local-tools-data/ so the directory is
 # clearly associated with this plugin and not with any previous agent setup.
