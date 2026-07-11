@@ -10,6 +10,7 @@ from linebot.v3.messaging.exceptions import ApiException
 
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.container_manager import CONTAINER_DATA_DIR, get_or_create_container
+from alice_office_router.google_oauth import check_google_authorization
 from alice_office_router.hermes_client import ask_hermes_agent
 from alice_office_router.line_client import (
     download_line_content,
@@ -265,6 +266,35 @@ async def _deliver_reply(
         logger.error(f"Failed to push LINE reply for room {room_id}: {exc}")
 
 
+async def _apply_google_gate(
+    room_id: str, config: Settings, reply_token: str | None
+) -> bool:
+    """Check Google OAuth authorization for a room and act on the result.
+
+    Args:
+        room_id: Unique chatroom identifier.
+        config: Application settings.
+        reply_token: LINE reply token from the triggering event, if any.
+
+    Returns:
+        True if the caller should stop processing (the room is blocked
+        pending authorization and its auth-link message has already been
+        delivered); False to continue with the normal agent flow (either
+        fully authorized, or authorized-with-notice — the notice has
+        already been pushed as a side message in that case).
+    """
+    status, message = check_google_authorization(room_id, config)
+    if status == "blocked" and message is not None:
+        await _deliver_reply(room_id, message, reply_token, config)
+        return True
+    if status == "notice" and message is not None:
+        try:
+            await push_line_message(room_id, message, config.LINE_CHANNEL_ACCESS_TOKEN)
+        except Exception as exc:
+            logger.error(f"Failed to push Google OAuth notice for room {room_id}: {exc}")
+    return False
+
+
 async def _process_and_reply(
     room_id: str, text: str, config: Settings, reply_token: str | None = None
 ) -> None:
@@ -272,7 +302,9 @@ async def _process_and_reply(
 
     Each step is independently guarded: a failure in one is logged without
     raising, since this runs in a background task after the router has
-    already returned 200 OK to LINE.
+    already returned 200 OK to LINE. Before contacting the agent, checks
+    whether the room still needs Google OAuth authorization — if blocked,
+    the agent is never invoked and the auth link is delivered instead.
 
     Args:
         room_id: Unique chatroom identifier used to resolve the container and session.
@@ -280,6 +312,9 @@ async def _process_and_reply(
         config: Application settings.
         reply_token: LINE reply token from the triggering event, if any.
     """
+    if await _apply_google_gate(room_id, config, reply_token):
+        return
+
     try:
         target_url = get_or_create_container(room_id, config)
     except Exception as exc:

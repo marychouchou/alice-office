@@ -1,0 +1,33 @@
+# Hermes mcp_servers registration for this MCP, read once by
+# alice_office_router.container_manager._format_mcp_section() when a room's
+# config.yaml is first written (see _ensure_mcp_seed / _ensure_config_yaml).
+# Not re-read afterward — config.yaml is the source of truth from then on,
+# and operators/rooms may hand-edit it freely.
+#
+# `{account_key}` is the lowercased room id (see google_oauth.account_key) —
+# @cocal/google-calendar-mcp's GOOGLE_ACCOUNT_MODE validation is
+# lowercase-only, and the router's shared tokens.json is keyed the same way,
+# so every Google MCP must agree on this normalized key.
+#
+# The GOOGLE_*_PATH vars point into the shared /opt/google-workspace mount
+# (see container_manager.CONTAINER_GOOGLE_DIR) and are set explicitly here —
+# rather than buried as code defaults in token_manager.py — so they're
+# visible and overridable in each room's rendered config.yaml. Explicit
+# paths are mandatory: the MCP subprocess runs as uid 10000 `hermes` (so
+# /root is unreachable, mode 700), and the gateway sets
+# XDG_CONFIG_HOME=/opt/data/.config, which would silently resolve any
+# HOME/XDG-derived "default" path per-room instead of to the shared mount.
+#
+# requires_google_oauth: this MCP is only seeded into a room when this
+# deployment has Google OAuth configured (see Settings.google_oauth_enabled)
+# — see container_manager._ensure_mcp_seed. Stripped out of the rendered
+# mcp_servers entry itself (not a real Hermes config key).
+command: /opt/tools/.venv/bin/python3
+args:
+  - server.py
+env:
+  GOOGLE_ACCOUNT_MODE: "{account_key}"
+  GOOGLE_TOKENS_PATH: /opt/google-workspace/tokens.json
+  GOOGLE_WEB_CREDS_PATH: /opt/google-workspace/gcp-oauth.keys.json
+  GOOGLE_INSTALLED_CREDS_PATH: /opt/google-workspace/gcp-oauth.keys.installed.json
+requires_google_oauth: true

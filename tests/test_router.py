@@ -577,3 +577,87 @@ async def test_process_and_reply_logs_and_returns_on_agent_error() -> None:
         await _process_and_reply("room_AAA", "哈囉", settings)
 
     mock_push.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _process_and_reply — Google OAuth gate
+# ---------------------------------------------------------------------------
+
+
+class TestProcessAndReplyGoogleGate:
+    async def test_blocked_delivers_auth_message_and_never_calls_agent(self) -> None:
+        from alice_office_router.router import _process_and_reply
+
+        settings = _settings()
+
+        with (
+            patch(
+                "alice_office_router.router.check_google_authorization",
+                return_value=("blocked", "請先授權 Google 帳號：https://example.com/oauth/start?user_id=room_aaa"),
+            ),
+            patch("alice_office_router.router.get_or_create_container") as mock_get_container,
+            patch(
+                "alice_office_router.router.ask_hermes_agent", new=AsyncMock()
+            ) as mock_ask,
+            patch("alice_office_router.router.push_line_message", new=AsyncMock()) as mock_push,
+        ):
+            await _process_and_reply("room_AAA", "哈囉", settings)
+
+        mock_get_container.assert_not_called()
+        mock_ask.assert_not_awaited()
+        mock_push.assert_awaited_once()
+        assert "oauth/start" in mock_push.await_args.args[1]
+
+    async def test_ok_status_proceeds_with_normal_flow(self) -> None:
+        from alice_office_router.router import _process_and_reply
+
+        settings = _settings()
+
+        with (
+            patch(
+                "alice_office_router.router.check_google_authorization",
+                return_value=("ok", None),
+            ),
+            patch(
+                "alice_office_router.router.get_or_create_container",
+                return_value="http://hermes_room_AAA:8642",
+            ) as mock_get_container,
+            patch(
+                "alice_office_router.router.ask_hermes_agent",
+                new=AsyncMock(return_value="哈囉，我是 Hermes"),
+            ),
+            patch("alice_office_router.router.push_line_message", new=AsyncMock()) as mock_push,
+        ):
+            await _process_and_reply("room_AAA", "哈囉", settings)
+
+        mock_get_container.assert_called_once_with("room_AAA", settings)
+        mock_push.assert_awaited_once_with("room_AAA", "哈囉，我是 Hermes", TEST_TOKEN)
+
+    async def test_notice_status_pushes_notice_and_still_calls_agent(self) -> None:
+        from alice_office_router.router import _process_and_reply
+
+        settings = _settings()
+
+        with (
+            patch(
+                "alice_office_router.router.check_google_authorization",
+                return_value=("notice", "缺少 Drive 授權：https://example.com/oauth/start?user_id=room_aaa"),
+            ),
+            patch(
+                "alice_office_router.router.get_or_create_container",
+                return_value="http://hermes_room_AAA:8642",
+            ) as mock_get_container,
+            patch(
+                "alice_office_router.router.ask_hermes_agent",
+                new=AsyncMock(return_value="哈囉，我是 Hermes"),
+            ),
+            patch("alice_office_router.router.push_line_message", new=AsyncMock()) as mock_push,
+        ):
+            await _process_and_reply("room_AAA", "哈囉", settings)
+
+        mock_get_container.assert_called_once()
+        assert mock_push.await_count == 2
+        first_call_text = mock_push.await_args_list[0].args[1]
+        assert "oauth/start" in first_call_text
+        second_call_text = mock_push.await_args_list[1].args[1]
+        assert second_call_text == "哈囉，我是 Hermes"

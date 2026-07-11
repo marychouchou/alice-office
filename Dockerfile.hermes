@@ -97,11 +97,15 @@ COPY src/hermes/mcp/package.json src/hermes/mcp/package-lock.json /opt/
 RUN cd /opt && npm ci --omit=dev
 
 # Smoke-test: geckodriver + firefox + node + npm + tools-python all on PATH,
-# the /opt/tools venv has the expected third-party packages, Hermes's own
-# venv still has yaml, and the shared MCP runtime deps (MCP SDK + zod) are
-# installed where ESM's node_modules walk-up will find them.
+# the /opt/tools venv has the expected third-party packages (including mcp/
+# httpx/requests for the gmail/drive Python MCP servers), Hermes's own venv
+# still has yaml, and the shared MCP runtime deps (MCP SDK + zod +
+# @cocal/google-calendar-mcp, incl. its CLI bin) are installed where ESM's
+# node_modules walk-up (or PATH, for the calendar CLI) will find them.
 RUN which geckodriver firefox node npm tools-python \
-    && tools-python -c "import sympy, fitz, selenium, sys; assert sys.prefix == '/opt/tools/.venv', sys.prefix" \
+    && tools-python -c "import sympy, fitz, selenium, mcp, httpx, requests, sys; assert sys.prefix == '/opt/tools/.venv', sys.prefix" \
     && /opt/hermes/.venv/bin/python3 -c "import yaml" \
     && test -d /opt/node_modules/@modelcontextprotocol/sdk \
-    && test -d /opt/node_modules/zod
+    && test -d /opt/node_modules/zod \
+    && test -d /opt/node_modules/@cocal/google-calendar-mcp \
+    && test -x /opt/node_modules/.bin/google-calendar-mcp

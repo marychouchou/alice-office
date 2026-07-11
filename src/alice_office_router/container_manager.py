@@ -43,6 +43,21 @@ CONTAINER_PLUGINS_DIR = f"{CONTAINER_DATA_DIR}/plugins"
 # (baked into the image by Dockerfile.hermes; NODE_PATH is ignored by ESM).
 CONTAINER_MCP_DIR = f"{CONTAINER_DATA_DIR}/mcp"
 
+# In-container mount path for the shared (deployment-wide, NOT per-room)
+# Google OAuth tokens + credentials directory (config.google_host_dir on the
+# host). A neutral, world-readable mount point deliberately OUTSIDE both
+# /root and /opt/data, because (verified in a live room container):
+#   (a) the Hermes gateway and every MCP subprocess run as user `hermes`
+#       (uid 10000), NOT root — /root is mode 700, so anything under
+#       /root/... is EACCES-unreachable to them;
+#   (b) the gateway sets XDG_CONFIG_HOME=/opt/data/.config, so a tool's
+#       "default" config path would silently resolve per-room instead of
+#       to this shared location.
+# Consequently NOTHING relies on default paths: every consumer (the @cocal
+# calendar MCP, gmail/drive token_manager.py) receives explicit
+# env-provided paths under this directory via its mcp.manifest.yaml.
+CONTAINER_GOOGLE_DIR = "/opt/google-workspace"
+
 # Filenames/patterns _seed_templates never copies from a template into a
 # room: node_modules/package-lock.json are shared via /opt/node_modules (see
 # CONTAINER_MCP_DIR) rather than duplicated per room; __pycache__/*.pyc are
@@ -78,7 +93,13 @@ def _ensure_data_dir(room_id: str, config: Settings) -> None:
     logger.info(f"Ensured data directory exists: {data_path}")
 
 
-def _seed_templates(templates_root: Path, dest_root: Path, *, seed_dotenv: bool) -> None:
+def _seed_templates(
+    templates_root: Path,
+    dest_root: Path,
+    *,
+    seed_dotenv: bool,
+    skip: frozenset[str] | set[str] = frozenset(),
+) -> None:
     """Copy each template subdirectory into dest_root, once per name.
 
     Write-once: a name already present under dest_root is left completely
@@ -95,12 +116,14 @@ def _seed_templates(templates_root: Path, dest_root: Path, *, seed_dotenv: bool)
             also seeded as a sibling .env in the destination — for MCP
             servers that load their own secrets from a .env file next to
             their source.
+        skip: Template directory names to skip entirely (e.g. Google-gated
+            MCPs when Google OAuth isn't configured for this deployment).
     """
     if not templates_root.is_dir():
         return
     dest_root.mkdir(parents=True, exist_ok=True)
     for template_dir in sorted(templates_root.iterdir()):
-        if not template_dir.is_dir():
+        if not template_dir.is_dir() or template_dir.name in skip:
             continue
         dest_dir = dest_root / template_dir.name
         if dest_dir.exists():
@@ -114,6 +137,36 @@ def _seed_templates(templates_root: Path, dest_root: Path, *, seed_dotenv: bool)
         logger.info(f"Seeded template [{template_dir.name}] into {dest_dir}")
 
 
+def _google_gated_template_names(mcp_templates_root: Path) -> frozenset[str]:
+    """Find MCP template names whose manifest requires Google OAuth.
+
+    Args:
+        mcp_templates_root: HERMES_TEMPLATES_DIR/mcp — directory holding one
+            subdirectory per MCP template.
+
+    Returns:
+        Frozen set of template directory names with `requires_google_oauth:
+        true` in their mcp.manifest.yaml. A missing/malformed manifest is
+        tolerated (not skipped) — this is only used to decide what to skip
+        seeding, never to fail room creation.
+    """
+    gated: set[str] = set()
+    if not mcp_templates_root.is_dir():
+        return frozenset(gated)
+    for template_dir in mcp_templates_root.iterdir():
+        manifest_path = template_dir / "mcp.manifest.yaml"
+        if not template_dir.is_dir() or not manifest_path.exists():
+            continue
+        try:
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            logger.error(f"Failed to read manifest {manifest_path}: {exc}")
+            continue
+        if isinstance(manifest, dict) and manifest.get("requires_google_oauth"):
+            gated.add(template_dir.name)
+    return frozenset(gated)
+
+
 def _ensure_mcp_seed(room_id: str, config: Settings) -> None:
     """Seed every MCP server template into a room's data dir, once.
 
@@ -121,15 +174,22 @@ def _ensure_mcp_seed(room_id: str, config: Settings) -> None:
     copy of that MCP's source — the room may freely modify it (a container
     restart is required for Hermes to pick up changes; it has no hot-reload).
     Repo template updates never reach a room that already has a seeded copy.
+    Templates requiring Google OAuth are skipped when this deployment has no
+    Google OAuth configured (see Settings.google_oauth_enabled) — a room
+    created while disabled never gets those MCPs seeded (write-once means
+    enabling Google later won't retroactively add them to existing rooms).
 
     Args:
         room_id: Unique identifier for the chatroom.
         config: Application settings containing the templates and data directories.
     """
+    mcp_templates_root = config.HERMES_TEMPLATES_DIR / "mcp"
+    skip = frozenset() if config.google_oauth_enabled else _google_gated_template_names(mcp_templates_root)
     _seed_templates(
-        config.HERMES_TEMPLATES_DIR / "mcp",
+        mcp_templates_root,
         config.DATA_DIR / room_id / "mcp",
         seed_dotenv=True,
+        skip=skip,
     )
 
 
@@ -178,12 +238,25 @@ def _build_container_env(config: Settings) -> dict[str, str]:
 def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, str]]:
     """Build Docker volume configuration for a room's container.
 
-    Mounts exactly one volume: the room's data directory (read-write,
-    room-isolated) at CONTAINER_DATA_DIR. Plugin and MCP server source used
-    to be separate shared, read-only mounts; both are now seeded once into
-    this same data directory instead (see _ensure_plugin_seed,
-    _ensure_mcp_seed), so each room can edit its own copy independently —
-    no extra mount is needed since they already live under the rw mount.
+    Always mounts the room's data directory (read-write, room-isolated) at
+    CONTAINER_DATA_DIR. Plugin and MCP server source used to be separate
+    shared, read-only mounts; both are now seeded once into this same data
+    directory instead (see _ensure_plugin_seed, _ensure_mcp_seed), so each
+    room can edit its own copy independently — no extra mount is needed
+    since they already live under the rw mount.
+
+    When Google OAuth is configured for this deployment, also mounts the
+    shared (deployment-wide, NOT per-room) tokens/credentials directory at
+    CONTAINER_GOOGLE_DIR — every room's gmail/drive/google-calendar MCP
+    reads/writes the same files there, since Google accounts aren't
+    per-room. CONTAINER_GOOGLE_DIR is a neutral path outside /root and
+    /opt/data: MCP subprocesses run as uid 10000 `hermes` (can't traverse
+    /root, mode 700), and the gateway's XDG_CONFIG_HOME=/opt/data/.config
+    would redirect "default" config paths per-room — so all consumers are
+    given explicit env paths under this mount instead (see each Google
+    MCP's mcp.manifest.yaml). This mount is only added at container
+    *creation* time — toggling Google OAuth on/off requires recreating
+    already-existing room containers to pick up the change.
 
     Args:
         room_id: Unique identifier for the chatroom.
@@ -193,9 +266,12 @@ def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, 
         Docker volumes mapping dict for use with containers.run().
     """
     host_data_path = str(config.HOST_DATA_DIR / room_id)
-    return {
+    volumes = {
         host_data_path: {"bind": CONTAINER_DATA_DIR, "mode": "rw"},
     }
+    if config.google_oauth_enabled:
+        volumes[str(config.google_host_dir)] = {"bind": CONTAINER_GOOGLE_DIR, "mode": "rw"}
+    return volumes
 
 
 def _format_plugins_yaml(plugins: list[str]) -> str:
@@ -214,7 +290,7 @@ def _format_plugins_yaml(plugins: list[str]) -> str:
 
 
 def _load_mcp_manifest(mcp_dir: Path, room_id: str) -> dict[str, Any] | None:
-    """Load one MCP's seeded mcp.manifest.yaml, substituting {room_id}.
+    """Load one MCP's seeded mcp.manifest.yaml, substituting {room_id}/{account_key}.
 
     A missing or malformed manifest is logged and skipped rather than
     raised — one broken MCP must not stop config.yaml from being written
@@ -224,6 +300,10 @@ def _load_mcp_manifest(mcp_dir: Path, room_id: str) -> dict[str, Any] | None:
         mcp_dir: The room's seeded copy of one MCP, e.g. data/<room_id>/mcp/secretary/.
         room_id: Unique chatroom identifier substituted for ``{room_id}`` in
             the manifest (e.g. secretary-mcp's per-user state key).
+            ``{account_key}`` is also substituted, with the room id
+            lowercased — required by @cocal/google-calendar-mcp's
+            lowercase-only GOOGLE_ACCOUNT_MODE validation (and used
+            consistently by the router's Google OAuth token store).
 
     Returns:
         The parsed manifest mapping, or None if it could not be loaded.
@@ -233,7 +313,11 @@ def _load_mcp_manifest(mcp_dir: Path, room_id: str) -> dict[str, Any] | None:
         logger.error(f"MCP [{mcp_dir.name}] has no mcp.manifest.yaml; skipping")
         return None
     try:
-        raw = manifest_path.read_text(encoding="utf-8").replace("{room_id}", room_id)
+        raw = (
+            manifest_path.read_text(encoding="utf-8")
+            .replace("{room_id}", room_id)
+            .replace("{account_key}", room_id.lower())
+        )
         manifest = yaml.safe_load(raw)
     except (OSError, yaml.YAMLError) as exc:
         logger.error(f"Failed to load MCP manifest {manifest_path}: {exc}")
@@ -277,7 +361,11 @@ def _format_mcp_section(room_id: str, config: Settings) -> str:
         servers[name] = {
             "command": manifest.get("command", "node"),
             "args": args,
-            **{k: v for k, v in manifest.items() if k not in ("command", "args")},
+            **{
+                k: v
+                for k, v in manifest.items()
+                if k not in ("command", "args", "requires_google_oauth")
+            },
         }
         toolsets.append(f"mcp-{name}")
 
@@ -288,12 +376,12 @@ def _format_mcp_section(room_id: str, config: Settings) -> str:
 
 
 # Filename of the config.yaml template under HERMES_TEMPLATES_DIR (repo path:
-# src/hermes/config.yaml.template), alongside the mcp/ and plugin/ template
+# src/hermes/config.template.yml), alongside the mcp/ and plugin/ template
 # dirs. Unlike those, it isn't seeded verbatim — it's a str.format() template
 # with {model}/{base_url}/{plugins_section}/{mcp_section} placeholders filled
 # in at write time, since a room's actual values (LLM settings, which MCPs
 # got seeded) aren't known until then.
-_CONFIG_YAML_TEMPLATE_FILENAME = "config.yaml.template"
+_CONFIG_YAML_TEMPLATE_FILENAME = "config.template.yml"
 
 
 def _ensure_config_yaml(room_id: str, config: Settings) -> None:
@@ -414,6 +502,10 @@ def _create_container(
     _ensure_mcp_seed(room_id, config)
     _ensure_plugin_seed(room_id, config)
     _ensure_config_yaml(room_id, config)
+    if config.google_oauth_enabled:
+        # Pre-create so Docker doesn't create it root-owned as a side effect
+        # of the bind mount below (see _build_volume_config).
+        config.google_dir.mkdir(parents=True, exist_ok=True)
 
     ports: dict[str, int] | None = None
     if not config.ROUTER_IN_DOCKER:

@@ -9,6 +9,8 @@ import pytest
 
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import (
+    CONTAINER_GOOGLE_DIR,
+    _build_volume_config,
     _ensure_config_yaml,
     _ensure_mcp_seed,
     _ensure_plugin_seed,
@@ -67,14 +69,14 @@ def _write_mcp_template(templates_dir: Path, name: str, manifest_yaml: str) -> P
 def _write_config_template(templates_dir: Path) -> None:
     """Write the config.yaml.format() template used by _ensure_config_yaml.
 
-    Mirrors src/hermes/config.yaml.template so tests exercise the same
+    Mirrors src/hermes/config.template.yml so tests exercise the same
     placeholder shape without depending on the real repo file's content.
 
     Args:
         templates_dir: The HERMES_TEMPLATES_DIR root to write under.
     """
     templates_dir.mkdir(parents=True, exist_ok=True)
-    (templates_dir / "config.yaml.template").write_text(
+    (templates_dir / "config.template.yml").write_text(
         "model:\n"
         "  default: {model}\n"
         "  provider: custom\n"
@@ -309,7 +311,7 @@ def test_ensure_config_yaml_writes_provider_block(tmp_path: Path) -> None:
 
 
 def test_ensure_config_yaml_skips_when_template_missing(tmp_path: Path) -> None:
-    """No config.yaml is written if config.yaml.template doesn't exist under HERMES_TEMPLATES_DIR."""
+    """No config.yaml is written if config.template.yml doesn't exist under HERMES_TEMPLATES_DIR."""
     settings = Settings(
         LINE_CHANNEL_SECRET="test_secret",
         LINE_CHANNEL_ACCESS_TOKEN="test_token",
@@ -458,3 +460,129 @@ def test_docker_api_error_is_raised() -> None:
         pytest.raises(docker.errors.APIError),
     ):
         get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
+
+
+# ---------------------------------------------------------------------------
+# Google OAuth integration — {account_key} substitution, gated seeding,
+# conditional volume mount, requires_google_oauth key stripping.
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_google(tmp_path: Path, *, enabled: bool) -> Settings:
+    """Build Settings rooted at tmp_path, optionally with Google OAuth "enabled".
+
+    "Enabled" here means google_oauth_enabled is True: a public URL is set
+    and a fake web credentials file exists under google_web_creds_path.
+
+    Args:
+        tmp_path: Pytest tmp_path fixture.
+        enabled: Whether to configure Google OAuth as enabled.
+
+    Returns:
+        A Settings instance for use in these tests.
+    """
+    settings = Settings(
+        LINE_CHANNEL_SECRET="test_secret",
+        LINE_CHANNEL_ACCESS_TOKEN="test_token",
+        DATA_DIR=tmp_path / "data",
+        HOST_DATA_DIR=tmp_path / "data",
+        HERMES_TEMPLATES_DIR=tmp_path / "templates",
+        HERMES_API_SERVER_KEY="test_api_server_key",
+        LLM_BASE_URL="https://spark2-vllm.dalue.co/v1",
+        LLM_MODEL="qwen3-next",
+        GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com" if enabled else "",
+    )
+    if enabled:
+        settings.google_web_creds_path.parent.mkdir(parents=True, exist_ok=True)
+        settings.google_web_creds_path.write_text(
+            '{"web": {"client_id": "x", "client_secret": "y"}}', encoding="utf-8"
+        )
+    return settings
+
+
+def test_account_key_substitution_lowercases_room_id(tmp_path: Path) -> None:
+    """{account_key} in a manifest is substituted with the lowercased room id."""
+    templates_dir = tmp_path / "templates"
+    _write_mcp_template(
+        templates_dir,
+        "google-calendar",
+        'command: google-calendar-mcp\nargs: []\nenv:\n  GOOGLE_ACCOUNT_MODE: "{account_key}"\n',
+    )
+    settings = _settings_with_google(tmp_path, enabled=True)
+    _write_config_template(settings.HERMES_TEMPLATES_DIR)
+
+    _ensure_mcp_seed("U_ROOM_ABC", settings)
+    _ensure_config_yaml("U_ROOM_ABC", settings)
+
+    written = (settings.DATA_DIR / "U_ROOM_ABC" / "config.yaml").read_text(encoding="utf-8")
+    assert "GOOGLE_ACCOUNT_MODE: u_room_abc" in written
+
+
+def test_requires_google_oauth_key_not_in_rendered_mcp_section(tmp_path: Path) -> None:
+    """The manifest-only `requires_google_oauth` key must not leak into config.yaml."""
+    templates_dir = tmp_path / "templates"
+    _write_mcp_template(
+        templates_dir,
+        "gmail",
+        "command: /opt/tools/.venv/bin/python3\n"
+        "args: [server.py]\n"
+        'env:\n  GOOGLE_ACCOUNT_MODE: "{account_key}"\n'
+        "requires_google_oauth: true\n",
+    )
+    settings = _settings_with_google(tmp_path, enabled=True)
+    _write_config_template(settings.HERMES_TEMPLATES_DIR)
+
+    _ensure_mcp_seed("room_AAA", settings)
+    _ensure_config_yaml("room_AAA", settings)
+
+    written = (settings.DATA_DIR / "room_AAA" / "config.yaml").read_text(encoding="utf-8")
+    assert "requires_google_oauth" not in written
+
+
+def test_google_gated_templates_skipped_when_disabled(tmp_path: Path) -> None:
+    """A template with requires_google_oauth: true is not seeded when Google OAuth is disabled."""
+    templates_dir = tmp_path / "templates"
+    _write_mcp_template(
+        templates_dir,
+        "gmail",
+        "command: /opt/tools/.venv/bin/python3\nargs: [server.py]\nrequires_google_oauth: true\n",
+    )
+    _write_mcp_template(templates_dir, "secretary", "command: node\nargs: [server.mjs]\n")
+    settings = _settings_with_google(tmp_path, enabled=False)
+
+    _ensure_mcp_seed("room_AAA", settings)
+
+    seeded_root = settings.DATA_DIR / "room_AAA" / "mcp"
+    assert not (seeded_root / "gmail").exists()
+    assert (seeded_root / "secretary").exists()
+
+
+def test_google_gated_templates_seeded_when_enabled(tmp_path: Path) -> None:
+    """A template with requires_google_oauth: true IS seeded when Google OAuth is enabled."""
+    templates_dir = tmp_path / "templates"
+    _write_mcp_template(
+        templates_dir,
+        "gmail",
+        "command: /opt/tools/.venv/bin/python3\nargs: [server.py]\nrequires_google_oauth: true\n",
+    )
+    settings = _settings_with_google(tmp_path, enabled=True)
+
+    _ensure_mcp_seed("room_AAA", settings)
+
+    assert (settings.DATA_DIR / "room_AAA" / "mcp" / "gmail").exists()
+
+
+def test_volume_config_adds_google_mount_only_when_enabled(tmp_path: Path) -> None:
+    """The shared Google credentials dir is mounted only when google_oauth_enabled is True."""
+    enabled_settings = _settings_with_google(tmp_path, enabled=True)
+    disabled_settings = _settings_with_google(tmp_path, enabled=False)
+
+    enabled_volumes = _build_volume_config("room_AAA", enabled_settings)
+    disabled_volumes = _build_volume_config("room_AAA", disabled_settings)
+
+    assert str(enabled_settings.google_host_dir) in enabled_volumes
+    assert enabled_volumes[str(enabled_settings.google_host_dir)] == {
+        "bind": CONTAINER_GOOGLE_DIR,
+        "mode": "rw",
+    }
+    assert str(disabled_settings.google_host_dir) not in disabled_volumes

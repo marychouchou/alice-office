@@ -305,6 +305,35 @@ bind mount 蓋住），所以共用的相依套件改烤在再上一層的 `/opt
 `Dockerfile.hermes`）——所有房間、所有 MCP 共用同一份，改依賴版本要重 build image；
 改 MCP 的程式邏輯只要房間自己 restart。
 
+依賴清單是宣告式＋鎖版的：`src/hermes/mcp/package.json`（所有 MCP template 依賴的
+聯集）+ 對應的 `src/hermes/mcp/package-lock.json`（`npm install --package-lock-only`
+產生，commit 進版控），image build 時用 `npm ci` 安裝，可重現。
+`tests/test_hermes_shared_node_deps.py` 會檢查每個 `src/hermes/mcp/<name>/package.json`
+的每個 dependency 都以相同版本字串出現在共用的 `package.json`，避免漏同步。
+
+#### 如果要寫 Python MCP server
+
+`/opt/tools/.venv`（`src/hermes/runtime/pyproject.toml` 管理的那個共用 venv）是給
+**plugin script／skill 臨時用**的，**不是**給 Python MCP server 用的共用環境。每個
+Python MCP 應該有自己專屬的 venv（自己的 `pyproject.toml` + `uv.lock`，image build
+時 sync 進自己的路徑，例如 `/opt/mcp-venvs/<name>/.venv`），`mcp.manifest.yaml` 的
+`command:` 直接指向該 venv 的直譯器絕對路徑（`/opt/mcp-venvs/<name>/.venv/bin/python3`），
+不要指向共用的 `tools-python`——這樣不同 MCP 之間的套件版本才不會互相牽制，跟現在
+每個 Node MCP 各自宣告 `package.json` 是同一個精神（Python 沒有 ESM walk-up那種可以
+安全共用的機制，沒必要硬共用）。
+
+另外要注意（[官方 MCP 文件](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp)：
+「For stdio servers, Hermes does not blindly pass your full shell environment.
+Only explicitly configured `env` plus a safe baseline are passed through.」，
+且在活的房間容器內 `docker exec` 讀真正在跑的 secretary MCP process 的
+`/proc/<pid>/environ` 也實測驗證過）：Hermes gateway spawn MCP subprocess 時，
+**預設只會繼承一小組安全基底環境變數**（實測為 `HOME`／`PATH` 這幾個），不是繼承
+整個環境。`command:` 能找到執行檔是因為 `PATH` 有繼承（`/opt/node_modules/.bin`、
+`/usr/local/bin` 都在裡面），但除此之外任何這個 MCP 需要的環境變數（API key、room
+id 等）都要自己在 `mcp.manifest.yaml` 的 `env:` 區塊明確宣告，就像 `secretary`
+宣告 `SECRETARY_LINE_USER_ID` 那樣——不能假設會從容器繼承到。`env:` 的值支援
+`${VAR}` 內插語法，於 server 連線當下從環境變數（含 `~/.hermes/.env`）解析。
+
 #### 每個 MCP 自己的密鑰
 
 `GOOGLE_MAPS_API_KEY` 這類 secretary MCP 專屬密鑰**不走這個 repo 的 `.env` /
@@ -348,8 +377,12 @@ SECRETARY_LINE_USER_ID=test_room npx @modelcontextprotocol/inspector node server
 `data/<room_id>/{mcp,plugins,config.yaml}` 讓它下次重新從樣板 seed。
 
 **Level 2（完整驗證，套件有變動時必跑）**：改了某個 MCP 的 `package.json`
-（新增/升級依賴）時，記得同步更新 `src/hermes/mcp/package.json`（所有 MCP 共用依賴的
-聯集），然後重 build，因為共用的 `/opt/node_modules` 只在 image build 時安裝一次：
+（新增/升級依賴）時，因為共用的 `/opt/node_modules` 只在 image build 時安裝一次，
+流程是：
+
+1. 同步更新 `src/hermes/mcp/package.json`（所有 MCP 共用依賴的聯集）
+2. 重新產生 lockfile：`cd src/hermes/mcp && npm install --package-lock-only`
+3. 重 build image、bump `HERMES_IMAGE`、重建房間容器：
 
 ```bash
 docker build -f Dockerfile.hermes -t alice-hermes-agent:v2 .
@@ -377,8 +410,9 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v2 .
 | image_ocr | `pymupdf` + 外部 Vision API | ❌ 需衍生 image + API server |
 | webdriver | `selenium` + geckodriver + Firefox | ❌ 需衍生 image（plugin 自動隱藏） |
 
-**Production 建法**——用 `Dockerfile.hermes` 建衍生 image 預裝 sympy + pymupdf（烤進
-Hermes venv，跟 plugin 原始碼本身無關——原始碼一律是 seed，從不烤進 image）：
+**Production 建法**——用 `Dockerfile.hermes` 建衍生 image 預裝 sympy + pymupdf +
+selenium（烤進獨立的 `/opt/tools/.venv`，跟 plugin 原始碼本身無關——原始碼一律是
+seed，從不烤進 image）：
 
 ```bash
 docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
@@ -390,6 +424,20 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
 只有當功能必須跑在 Hermes **進程內**（真 plugin，不是 MCP）才走衍生 image：
 `FROM nousresearch/hermes-agent:<pin>`，改 `HERMES_IMAGE` 逐房重建。
 這條路每次升級 Hermes 都要 rebase，成本高，沒必要不要走。
+
+**Python 依賴是宣告式＋鎖版的**：`src/hermes/runtime/pyproject.toml`（third-party
+套件清單）+ 對應的 `src/hermes/runtime/uv.lock`。跟 hermes-agent 自己的 venv
+（`/opt/hermes/.venv`，只放 `tools.py` 這個 in-process plugin 層需要的 `pyyaml`）
+完全隔離，不會被上游 Hermes base image 升級影響。加新依賴的流程：
+
+1. 編輯 `src/hermes/runtime/pyproject.toml`
+2. `cd src/hermes/runtime && uv lock` 重新產生 `uv.lock`，兩個檔都 commit
+3. 重 build image、bump `HERMES_IMAGE`、重建房間容器（同上 MCP 依賴的三步驟）
+
+容器內對應的執行環境是 `/opt/tools/.venv`：plugin 腳本用 `TOOLS_PYTHON` 環境變數解析
+到這個 venv；login shell（`/etc/profile.d/90-alice-tools.sh`）也會 export 同一個
+變數，並把 `/opt/node_modules/.bin` 加進 PATH，`/usr/local/bin/tools-python` 是
+指向這個 venv 直譯器的 wrapper script，可在容器內任何 shell 直接呼叫。
 
 ##### 測試 plugins 修改
 
@@ -437,6 +485,159 @@ uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
 | 3 | 真 LINE（自建 OA + ngrok） | LINE 平台行為（媒體、reply token…） | 驗收、動到 LINE 相關 code 時 |
 | 4 | canary 房間 | 正式環境、真使用者流量 | release 前 |
 
+## Google Workspace 整合
+
+Calendar / Gmail / Drive 三個 MCP，移植自內部的 `google-workspace-pack`（單機安裝版），
+但**架構上不是直接搬過來**——原始 pack 假設 Hermes 直接跑在單一主機上、oauth 攔截靠
+Hermes 自己的 plugin hook。這裡的部署模式（router 動態管理多個 Hermes container、
+router↔container 只透過 `api_server` 的 `/v1/chat/completions` 溝通）讓那個假設不成立：
+
+- **oauth_gate 不能做成 Hermes plugin**：`/v1/chat/completions` 這條路徑完全不會觸發
+  Hermes 的 `pre_gateway_dispatch` hook（那是給 Hermes 自己內建的 LINE adapter 用的），
+  所以攔截未授權訊息的邏輯搬進了 router 本身（`google_oauth.check_google_authorization`，
+  由 `router.py` 的 `_process_and_reply` 在呼叫 agent **之前**呼叫）。
+- **原本獨立跑的 Flask OAuth Server 併進了這個 router**：反正 router 本來就是對外的
+  公開 HTTPS 端點，`/oauth/start`、`/oauth/callback` 直接變成 router 自己的 FastAPI
+  路由（`google_oauth.py` 的 `oauth_router`），不用另外起一個 process、另外顧一個
+  公開網址。
+- **每個房間各自的 MCP，但共用同一組 Google 帳號**：`gmail`、`drive`、`google-calendar`
+  三個 MCP 跟 `secretary` 一樣是 per-room seed（`_ensure_mcp_seed`）、per-room process，
+  但 token／credentials 是**整個部署共用一份**（不像 `data/<room_id>/` 逐房隔離）——因為
+  一個 LINE 房間對應的是一個真人，Google 帳號本來就跟著這個人走，不是跟著房間的容器走。
+  共用的 `data/_google/` 掛進**每個**房間 container 的 `/opt/google-workspace`
+  （`container_manager.CONTAINER_GOOGLE_DIR`）。掛載點刻意選在 `/root` 與
+  `/opt/data` **之外**的中立路徑，且所有 consumer 都吃 manifest `env:` 明確給的
+  絕對路徑、不吃任何套件預設——因為實機驗證發現：(1) Hermes gateway 跟每個 MCP
+  subprocess 都以 `hermes`（uid 10000）執行而非 root，`/root` 是 mode 700，
+  `/root/...` 底下的任何路徑對 MCP 都是 EACCES；(2) gateway 設了
+  `XDG_CONFIG_HOME=/opt/data/.config`，套件「預設」的 `~/.config/...` 路徑會被
+  悄悄重導到每個房間各自的 data dir，token 會存錯地方。
+
+```mermaid
+graph TD
+    User["LINE 使用者"]
+    LINE["LINE 平台"]
+
+    subgraph Router["alice-office-router"]
+        Webhook["/webhook"]
+        Gate["google_oauth.check_google_authorization<br/>(_process_and_reply 呼叫 agent 前)"]
+        OauthRoutes["/oauth/start<br/>/oauth/callback"]
+    end
+
+    Google["Google OAuth /<br/>Calendar · Gmail · Drive API"]
+    SharedDir[("data/_google/<br/>tokens.json · gcp-oauth.keys*.json<br/>（部署共用，非逐房）")]
+
+    subgraph RoomA["hermes_{room_id} container"]
+        AgentA["Hermes gateway<br/>(uid 10000 hermes)"]
+        MountA["/opt/google-workspace<br/>(bind mount)"]
+        McpGmailA["gmail MCP"]
+        McpDriveA["drive MCP"]
+        McpCalA["google-calendar MCP"]
+    end
+
+    User -- "傳訊息" --> LINE
+    LINE -- "POST /webhook" --> Webhook
+    Webhook --> Gate
+    Gate -- "blocked：無 token" --> LINE
+    Gate -- "notice：缺 Drive scope（仍放行）" --> LINE
+    Gate -- "ok" --> AgentA
+    User -- "點授權連結" --> OauthRoutes
+    OauthRoutes <-- "code / token" --> Google
+    OauthRoutes -- "寫入" --> SharedDir
+    SharedDir -- "bind mount (rw)" --> MountA
+    AgentA --> McpGmailA & McpDriveA & McpCalA
+    McpGmailA & McpDriveA & McpCalA -- "讀 token /<br/>寫回 refresh" --> MountA
+    McpGmailA & McpDriveA & McpCalA -- "呼叫 API" --> Google
+```
+
+### GCP Console 設定摘要
+
+1. 建立/選擇 GCP 專案 → 啟用三個 API：**Google Calendar API**、**Gmail API**、
+   **Google Drive API**。
+2. 設定 OAuth 同意畫面（Consent screen）。
+3. 建立**兩個** OAuth 用戶端 ID（兩者用途不同，缺一不可）：
+   - **Web application**：Authorized redirect URIs 加入
+     `{GOOGLE_OAUTH_PUBLIC_URL}/oauth/callback`（LINE 使用者瀏覽器走的授權流程用，
+     router 的 `/oauth/start` `/oauth/callback` 兩個路由靠它）。
+   - **Desktop app（Installed）**：`@cocal/google-calendar-mcp` 跟
+     `scripts/google_reauth.py` 用它識別身份，走 localhost redirect，不需要在
+     GCP Console 額外設定 redirect URI。
+
+### 檔案放置
+
+兩份 credentials JSON 都下載後放到（**不進版控**，`data/` 本身已在 `.gitignore`）：
+
+```
+data/_google/gcp-oauth.keys.json            ← Web application client
+data/_google/gcp-oauth.keys.installed.json  ← Desktop (Installed) client
+data/_google/tokens.json                    ← 執行期自動產生，不用手動放
+```
+
+> **Linux host 部署注意**：container 內的 MCP process 以 `hermes`（uid 10000）
+> 執行，且 token refresh 會**寫回** `tokens.json`，所以 `data/_google/` 必須讓
+> uid 10000 可讀＋可寫（例如 `chown -R 10000 data/_google` 或
+> `chmod 777 data/_google`）。macOS 的 Docker Desktop 透過檔案共享層自動處理
+> 權限對映，不需要手動調。
+
+### 環境變數
+
+| 變數 | 說明 |
+|------|------|
+| `GOOGLE_OAUTH_PUBLIC_URL` | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝整個 Google 整合停用：oauth 路由回 400、新房間不 seed 這三個 MCP、訊息也不會被攔。 |
+| `GOOGLE_OAUTH_GATE` | 預設 `true`。設 `false` 時 oauth 路由照常運作，只是不擋任何房間的訊息（適合先把 MCP 跑起來、還沒想清楚要不要強制授權的階段）。 |
+
+`Settings.google_oauth_enabled`（`config.py`）同時檢查
+`GOOGLE_OAUTH_PUBLIC_URL` 非空**且** `data/_google/gcp-oauth.keys.json` 存在，兩者缺一都視為停用。
+
+### 訊息授權判斷流程
+
+`check_google_authorization` 每則訊息都會跑一次，`ok`／`notice`／`blocked` 三種結果對應不同行為：
+
+```mermaid
+flowchart TD
+    Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"google_oauth_enabled<br/>且 GOOGLE_OAUTH_GATE？"}
+    Enabled -- "否" --> Ok1["ok：直接放行"]
+    Enabled -- "是" --> HasToken{"tokens.json<br/>有這個 account_key？"}
+    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent"]
+    HasToken -- "有" --> Expired{"access_token 過期？"}
+    Expired -- "是且無 refresh_token" --> Blocked
+    Expired -- "否，或有 refresh_token" --> Scopes{"scope 包含<br/>calendar/gmail.modify/drive？"}
+    Scopes -- "缺 Drive scope" --> Notice["notice：推播重新授權提示<br/>仍呼叫 agent（calendar/gmail 可用）"]
+    Scopes -- "齊全" --> Ok2["ok：正常呼叫 agent"]
+```
+
+### lowercase 帳號 key（容易忽略、務必注意）
+
+`@cocal/google-calendar-mcp` 驗證 `GOOGLE_ACCOUNT_MODE` 必須符合
+`/^[a-z0-9_-]{1,64}$/`（只准小寫），但 LINE room id 開頭是大寫 `U`/`C`/`R`。
+因此整個 Google 整合統一用 **`room_id.lower()`** 當帳號 key（見
+`alice_office_router.google_oauth.account_key`）：`data/_google/tokens.json` 的
+key、`/oauth/start?user_id=`、`/oauth/callback` 存 token、gate 檢查、三個 MCP
+manifest 的 `{account_key}` 佔位符，全部都是同一個 lowercase key，不能有任何
+一處漏掉轉換，否則會出現「明明授權過但 gate 還是說沒授權」這種對不起來的情況。
+
+### 影響既有房間
+
+- **改 Google 相關設定要重建房間 container**：`_build_volume_config` 只在
+  container **建立**當下決定要不要掛 `data/_google/`——先前用停用狀態建立的房間，
+  之後補上 `GOOGLE_OAUTH_PUBLIC_URL` 跟 credentials 也不會自動補掛，需要
+  `docker rm -f hermes_<room_id>` 重建。
+- **write-once 對 Google MCP 一樣適用**：`gmail`／`drive`／`google-calendar` 三個
+  manifest 都有 `requires_google_oauth: true`，`_ensure_mcp_seed` 只在
+  `Settings.google_oauth_enabled` 為真時才會 seed 它們——在停用狀態下建立的房間，
+  即使之後啟用了 Google 整合，也不會回頭幫它補 seed，一樣要重建房間。
+
+### 本機開發：一次性授權
+
+有瀏覽器的開發機可以跳過走 LINE 授權，直接用腳本產生 token：
+
+```bash
+uv run python scripts/google_reauth.py U_LOCAL_TEST
+```
+
+會自動把 `U_LOCAL_TEST` 轉成小寫存進 `data/_google/tokens.json`。詳細用法／路徑覆寫
+見 `scripts/google_reauth.py --help`。
+
 ## 疑難排解
 
 - **compose 啟動直接失敗**：`hermes_global_net` 沒建（network 宣告為 `external`），
@@ -469,6 +670,7 @@ uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
 | `uv run fastapi dev src/alice_office_router/main.py` | 開發伺服器（host 模式） |
 | `uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "..."` | 模擬 LINE 訊息打整條路 |
 | `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看 extension 原始碼，存檔自動 restart |
+| `uv run python scripts/google_reauth.py <room_id>` | 本機一次性 Google 授權（見「Google Workspace 整合」） |
 
 提交前必跑：
 
@@ -490,6 +692,7 @@ alice-office-router/
 │       ├── line_dedup.py        # Webhook event 去重（in-memory）
 │       ├── hermes_client.py     # 呼叫 Hermes 容器的 /v1/chat/completions
 │       ├── container_manager.py # Docker 容器動態管理
+│       ├── google_oauth.py      # Google OAuth 路由 + 授權 gate（見「Google Workspace 整合」）
 │       └── config.py            # pydantic-settings 設定
 ├── tests/
 │   ├── conftest.py
@@ -499,14 +702,24 @@ alice-office-router/
 │   ├── test_line_dedup.py
 │   ├── test_hermes_client.py
 │   ├── test_router.py
-│   └── test_container_manager.py
+│   ├── test_container_manager.py
+│   ├── test_google_oauth.py
+│   └── test_hermes_shared_node_deps.py  # 檢查各 MCP package.json 與共用 package.json 同步
 ├── src/hermes/                  # MCP / plugin 原始碼樣板（seed 進每個房間，見上方「C. Plugin / MCP」）
-│   ├── config.yaml.template     # 每個新房間 config.yaml 的樣板（_ensure_config_yaml 讀取後 .format() 填值）
+│   ├── config.template.yml      # 每個新房間 config.yaml 的樣板（_ensure_config_yaml 讀取後 .format() 填值）
 │   ├── mcp/
 │   │   ├── package.json         # 所有 MCP 共用依賴（烤進 image 的 /opt/node_modules）
-│   │   └── secretary/           # todo/meeting/translate/... MCP server（Node ESM stdio）
-│   └── plugin/
-│       └── local-tools/         # 台灣薪資/法規/數學/記憶/OCR/瀏覽器 工具包
+│   │   ├── package-lock.json    # 對應鎖版檔（image build 用 npm ci）
+│   │   ├── secretary/           # todo/meeting/translate/... MCP server（Node ESM stdio）
+│   │   ├── gmail/                # Gmail MCP server（Python stdio，requires_google_oauth）
+│   │   ├── drive/                # Google Drive MCP server（Python stdio，requires_google_oauth）
+│   │   └── google-calendar/      # thin registration，實際 server 是烤進 image 的 npm 套件
+│   ├── plugin/
+│   │   └── local-tools/         # 台灣薪資/法規/數學/記憶/OCR/瀏覽器 工具包
+│   ├── runtime/                 # 共用 Python 工具環境（烤進 image 的 /opt/tools/.venv）
+│   │   ├── pyproject.toml       # third-party 套件清單（sympy/pymupdf/selenium）
+│   │   ├── uv.lock              # 對應鎖版檔（image build 用 uv sync --locked）
+│   │   └── profile-tools.sh     # login shell 用，export TOOLS_PYTHON + PATH
 ├── scripts/
 │   └── test_webhook.py          # 手動 end-to-end 測試腳本
 ├── docs/                        # 設計文件（不進版控，clone 不會有；實質內容以本 README 為準）
@@ -533,6 +746,8 @@ alice-office-router/
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | | 共用 LLM 後端設定，自動寫入每個新房間的 `config.yaml` |
 | `ROUTER_IN_DOCKER` | | Router 是否跑在 Docker 內（預設 `true`）；本機開發用 `uv run uvicorn` 時設為 `false`，容器會改為發布隨機 host port |
 | `DEFAULT_PLUGINS` | | 寫入每個新房間 config.yaml 的預設 plugin 清單（逗號分隔，預設 `local-tools`），名稱需對應 `HERMES_TEMPLATES_DIR/plugin/` 底下已 seed 的目錄名 |
+| `GOOGLE_OAUTH_PUBLIC_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝ Google Workspace 整合停用，見「[Google Workspace 整合](#google-workspace-整合)」 |
+| `GOOGLE_OAUTH_GATE` | | 預設 `true`。設 `false` 時 Google OAuth 路由照常運作，只是不擋任何房間的訊息 |
 
 ## 安全性
 

@@ -5,6 +5,7 @@
   "description": "Not a runnable MCP server — just the shared Node.js runtime dependencies for every MCP server template under src/hermes/mcp/<name>/. Baked into the Hermes image at /opt/node_modules by Dockerfile.hermes. Each room's seeded MCP source (server.mjs) is ESM and resolves these via directory-walk-up node_modules lookup, since ESM ignores NODE_PATH. Keep in sync with the union of every MCP template's own package.json dependencies.",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@cocal/google-calendar-mcp": "2.6.2"
   }
 }
