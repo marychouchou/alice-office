@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Container-only defaults for DATA_DIR/HERMES_TEMPLATES_DIR (see their field
+# docs below). Host-mode dev must override both — see _validate_host_mode_paths.
+_DOCKER_DEFAULT_DATA_DIR = Path("/app/data")
+_DOCKER_DEFAULT_HERMES_TEMPLATES_DIR = Path("/app/hermes-templates")
 
 
 class Settings(BaseSettings):
@@ -12,7 +18,7 @@ class Settings(BaseSettings):
 
     LINE_CHANNEL_SECRET: str
     LINE_CHANNEL_ACCESS_TOKEN: str
-    DATA_DIR: Path = Path("/app/data")
+    DATA_DIR: Path = _DOCKER_DEFAULT_DATA_DIR
     HOST_DATA_DIR: Path = Path("/app/data")
     HERMES_IMAGE: str = "nousresearch/hermes-agent"
     HERMES_NETWORK: str = "hermes_global_net"
@@ -40,7 +46,7 @@ class Settings(BaseSettings):
     # those is a str.format() template rather than something copied verbatim.
     # In Docker mode, docker-compose.yml mounts ./src/hermes here read-only.
     # Host-dev mode must point this at the repo's actual src/hermes path.
-    HERMES_TEMPLATES_DIR: Path = Path("/app/hermes-templates")
+    HERMES_TEMPLATES_DIR: Path = _DOCKER_DEFAULT_HERMES_TEMPLATES_DIR
     # Comma-separated plugin names written into every new room's config.yaml
     # under plugins.enabled. These become default tools for all containers.
     # Names must match seeded plugin directory names under HERMES_TEMPLATES_DIR/plugin/.
@@ -54,6 +60,41 @@ class Settings(BaseSettings):
     # inbound LINE messages are never blocked pending Google authorization
     # (see google_oauth.check_google_authorization).
     GOOGLE_OAUTH_GATE: bool = True
+
+    @model_validator(mode="after")
+    def _validate_host_mode_paths(self) -> Settings:
+        """Fail fast when host-mode dev left DATA_DIR/HERMES_TEMPLATES_DIR unset.
+
+        Both default to container-only paths (see their field docs above)
+        that don't exist on a host filesystem. Host mode must override them;
+        without this check, the router starts up fine and only fails much
+        later — silently, per room, the first time a room's container is
+        created (see README 「設定環境變數」).
+
+        Returns:
+            Self, unchanged — this validator only raises, never mutates.
+
+        Raises:
+            ValueError: If ROUTER_IN_DOCKER is False but DATA_DIR or
+                HERMES_TEMPLATES_DIR are still at their container-only defaults.
+        """
+        if self.ROUTER_IN_DOCKER:
+            return self
+        unset = [
+            name
+            for name, default in (
+                ("DATA_DIR", _DOCKER_DEFAULT_DATA_DIR),
+                ("HERMES_TEMPLATES_DIR", _DOCKER_DEFAULT_HERMES_TEMPLATES_DIR),
+            )
+            if getattr(self, name) == default
+        ]
+        if unset:
+            raise ValueError(
+                f"ROUTER_IN_DOCKER=false (host mode) but {', '.join(unset)} still at "
+                "container-only default(s). Override in .env to this repo's absolute "
+                "path — see README 「設定環境變數」."
+            )
+        return self
 
     @property
     def google_dir(self) -> Path:

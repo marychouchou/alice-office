@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from alice_office_router.config import get_settings
 from alice_office_router.google_oauth import oauth_router
 from alice_office_router.router import router
 
@@ -24,6 +25,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         None during the application's running phase.
     """
     logger.info("Alice Office Router starting up.")
+    get_settings()  # fail fast on misconfiguration (see Settings validators)
     yield
     logger.info("Alice Office Router shutting down.")
 

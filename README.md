@@ -156,6 +156,9 @@ LLM_MODEL=change-me
 > 且錯誤只會出現在 router 自己的 terminal（背景任務吞掉例外），對 `test_webhook.py` 呼叫方
 > 看起來像是「container 一直不存在」而非明確報錯。`HERMES_TEMPLATES_DIR` 是同一種
 > router-local 路徑，同樣道理：host 模式下要覆寫成 repo 的 `src/hermes` 絕對路徑。
+> 忘了覆寫這兩個現在不會再無聲無息——`Settings` 有一個 `model_validator`
+> （`config.py` 的 `_validate_host_mode_paths`）在 `ROUTER_IN_DOCKER=false` 卻仍是
+> 容器預設值時直接 fail-fast，app 啟動當下就會報錯，不用等到建房間才發現。
 > `HERMES_API_SERVER_KEY` 是 router 與每個 Hermes 容器共用的密鑰。
 > `LLM_*` 是共用的 LLM 後端設定，會自動寫入每個新房間的 `config.yaml`。
 
@@ -657,6 +660,40 @@ uv run python scripts/google_reauth.py U_LOCAL_TEST
   必須 recreate 容器。
 - **改了 config.yaml / skills / MCP 設定沒生效**：Hermes 沒有熱載入，
   restart 該房間容器才會生效。
+- **房間建立「看似成功」（container 活著、`/health` 200），但每次對話都 500**：跟上面
+  `DATA_DIR` 沒設的失敗模式不一樣——這種是**安靜的失敗**，先查 host 模式下
+  `HERMES_TEMPLATES_DIR` 是否也覆寫成 repo 的 `src/hermes` 絕對路徑（沒設一樣會拿
+  `/app/hermes-templates` 預設值，host 上不存在）。router 自己的 terminal 會有一行
+  `ERROR ... Missing config.yaml template at ... skipping room`，但因為容器照樣建立、
+  照樣通過健康檢查，這行 log 很容易被忽略；等到真的傳訊息才會在 `/v1/chat/completions`
+  上看到 500，這時候 `docker logs hermes_<room_id>` 會看到一堆
+  `FileNotFoundError: /opt/data/logs/...`、`sqlite3.OperationalError: unable to open
+  database file`（Hermes 自己該補完整的 `logs/`、`cron`、`kanban.db` 全部沒有東西可以
+  依附，因為房間根本沒有正確的 `config.yaml`）。
+- **`docker run` 建容器失敗，訊息是 `pull access denied` 或建了但
+  `exec: "gateway": executable file not found in $PATH`**：先確認 `HERMES_IMAGE`
+  指到的 image **真的是**用 `docker build -f Dockerfile.hermes` 建出來的，不是隨手
+  retag 一個名字很像但來源不同的 image（例如舊測試留下的 mock stand-in）。驗法：
+  `docker inspect <image> --format '{{.Config.Entrypoint}}'` 應該要是
+  `[/init /opt/hermes/docker/main-wrapper.sh]`；如果是空的 `[]`，代表這不是從
+  `nousresearch/hermes-agent` 衍生出來的 image，`command=["gateway","run"]` 會直接
+  找不到執行檔——retag 只會把「image 不存在」的錯誤換成這個更難查的錯誤，該重新
+  build 才對。
+- **本機起了 router 卻完全沒反應，ngrok 卻顯示 200/400 有打進來**：檢查 port 8000
+  是不是被另一個 process 卡住（尤其手上如果有這個 repo的多份 checkout，很容易忘記
+  關掉舊的 `fastapi dev`）：`lsof -nP -iTCP:8000 -sTCP:LISTEN`。同一個 port 號，
+  `127.0.0.1:8000`（具體位址）會比 `0.0.0.0:8000`（萬用位址）優先攔截本機流量，
+  所以就算你剛啟動的新 process 有正常跑起來，舊 process 沒關掉一樣會把 request 搶走。
+- **要完整重置一個房間（不只是改設定，是想從零重新建立）**：container 和資料夾要
+  **一起**清掉，只清其中一個會變成殭屍狀態（container 活著但掛載的資料夾是空的，
+  或資料夾在但 container 名稱衝突建不了新的）：
+  ```bash
+  docker rm -f hermes_<room_id>
+  rm -rf data/<room_id>
+  ```
+  下一次該房間收到訊息時會完整重新走一次 seed 流程（`config.yaml`／`mcp`／
+  `plugins`）。Google OAuth 的授權不會遺失，因為 token 存在共用的
+  `data/_google/tokens.json`，不在個別房間資料夾底下。
 
 ## 指令速查
 
