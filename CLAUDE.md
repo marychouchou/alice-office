@@ -73,6 +73,105 @@ commit前必跑：`uv run ruff check . && uv run mypy src/ && uv run pytest`
 - 不使用 `Any` 型別，除非絕對必要
 - 公開函式使用 Google style docstring
 
+## Growth Discipline
+
+codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看到訊號就做，不需要憑感覺判斷「夠不夠乾淨」。
+
+### 門檻訊號
+
+- **Rule of Three**：相同邏輯第 2 次出現 → 允許複製，但在兩處都留註解指向彼此；
+  第 3 次出現 → 抽成共用函式/模組。第 1 次出現時不要預先抽象。
+- **對同一個值的 if/elif 達 4 個分支**（如 LINE `msg_type`、MCP tool `name`、plugin
+  `command`）→ 改成 dict dispatch table（`{key: handler}`）。3 個以下維持 if/elif。
+  現況基準：`router.py::_resolve_inbound_text` 對 `msg_type` 是 4 個分支，剛好在門檻上
+  ——下次新增 LINE message type 時先改成 dispatch table，不要加第 5 個 if。
+- **單一檔案超過 400 行** → 檢查是否混了兩種以上「改動理由」（用下方路由表的分類判斷）。
+  有混 → 依改動理由拆檔；沒混（單一主題只是長，如 `google_oauth.py` 396 行整檔都是
+  OAuth）→ 不動。
+- **同一個 `data/<room_id>/` 子路徑在兩個以上模組各自拼字串** → 提升成 `config.py`
+  Settings 的 method（比照 `room_google_dir` 的做法），不要留兩份拼法。
+- **函式內控制結構巢狀超過 3 層**（如 if 裡 for 裡 try 裡 if；elif 鏈不算加一層）→
+  用 early return／guard clause／抽子函式打平到 3 層以內。現況超標的函式清單見
+  Known Anti-Patterns 第 9 條。
+
+### 消除特殊情況（寫完函式後的檢查點）
+
+這不是要求現在重構既有程式碼，是**新增程式碼時**的檢查點：寫完一個函式後，數一下
+裡面有幾個「這是特殊情況所以要分開處理」的分支（`if is_first_time`、
+`if not exists then create else use`、`if xxx_enabled` 這類）。**超過一個**就先想：
+能不能靠改資料結構或初始化方式讓正常路徑直接涵蓋它，而不是保留 if 繞過去。這是
+Linus Torvalds 講鏈結串列刪除節點時的 "good taste" 精神——特殊情況的數量反映的是
+資料結構／介面設計得好不好，不是要求風格模仿。
+
+- repo 內做對的例子：`google_oauth._load_tokens` 對不存在的檔案直接回 `{}`，
+  所以所有呼叫端都沒有「tokens.json 還沒建立」的分支。新的讀取類 helper 比照辦理
+  （在邊界把缺失正規化掉，讓呼叫端只有一條路徑）。
+- 邊界提醒：`_seed_templates` 的 `if dest_dir.exists(): continue` 是 write-once
+  語意本身（見 Hermes Container Model），不是待消除的特殊情況——不要「修」它。
+
+### 新程式碼放哪裡（路由表）
+
+依「這段程式碼將來會因為什麼原因被改動」決定位置：
+
+| 改動理由 | 放這裡 |
+|---|---|
+| LINE wire format（event 結構、訊息型別解析、簽章、送訊長度/則數限制） | `src/alice_office_router/line_*.py` |
+| container 生命週期（建立/啟動/健康等待/URL 解析） | `container_manager.py`——**docker SDK 只允許在這個檔案 import**（現況已如此，維持住） |
+| 房間 write-once seed（複製 template 到 `data/<room_id>/`） | 目前在 `container_manager.py`；要新增 seed 種類時，先把 seed 函式群抽成 `room_seed.py` 再加 |
+| 「這則訊息該不該進 agent」的 gate 判斷（如 Google OAuth gate） | 獨立模組提供回傳 status 的純函式（比照 `google_oauth.check_google_authorization`），router 只呼叫、不寫判斷內容 |
+| 對 Hermes agent 的 HTTP 協定 | `hermes_client.py` |
+| 環境變數與路徑推導 | `config.py` 的 Settings |
+| 新的 agent 能力（工具） | `src/hermes/mcp/<name>/` 或 `src/hermes/plugin/` 的 template，不是 router 的功能 |
+
+### Known Anti-Patterns（2026-07-12 掃描）
+
+改到這些檔案時適用；每條都寫明觸發時機和該做的事：
+
+1. **`src/hermes/mcp/gmail/token_manager.py` 和 `src/hermes/mcp/drive/token_manager.py`
+   是逐 byte 相同的複本**（117 行）。這是 per-room seeding 以 template 目錄為單位的
+   結構性結果，不是意外——但修其中一個的 bug 必須同一個 commit 同步改另一個。
+   若出現第三個需要 token_manager 的 Python MCP：不要複製第三份，改烤進 image 的
+   共用路徑（比照 `/opt/node_modules` 處理 Node 依賴的方式）。
+2. **secretary MCP 的 JSON store 樣板已重複 3 次**：`todo.mjs`／`attendance.mjs`／
+   `expense.mjs` 各有一份 `readStore`/`writeStore`/`get*`/`save*`；`ok()` helper 在
+   8 個 `tools/*.mjs` 各一份。已達 Rule of Three：下一個需要 per-user JSON store 的
+   secretary tool 出現時，先抽 `tools/_store.mjs`（連同 `ok()`），不要複製第 4 份。
+3. **`gmail/server.py`（8 個）和 `drive/server.py`（10 個）的 `call_tool` 是連續
+   `if name ==` 鏈**，已超過 dispatch table 門檻。下次在任一檔新增 tool 時，先改成
+   `{name: handler}` dict 再加新 tool。
+4. **`local-tools/tools.py` 有 4 個 handler（law／longmem／research／webdriver）在做
+   同一種 `command` → argv 的 if/elif 翻譯**。第 5 個多 command handler 出現時，
+   抽成表驅動的 `{command: argv_builder}` 共用寫法。
+5. **`container_manager.py`（622 行）混了三種改動理由**：docker 生命週期、write-once
+   seed（`_seed_templates`／`_ensure_*_seed`／`ensure_google_seed`）、config.yaml
+   渲染（`_format_*`／`_load_mcp_manifest`／`_ensure_config_yaml`）。要新增 seed 種類
+   或 config 渲染邏輯前先拆檔（seed → `room_seed.py`，渲染 → `hermes_config.py`），
+   container 生命週期留在原檔；只是修 bug 則不必拆。
+6. **`router.py` 的 `_resolve_inbound_text`／`_download_and_note_media` 和
+   sticker／location 的中文 placeholder 是 LINE 訊息格式層邏輯，長在 router 層**
+   （違反「router 只做分派」）。現況可用；下次要新增 message type 或改任何
+   placeholder 文字時，先把這組函式搬到 `line_inbound.py` 再改。
+7. **特殊情況散落：`config.google_oauth_enabled` 的 if 出現在 5 處**——
+   `container_manager.py` 的 `_ensure_mcp_seed`／`ensure_google_seed`／
+   `_build_volume_config`，加上 `google_oauth.py` 的 `oauth_start`／
+   `check_google_authorization`。「這個部署沒啟用 Google」這一個特殊情況，房間
+   初始化流程的每一站都得各自記得檢查，漏一站就是 bug。現況可用；第二個需要
+   OAuth gate 的整合（如 Microsoft）出現時，不要複製第二組散落的 `xxx_enabled`
+   if——把房間初始化改成一張步驟清單（seed 步驟、mount 步驟、gate 檢查登記
+   進去），讓「未啟用」＝不在清單上，而不是每站一個 if。
+8. **特殊情況旗標：`get_or_create_container` 的 `needs_wait`**
+   （`container_manager.py`）。running／stopped／missing 三條路徑用一個布林旗標
+   記住「剛剛走了哪條」，只為了決定要不要等健康檢查。`_wait_until_ready` 對健康
+   的 container 第一次 poll 就返回——永遠呼叫它即可消掉旗標和分支（代價是每則
+   訊息多一次容器內 HTTP GET）。下次改這個函式時順手消掉。
+9. **超過 3 層巢狀的函式（2026-07-12 AST 實測，均為 4 層）**：
+   `container_manager.py::_wait_until_ready`（with→while→try→if）、
+   `src/hermes/mcp/gmail/token_manager.py::get_access_token`（if→for→try→if；
+   drive 的逐 byte 複本同，見第 1 條）、
+   `src/hermes/plugin/local-tools/scripts/law/alice-tw-law-local.py` 的
+   `find_law_records` 與 `import_json`。下次改到任一個時用 early return／
+   抽子函式打平到 3 層以內；不必為打平專門開 PR。`.mjs` 檔掃描後無超標案例。
+
 ## Error Handling
 
 - 禁止裸 `except:`，必須捕捉具體例外
@@ -98,6 +197,14 @@ commit前必跑：`uv run ruff check . && uv run mypy src/ && uv run pytest`
 - Conventional commits：`feat:`, `fix:`, `chore:`, `refactor:`
 - 禁止自動 commit，只在明確要求時才執行
 - 禁止提交 `.env` 或任何含 token 的檔案
+
+## 回覆行為
+
+- 修改程式碼時直接用工具改檔案，不要在對話裡貼出整份檔案內容或整個函式重複一遍
+- 解釋修改內容時只講「為什麼改」和「改了什麼行為」，不要逐行解釋 Python/FastAPI
+  的基礎語法
+- 如果一個改動牽涉的設計取捨不只一種合理做法，才需要多花篇幅比較選項；
+  否則直接照 Growth Discipline 的規則做，不用每次都詢問「要不要這樣改」
 
 ## DO NOT
 
