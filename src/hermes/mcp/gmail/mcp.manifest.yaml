@@ -6,17 +6,18 @@
 #
 # `{account_key}` is the lowercased room id (see google_oauth.account_key) —
 # @cocal/google-calendar-mcp's GOOGLE_ACCOUNT_MODE validation is
-# lowercase-only, and the router's shared tokens.json is keyed the same way,
-# so every Google MCP must agree on this normalized key.
+# lowercase-only, and this room's own tokens.json is keyed the same way, so
+# every Google MCP must agree on this normalized key.
 #
-# The GOOGLE_*_PATH vars point into the shared /opt/google-workspace mount
-# (see container_manager.CONTAINER_GOOGLE_DIR) and are set explicitly here —
-# rather than buried as code defaults in token_manager.py — so they're
-# visible and overridable in each room's rendered config.yaml. Explicit
-# paths are mandatory: the MCP subprocess runs as uid 10000 `hermes` (so
-# /root is unreachable, mode 700), and the gateway sets
+# The GOOGLE_*_PATH vars point into this room's own /opt/google-workspace
+# mount (see container_manager.CONTAINER_GOOGLE_DIR — each room's container
+# mounts its own data/<room_id>/google/, not a shared directory) and are set
+# explicitly here — rather than buried as code defaults in token_manager.py —
+# so they're visible and overridable in each room's rendered config.yaml.
+# Explicit paths are mandatory: the MCP subprocess runs as uid 10000 `hermes`
+# (so /root is unreachable, mode 700), and the gateway sets
 # XDG_CONFIG_HOME=/opt/data/.config, which would silently resolve any
-# HOME/XDG-derived "default" path per-room instead of to the shared mount.
+# HOME/XDG-derived "default" path elsewhere per-room.
 #
 # requires_google_oauth: this MCP is only seeded into a room when this
 # deployment has Google OAuth configured (see Settings.google_oauth_enabled)

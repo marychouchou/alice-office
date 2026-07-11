@@ -1,3 +1,8 @@
+## Repo purpose
+
+此專案讓每一個使用者可以透過Line(一個台灣常用的通訊撋體)來access他自己的AI agent企業助理。
+AI agent 以hermes agent [https://hermes-agent.nousresearch.com/docs]當作框架，每一個chat room 及配置一個AI agent。我們也用chat room來當作是隔離的概念。chat room A完全沒辦法access, chat room A。
+我們希望使用者在使用Line時，完全就像在使用自己部署的hermes AI agent。
 ## Stack
 
 - **Language**: Python 3.12
@@ -56,8 +61,8 @@ LINE Platform → FastAPI Router → Container A
 - `uv run ruff check .` — lint 檢查
 - `uv run ruff format .` — 格式化
 
-提交前必跑：`uv run ruff check . && uv run mypy src/ && uv run pytest`
-
+commit前必跑：`uv run ruff check . && uv run mypy src/ && uv run pytest`
+在實作過程中 linting and formatting都不重要
 ## Coding Conventions
 
 - 所有函式簽名必須有型別提示（參數與回傳值）

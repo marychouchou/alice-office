@@ -49,10 +49,11 @@ def _write_web_creds(settings: Settings) -> None:
     )
 
 
-def _write_tokens(settings: Settings, tokens: dict[str, object]) -> None:
-    """Write tokens.json content under settings.google_tokens_path."""
-    settings.google_tokens_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.google_tokens_path.write_text(json.dumps(tokens), encoding="utf-8")
+def _write_tokens(settings: Settings, room_id: str, tokens: dict[str, object]) -> None:
+    """Write tokens.json content under settings.room_google_tokens_path(room_id)."""
+    path = settings.room_google_tokens_path(room_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tokens), encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -107,7 +108,7 @@ def test_account_key_lowercases_room_id() -> None:
 
 
 class TestOAuthStart:
-    async def test_redirects_with_expected_query_params_and_lowercased_key(
+    async def test_redirects_with_expected_query_params_and_stores_raw_room_id(
         self, app_client: tuple[AsyncClient, Settings]
     ) -> None:
         client, settings = app_client
@@ -125,9 +126,16 @@ class TestOAuthStart:
         assert "access_type=offline" in location
         assert "prompt=consent" in location
 
+        # _pending must keep the original-case room_id (not the lowercased
+        # account_key) so oauth_callback can locate the right per-room
+        # directory later — see google_oauth module docstring.
         assert len(_pending) == 1
-        stored_key, _ = next(iter(_pending.values()))
-        assert stored_key == "u_room_abc"
+        stored_room_id, _ = next(iter(_pending.values()))
+        assert stored_room_id == "U_ROOM_ABC"
+
+        # This room's own credential copy must have been seeded on demand,
+        # since a brand-new room's directory doesn't exist before this.
+        assert settings.room_google_web_creds_path("U_ROOM_ABC").exists()
 
     async def test_missing_user_id_returns_400(
         self, app_client: tuple[AsyncClient, Settings]
@@ -186,7 +194,8 @@ class TestOAuthCallback:
         assert response.status_code == 200
         assert "授權成功" in response.text
 
-        tokens = json.loads(settings.google_tokens_path.read_text(encoding="utf-8"))
+        tokens_path = settings.room_google_tokens_path("U_ROOM_ABC")
+        tokens = json.loads(tokens_path.read_text(encoding="utf-8"))
         assert "u_room_abc" in tokens
         stored = tokens["u_room_abc"]
         assert stored["access_token"] == "access-123"
@@ -195,9 +204,7 @@ class TestOAuthCallback:
         assert stored["scope"] == "https://www.googleapis.com/auth/calendar"
         assert isinstance(stored["expiry_date"], int)
 
-    async def test_bad_state_returns_400(
-        self, app_client: tuple[AsyncClient, Settings]
-    ) -> None:
+    async def test_bad_state_returns_400(self, app_client: tuple[AsyncClient, Settings]) -> None:
         client, _ = app_client
         response = await client.get(
             "/oauth/callback", params={"code": "auth-code", "state": "nonexistent"}
@@ -240,7 +247,7 @@ class TestCheckGoogleAuthorization:
         status, message = check_google_authorization("U_ROOM_ABC", settings)
         assert (status, message) == ("ok", None)
 
-    def test_no_token_returns_blocked_with_lowercased_auth_link(self, tmp_path: Path) -> None:
+    def test_no_token_returns_blocked_with_raw_room_id_auth_link(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
         _write_web_creds(settings)
 
@@ -248,7 +255,7 @@ class TestCheckGoogleAuthorization:
 
         assert status == "blocked"
         assert message is not None
-        assert "/oauth/start?user_id=u_room_abc" in message
+        assert "/oauth/start?user_id=U_ROOM_ABC" in message
 
     def test_token_missing_drive_scope_returns_notice_and_allows(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
@@ -256,6 +263,7 @@ class TestCheckGoogleAuthorization:
         far_future_ms = int(_now_ms() + 3_600_000)
         _write_tokens(
             settings,
+            "U_ROOM_ABC",
             {
                 "u_room_abc": {
                     "access_token": "a",
@@ -273,7 +281,7 @@ class TestCheckGoogleAuthorization:
 
         assert status == "notice"
         assert message is not None
-        assert "/oauth/start?user_id=u_room_abc" in message
+        assert "/oauth/start?user_id=U_ROOM_ABC" in message
 
     def test_full_scopes_valid_expiry_returns_ok(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
@@ -281,6 +289,7 @@ class TestCheckGoogleAuthorization:
         far_future_ms = int(_now_ms() + 3_600_000)
         _write_tokens(
             settings,
+            "U_ROOM_ABC",
             {
                 "u_room_abc": {
                     "access_token": "a",
@@ -304,6 +313,7 @@ class TestCheckGoogleAuthorization:
         past_ms = int(_now_ms() - 3_600_000)
         _write_tokens(
             settings,
+            "U_ROOM_ABC",
             {
                 "u_room_abc": {
                     "access_token": "a",
@@ -327,6 +337,7 @@ class TestCheckGoogleAuthorization:
         past_ms = int(_now_ms() - 3_600_000)
         _write_tokens(
             settings,
+            "U_ROOM_ABC",
             {
                 "u_room_abc": {
                     "access_token": "a",
@@ -347,8 +358,9 @@ class TestCheckGoogleAuthorization:
     def test_malformed_tokens_json_returns_blocked(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
         _write_web_creds(settings)
-        settings.google_tokens_path.parent.mkdir(parents=True, exist_ok=True)
-        settings.google_tokens_path.write_text("not valid json {{{", encoding="utf-8")
+        tokens_path = settings.room_google_tokens_path("U_ROOM_ABC")
+        tokens_path.parent.mkdir(parents=True, exist_ok=True)
+        tokens_path.write_text("not valid json {{{", encoding="utf-8")
 
         status, _ = check_google_authorization("U_ROOM_ABC", settings)
         assert status == "blocked"

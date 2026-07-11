@@ -43,16 +43,17 @@ CONTAINER_PLUGINS_DIR = f"{CONTAINER_DATA_DIR}/plugins"
 # (baked into the image by Dockerfile.hermes; NODE_PATH is ignored by ESM).
 CONTAINER_MCP_DIR = f"{CONTAINER_DATA_DIR}/mcp"
 
-# In-container mount path for the shared (deployment-wide, NOT per-room)
-# Google OAuth tokens + credentials directory (config.google_host_dir on the
-# host). A neutral, world-readable mount point deliberately OUTSIDE both
-# /root and /opt/data, because (verified in a live room container):
+# In-container mount path for a room's own Google OAuth tokens + credentials
+# directory (config.room_google_host_dir(room_id) on the host — each room
+# gets its own host directory, but every room's container mounts it at this
+# same in-container path). A neutral, world-readable mount point deliberately
+# OUTSIDE both /root and /opt/data, because (verified in a live room container):
 #   (a) the Hermes gateway and every MCP subprocess run as user `hermes`
 #       (uid 10000), NOT root — /root is mode 700, so anything under
 #       /root/... is EACCES-unreachable to them;
 #   (b) the gateway sets XDG_CONFIG_HOME=/opt/data/.config, so a tool's
 #       "default" config path would silently resolve per-room instead of
-#       to this shared location.
+#       to this directory.
 # Consequently NOTHING relies on default paths: every consumer (the @cocal
 # calendar MCP, gmail/drive token_manager.py) receives explicit
 # env-provided paths under this directory via its mcp.manifest.yaml.
@@ -184,7 +185,11 @@ def _ensure_mcp_seed(room_id: str, config: Settings) -> None:
         config: Application settings containing the templates and data directories.
     """
     mcp_templates_root = config.HERMES_TEMPLATES_DIR / "mcp"
-    skip = frozenset() if config.google_oauth_enabled else _google_gated_template_names(mcp_templates_root)
+    skip = (
+        frozenset()
+        if config.google_oauth_enabled
+        else _google_gated_template_names(mcp_templates_root)
+    )
     _seed_templates(
         mcp_templates_root,
         config.DATA_DIR / room_id / "mcp",
@@ -210,6 +215,43 @@ def _ensure_plugin_seed(room_id: str, config: Settings) -> None:
         config.DATA_DIR / room_id / "plugins",
         seed_dotenv=False,
     )
+
+
+def ensure_google_seed(room_id: str, config: Settings) -> None:
+    """Copy this deployment's GCP OAuth client credentials into a room, once.
+
+    Mirrors _ensure_mcp_seed/_ensure_plugin_seed's write-once semantics, but
+    the "template" here is deployment secrets (config.google_dir, the
+    operator's one-time drop location — see README「Google Workspace 整合」)
+    rather than versioned source under HERMES_TEMPLATES_DIR. Once copied, a
+    room's own data/<room_id>/google/ is never touched again by this repo —
+    deleting data/<room_id>/ wipes this room's Google authorization (both
+    its tokens.json and its credential copies) along with everything else,
+    by design.
+
+    Called from both _create_container (so a fresh container's bind mount
+    has something to see) and google_oauth.oauth_start: a room's very first
+    message is gated *before* its container/data dir would otherwise be
+    created (see router._apply_google_gate running ahead of
+    get_or_create_container), so the OAuth routes must be able to seed a
+    room's google/ dir on demand, not only at container-creation time.
+
+    No-op when this deployment has no Google OAuth configured.
+
+    Args:
+        room_id: Unique identifier for the chatroom.
+        config: Application settings containing the seed source and
+            per-room data directory.
+    """
+    if not config.google_oauth_enabled:
+        return
+    dest_dir = config.room_google_dir(room_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for src in (config.google_web_creds_path, config.google_installed_creds_path):
+        dest = dest_dir / src.name
+        if src.exists() and not dest.exists():
+            shutil.copyfile(src, dest)
+            logger.info(f"Seeded Google credential [{src.name}] into room [{room_id}]")
 
 
 def _build_container_env(config: Settings) -> dict[str, str]:
@@ -245,18 +287,18 @@ def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, 
     room can edit its own copy independently — no extra mount is needed
     since they already live under the rw mount.
 
-    When Google OAuth is configured for this deployment, also mounts the
-    shared (deployment-wide, NOT per-room) tokens/credentials directory at
-    CONTAINER_GOOGLE_DIR — every room's gmail/drive/google-calendar MCP
-    reads/writes the same files there, since Google accounts aren't
-    per-room. CONTAINER_GOOGLE_DIR is a neutral path outside /root and
-    /opt/data: MCP subprocesses run as uid 10000 `hermes` (can't traverse
-    /root, mode 700), and the gateway's XDG_CONFIG_HOME=/opt/data/.config
-    would redirect "default" config paths per-room — so all consumers are
-    given explicit env paths under this mount instead (see each Google
-    MCP's mcp.manifest.yaml). This mount is only added at container
-    *creation* time — toggling Google OAuth on/off requires recreating
-    already-existing room containers to pick up the change.
+    When Google OAuth is configured for this deployment, also mounts this
+    room's own tokens/credentials directory (config.room_google_host_dir,
+    seeded once by ensure_google_seed) at CONTAINER_GOOGLE_DIR — fully
+    isolated per room, unlike an earlier design that shared one directory
+    across every room's container. CONTAINER_GOOGLE_DIR is a neutral path
+    outside /root and /opt/data: MCP subprocesses run as uid 10000 `hermes`
+    (can't traverse /root, mode 700), and the gateway's
+    XDG_CONFIG_HOME=/opt/data/.config would redirect "default" config paths
+    per-room — so all consumers are given explicit env paths under this
+    mount instead (see each Google MCP's mcp.manifest.yaml). This mount is
+    only added at container *creation* time — toggling Google OAuth on/off
+    requires recreating already-existing room containers to pick up the change.
 
     Args:
         room_id: Unique identifier for the chatroom.
@@ -270,7 +312,10 @@ def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, 
         host_data_path: {"bind": CONTAINER_DATA_DIR, "mode": "rw"},
     }
     if config.google_oauth_enabled:
-        volumes[str(config.google_host_dir)] = {"bind": CONTAINER_GOOGLE_DIR, "mode": "rw"}
+        volumes[str(config.room_google_host_dir(room_id))] = {
+            "bind": CONTAINER_GOOGLE_DIR,
+            "mode": "rw",
+        }
     return volumes
 
 
@@ -502,10 +547,9 @@ def _create_container(
     _ensure_mcp_seed(room_id, config)
     _ensure_plugin_seed(room_id, config)
     _ensure_config_yaml(room_id, config)
-    if config.google_oauth_enabled:
-        # Pre-create so Docker doesn't create it root-owned as a side effect
-        # of the bind mount below (see _build_volume_config).
-        config.google_dir.mkdir(parents=True, exist_ok=True)
+    # No-ops (already seeded) if this room reached ensure_google_seed earlier
+    # via /oauth/start — see its docstring for why that ordering happens.
+    ensure_google_seed(room_id, config)
 
     ports: dict[str, int] | None = None
     if not config.ROUTER_IN_DOCKER:

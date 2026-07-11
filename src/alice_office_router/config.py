@@ -98,60 +98,115 @@ class Settings(BaseSettings):
 
     @property
     def google_dir(self) -> Path:
-        """Router-local path to the shared Google OAuth data directory.
+        """Router-local path to the deployment-level Google OAuth seed source.
 
         Returns:
-            DATA_DIR / "_google" — holds tokens.json and both GCP credential
-            files, shared by every room (not per-room like data/<room_id>/).
+            DATA_DIR / "_google" — where the operator drops both GCP client
+            credential JSON files once per deployment. Never read directly by
+            a room's MCPs; container_manager.ensure_google_seed copies these
+            into each room's own room_google_dir the first time that room
+            touches Google OAuth (see its docstring for why write-once-per-
+            room, not a shared mount, is used).
         """
         return self.DATA_DIR / "_google"
 
     @property
-    def google_tokens_path(self) -> Path:
-        """Router-local path to the shared Google OAuth tokens.json.
-
-        Returns:
-            Path to tokens.json, keyed by lowercased room id.
-        """
-        return self.google_dir / "tokens.json"
-
-    @property
     def google_web_creds_path(self) -> Path:
-        """Router-local path to the Web application GCP OAuth client JSON.
+        """Router-local path to the deployment's Web application GCP OAuth client JSON.
 
         Returns:
-            Path to gcp-oauth.keys.json, used by the router's own oauth
-            routes and by the gmail/drive MCP token refresh.
+            Path to gcp-oauth.keys.json under the seed source (google_dir),
+            not any room's own copy. Used by Settings.google_oauth_enabled
+            and by ensure_google_seed as the copy source.
         """
         return self.google_dir / "gcp-oauth.keys.json"
 
     @property
     def google_installed_creds_path(self) -> Path:
-        """Router-local path to the Desktop/Installed GCP OAuth client JSON.
+        """Router-local path to the deployment's Desktop/Installed GCP OAuth client JSON.
 
         Returns:
-            Path to gcp-oauth.keys.installed.json, used by the
-            google-calendar-mcp server and scripts/google_reauth.py.
+            Path to gcp-oauth.keys.installed.json under the seed source
+            (google_dir), used by ensure_google_seed as the copy source.
         """
         return self.google_dir / "gcp-oauth.keys.installed.json"
 
-    @property
-    def google_host_dir(self) -> Path:
-        """Host filesystem path to the shared Google OAuth data directory.
+    def room_google_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's own Google OAuth data directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom, same raw (original
+                case) value used for DATA_DIR / room_id elsewhere — must not
+                be lowercased, or this would diverge from the directory
+                container_manager actually creates for the room.
 
         Returns:
-            HOST_DATA_DIR / "_google" — the path Docker must bind-mount from
-            (as opposed to google_dir, this process's own filesystem view).
+            DATA_DIR / room_id / "google" — holds this room's own copy of
+            both GCP credential files plus this room's tokens.json. Fully
+            isolated per room: deleting data/<room_id>/ wipes this room's
+            Google authorization along with everything else.
         """
-        return self.HOST_DATA_DIR / "_google"
+        return self.DATA_DIR / room_id / "google"
+
+    def room_google_host_dir(self, room_id: str) -> Path:
+        """Host filesystem path to one room's Google OAuth data directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+
+        Returns:
+            HOST_DATA_DIR / room_id / "google" — the path Docker must
+            bind-mount from (as opposed to room_google_dir, this process's
+            own filesystem view).
+        """
+        return self.HOST_DATA_DIR / room_id / "google"
+
+    def room_google_tokens_path(self, room_id: str) -> Path:
+        """Router-local path to one room's own Google OAuth tokens.json.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+
+        Returns:
+            Path to this room's tokens.json, keyed by its lowercased
+            account_key. Never seeded — created at runtime by the OAuth
+            callback or by a Google MCP's token refresh.
+        """
+        return self.room_google_dir(room_id) / "tokens.json"
+
+    def room_google_web_creds_path(self, room_id: str) -> Path:
+        """Router-local path to one room's own Web application GCP OAuth client JSON.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+
+        Returns:
+            Path to this room's copy of gcp-oauth.keys.json, used by the
+            router's own oauth routes and by the gmail/drive MCP token
+            refresh for this room.
+        """
+        return self.room_google_dir(room_id) / "gcp-oauth.keys.json"
+
+    def room_google_installed_creds_path(self, room_id: str) -> Path:
+        """Router-local path to one room's own Desktop/Installed GCP OAuth client JSON.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+
+        Returns:
+            Path to this room's copy of gcp-oauth.keys.installed.json, used
+            by the google-calendar-mcp server for this room.
+        """
+        return self.room_google_dir(room_id) / "gcp-oauth.keys.installed.json"
 
     @property
     def google_oauth_enabled(self) -> bool:
-        """Whether Google OAuth integration is fully configured.
+        """Whether Google OAuth integration is fully configured for this deployment.
 
         Returns:
             True when a public URL is set and the Web application
-            credentials file has been placed under google_web_creds_path.
+            credentials file has been placed under google_web_creds_path
+            (the deployment-level seed source, not any room's own copy).
         """
         return bool(self.GOOGLE_OAUTH_PUBLIC_URL) and self.google_web_creds_path.exists()
 

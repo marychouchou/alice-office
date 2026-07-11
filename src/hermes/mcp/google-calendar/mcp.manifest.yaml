@@ -9,14 +9,16 @@
 # /^[a-z0-9_-]{1,64}$/ (lowercase only), which rejects LINE's
 # uppercase-prefixed room ids outright.
 #
-# All paths are explicit and point into the shared /opt/google-workspace
-# mount (see container_manager.CONTAINER_GOOGLE_DIR). Never rely on the
-# package's default paths: the MCP subprocess runs as uid 10000 `hermes`
-# (so anything under /root is EACCES-unreachable, /root is mode 700), and
-# the gateway sets XDG_CONFIG_HOME=/opt/data/.config, which would silently
-# resolve any "default" token path per-room instead of to the shared mount.
-# GOOGLE_CALENDAR_MCP_TOKEN_PATH pins tokens.json to the shared file the
-# router's oauth callback and the gmail/drive MCPs also use.
+# All paths are explicit and point into this room's own /opt/google-workspace
+# mount (see container_manager.CONTAINER_GOOGLE_DIR — each room's container
+# mounts its own data/<room_id>/google/, not a shared directory). Never rely
+# on the package's default paths: the MCP subprocess runs as uid 10000
+# `hermes` (so anything under /root is EACCES-unreachable, /root is mode
+# 700), and the gateway sets XDG_CONFIG_HOME=/opt/data/.config, which would
+# silently resolve any "default" token path elsewhere per-room.
+# GOOGLE_CALENDAR_MCP_TOKEN_PATH pins tokens.json to the same in-container
+# path the router's oauth callback and the gmail/drive MCPs also write to
+# (each backed by this room's own host-side file, not a shared one).
 #
 # requires_google_oauth: this MCP is only seeded into a room when this
 # deployment has Google OAuth configured (see Settings.google_oauth_enabled)

@@ -15,6 +15,7 @@ from alice_office_router.container_manager import (
     _ensure_mcp_seed,
     _ensure_plugin_seed,
     _wait_until_ready,
+    ensure_google_seed,
     get_or_create_container,
 )
 
@@ -573,16 +574,56 @@ def test_google_gated_templates_seeded_when_enabled(tmp_path: Path) -> None:
 
 
 def test_volume_config_adds_google_mount_only_when_enabled(tmp_path: Path) -> None:
-    """The shared Google credentials dir is mounted only when google_oauth_enabled is True."""
+    """This room's own Google credentials dir is mounted only when google_oauth_enabled is True."""
     enabled_settings = _settings_with_google(tmp_path, enabled=True)
     disabled_settings = _settings_with_google(tmp_path, enabled=False)
 
     enabled_volumes = _build_volume_config("room_AAA", enabled_settings)
     disabled_volumes = _build_volume_config("room_AAA", disabled_settings)
 
-    assert str(enabled_settings.google_host_dir) in enabled_volumes
-    assert enabled_volumes[str(enabled_settings.google_host_dir)] == {
+    enabled_host_dir = str(enabled_settings.room_google_host_dir("room_AAA"))
+    assert enabled_host_dir in enabled_volumes
+    assert enabled_volumes[enabled_host_dir] == {
         "bind": CONTAINER_GOOGLE_DIR,
         "mode": "rw",
     }
-    assert str(disabled_settings.google_host_dir) not in disabled_volumes
+    disabled_host_dir = str(disabled_settings.room_google_host_dir("room_AAA"))
+    assert disabled_host_dir not in disabled_volumes
+
+
+def test_ensure_google_seed_copies_deployment_creds_into_room_dir(tmp_path: Path) -> None:
+    """ensure_google_seed copies both credential files into this room's own directory, once."""
+    settings = _settings_with_google(tmp_path, enabled=True)
+    settings.google_installed_creds_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.google_installed_creds_path.write_text(
+        '{"installed": {"client_id": "x", "client_secret": "y"}}', encoding="utf-8"
+    )
+
+    ensure_google_seed("room_AAA", settings)
+
+    room_dir = settings.room_google_dir("room_AAA")
+    assert (room_dir / "gcp-oauth.keys.json").read_text(encoding="utf-8") == (
+        settings.google_web_creds_path.read_text(encoding="utf-8")
+    )
+    assert (room_dir / "gcp-oauth.keys.installed.json").exists()
+
+
+def test_ensure_google_seed_does_not_overwrite_existing_room_copy(tmp_path: Path) -> None:
+    """A room's own credential copy, once seeded, is never overwritten by a later call."""
+    settings = _settings_with_google(tmp_path, enabled=True)
+    room_creds = settings.room_google_web_creds_path("room_AAA")
+    room_creds.parent.mkdir(parents=True, exist_ok=True)
+    room_creds.write_text('{"web": {"client_id": "room-own-edit"}}', encoding="utf-8")
+
+    ensure_google_seed("room_AAA", settings)
+
+    assert "room-own-edit" in room_creds.read_text(encoding="utf-8")
+
+
+def test_ensure_google_seed_noop_when_disabled(tmp_path: Path) -> None:
+    """ensure_google_seed does nothing when this deployment has no Google OAuth configured."""
+    settings = _settings_with_google(tmp_path, enabled=False)
+
+    ensure_google_seed("room_AAA", settings)
+
+    assert not settings.room_google_dir("room_AAA").exists()

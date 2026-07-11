@@ -1,6 +1,6 @@
 """
 Shared token manager for Google API MCP servers.
-Reads/writes tokens from the shared /opt/google-workspace mount
+Reads/writes tokens from this room's own /opt/google-workspace mount
 and handles OAuth2 token refresh.
 """
 import json
@@ -10,17 +10,17 @@ from pathlib import Path
 
 import requests
 
-# In-container shared-mount paths (see container_manager.py CONTAINER_GOOGLE_DIR
-# and Settings.google_host_dir): tokens.json + both GCP credential files live
-# on a single deployment-wide host directory bind-mounted read-write into
-# every room's container at /opt/google-workspace, since Google accounts
-# aren't per-room like the rest of a room's data. Paths are always explicit —
-# never derive them from HOME/XDG defaults: this MCP subprocess runs as uid
-# 10000 `hermes` (so /root is unreachable, mode 700), and the Hermes gateway
-# sets XDG_CONFIG_HOME=/opt/data/.config, which would silently resolve any
-# "default" config path per-room instead of to the shared mount. The env vars
-# below are set in this MCP's mcp.manifest.yaml (visible/overridable in each
-# room's config.yaml); the defaults only back them up.
+# In-container mount paths (see container_manager.py CONTAINER_GOOGLE_DIR and
+# Settings.room_google_host_dir): tokens.json + both GCP credential files
+# live under this room's own host directory (data/<room_id>/google/),
+# bind-mounted read-write at /opt/google-workspace — isolated per room, not
+# shared across the deployment. Paths are always explicit — never derive
+# them from HOME/XDG defaults: this MCP subprocess runs as uid 10000
+# `hermes` (so /root is unreachable, mode 700), and the Hermes gateway sets
+# XDG_CONFIG_HOME=/opt/data/.config, which would silently resolve any
+# "default" config path elsewhere per-room. The env vars below are set in
+# this MCP's mcp.manifest.yaml (visible/overridable in each room's
+# config.yaml); the defaults only back them up.
 TOKEN_PATH = Path(os.environ.get("GOOGLE_TOKENS_PATH", "/opt/google-workspace/tokens.json"))
 WEB_CREDS_PATH = Path(
     os.environ.get("GOOGLE_WEB_CREDS_PATH", "/opt/google-workspace/gcp-oauth.keys.json")

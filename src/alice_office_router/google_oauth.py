@@ -13,12 +13,22 @@ directly. Both must be reimplemented here rather than ported as-is:
   gate check must run in the router itself, before a message ever reaches
   the agent.
 
-Every account is keyed by account_key(room_id) — the lowercased room id —
-never the raw room id. LINE room ids start with uppercase U/C/R, but
-@cocal/google-calendar-mcp's GOOGLE_ACCOUNT_MODE validates against
-/^[a-z0-9_-]{1,64}$/ (lowercase only). tokens.json keys, the oauth
-start/callback flow, the gate check, and every MCP's env must all agree on
-this normalized key or a room's calendar MCP will refuse to start.
+tokens.json and both GCP credential files live per room, under
+Settings.room_google_dir(room_id) — never a shared/global location (see
+container_manager.ensure_google_seed). Two different identifiers are both in
+play and must not be conflated:
+
+- room_id: the raw LINE room/user/group id (starts with uppercase U/C/R),
+  used as-is for every filesystem path (DATA_DIR/room_id/google/...) — must
+  keep its original case, or it silently diverges from the directory
+  container_manager creates for the room's data/mcp/plugins.
+- account_key(room_id): the same id lowercased, used only as the dict key
+  *inside* a room's tokens.json and for GOOGLE_ACCOUNT_MODE, because
+  @cocal/google-calendar-mcp validates that env var against
+  /^[a-z0-9_-]{1,64}$/ (lowercase only).
+
+_pending stores the raw room_id (not the account_key) precisely so
+oauth_callback can recover the correct on-disk directory.
 """
 
 from __future__ import annotations
@@ -35,6 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from alice_office_router.config import Settings, get_settings
+from alice_office_router.container_manager import ensure_google_seed
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +71,11 @@ REQUIRED_SCOPES = {
 # How long a state token started via /oauth/start stays valid, in seconds.
 _PENDING_TTL_SECONDS = 600.0
 
-# Process-local map of state -> (account_key, created_ts). Mirrors the
-# pack's in-memory PENDING dict: a router restart invalidates any
-# in-flight authorization, and this is not shared across multiple router
-# workers/processes (fine for the current single-worker deployment).
+# Process-local map of state -> (room_id, created_ts) — room_id kept in its
+# original case (see module docstring). Mirrors the pack's in-memory PENDING
+# dict: a router restart invalidates any in-flight authorization, and this
+# is not shared across multiple router workers/processes (fine for the
+# current single-worker deployment).
 _pending: dict[str, tuple[str, float]] = {}
 
 _BLOCKED_MSG_TEMPLATE = (
@@ -110,44 +122,53 @@ def _purge_expired_pending() -> None:
     long-lived process, without needing a background task.
     """
     now = time.monotonic()
-    expired = [state for state, (_, created) in _pending.items() if now - created > _PENDING_TTL_SECONDS]
+    expired = [
+        state for state, (_, created) in _pending.items() if now - created > _PENDING_TTL_SECONDS
+    ]
     for state in expired:
         del _pending[state]
 
 
-def _load_tokens(config: Settings) -> dict[str, dict[str, object]]:
-    """Load the shared tokens.json, tolerating a missing file.
+def _load_tokens(config: Settings, room_id: str) -> dict[str, dict[str, object]]:
+    """Load one room's own tokens.json, tolerating a missing file.
 
     Args:
         config: Application settings.
+        room_id: Raw LINE room/user/group id (original case).
 
     Returns:
         Mapping of account_key to that account's token data, or an empty
-        dict if the file does not exist yet.
+        dict if the file does not exist yet. In practice this room's
+        tokens.json holds at most one entry, since each room's directory is
+        no longer shared with any other room.
     """
-    if not config.google_tokens_path.exists():
+    path = config.room_google_tokens_path(room_id)
+    if not path.exists():
         return {}
-    raw = config.google_tokens_path.read_text(encoding="utf-8")
+    raw = path.read_text(encoding="utf-8")
     tokens: dict[str, dict[str, object]] = json.loads(raw)
     return tokens
 
 
-def _save_tokens(config: Settings, tokens: dict[str, dict[str, object]]) -> None:
-    """Write the shared tokens.json, creating parent directories as needed.
+def _save_tokens(config: Settings, room_id: str, tokens: dict[str, dict[str, object]]) -> None:
+    """Write one room's own tokens.json, creating parent directories as needed.
 
     Args:
         config: Application settings.
+        room_id: Raw LINE room/user/group id (original case).
         tokens: Full account_key -> token data mapping to persist.
     """
-    config.google_tokens_path.parent.mkdir(parents=True, exist_ok=True)
-    config.google_tokens_path.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
+    path = config.room_google_tokens_path(room_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
 
 
-def _load_web_credentials(config: Settings) -> tuple[str, str]:
-    """Load the Web application OAuth client id/secret.
+def _load_web_credentials(config: Settings, room_id: str) -> tuple[str, str]:
+    """Load one room's own Web application OAuth client id/secret.
 
     Args:
         config: Application settings.
+        room_id: Raw LINE room/user/group id (original case).
 
     Returns:
         Tuple of (client_id, client_secret).
@@ -156,12 +177,12 @@ def _load_web_credentials(config: Settings) -> tuple[str, str]:
         HTTPException: 400 if the credentials file is missing or malformed.
     """
     try:
-        raw = config.google_web_creds_path.read_text(encoding="utf-8")
+        raw = config.room_google_web_creds_path(room_id).read_text(encoding="utf-8")
         data = json.loads(raw)
         web = data["web"]
         return str(web["client_id"]), str(web["client_secret"])
     except (OSError, KeyError, ValueError) as exc:
-        logger.error(f"Failed to load Google web credentials: {exc}")
+        logger.error(f"Failed to load Google web credentials for room [{room_id}]: {exc}")
         raise HTTPException(status_code=400, detail="Google OAuth not configured") from exc
 
 
@@ -173,8 +194,9 @@ async def oauth_start(
     """Start the Google OAuth consent flow for a LINE room.
 
     Args:
-        user_id: The raw LINE room/user/group id (query param), normalized
-            to its account_key before being remembered against the state.
+        user_id: The raw LINE room/user/group id (query param), remembered
+            as-is (original case) against the state — see module docstring
+            for why this must not be lowercased here.
         config: Application settings via dependency injection.
 
     Returns:
@@ -188,11 +210,16 @@ async def oauth_start(
     if not config.google_oauth_enabled:
         raise HTTPException(status_code=400, detail="Google OAuth not configured")
 
-    client_id, _ = _load_web_credentials(config)
+    # This may be this room's very first contact with the filesystem: the
+    # gate blocks a new room before get_or_create_container ever runs (see
+    # router._apply_google_gate), so data/<room_id>/google/ might not exist
+    # yet. ensure_google_seed is idempotent — a no-op if already seeded.
+    ensure_google_seed(user_id, config)
+    client_id, _ = _load_web_credentials(config, user_id)
 
     _purge_expired_pending()
     state = secrets.token_urlsafe(16)
-    _pending[state] = (account_key(user_id), time.monotonic())
+    _pending[state] = (user_id, time.monotonic())
 
     query = urlencode(
         {
@@ -261,28 +288,33 @@ async def oauth_callback(
     pending_entry = _pending.pop(state, None) if state else None
     if pending_entry is None:
         raise HTTPException(status_code=400, detail="Invalid or expired state")
-    key, _ = pending_entry
+    room_id, _ = pending_entry
+    key = account_key(room_id)
 
-    client_id, client_secret = _load_web_credentials(config)
+    client_id, client_secret = _load_web_credentials(config, room_id)
     token_response = await _exchange_code_for_token(code or "", config, client_id, client_secret)
 
     if "access_token" not in token_response:
         logger.error(f"Google OAuth token exchange failed for {key}: {token_response}")
         raise HTTPException(status_code=400, detail="OAuth failed")
 
-    _store_token(config, key, token_response)
+    _store_token(config, room_id, key, token_response)
     return HTMLResponse(content=_SUCCESS_HTML)
 
 
-def _store_token(config: Settings, key: str, token_response: dict[str, object]) -> None:
-    """Merge a freshly exchanged token into the shared tokens.json.
+def _store_token(
+    config: Settings, room_id: str, key: str, token_response: dict[str, object]
+) -> None:
+    """Merge a freshly exchanged token into this room's own tokens.json.
 
     Args:
         config: Application settings.
-        key: account_key to store the token under.
+        room_id: Raw LINE room/user/group id (original case), used to
+            locate this room's own tokens.json.
+        key: account_key to store the token under, inside that file.
         token_response: Google's token endpoint JSON response.
     """
-    tokens = _load_tokens(config)
+    tokens = _load_tokens(config, room_id)
     expires_in = token_response.get("expires_in", 0)
     now_ms = int(time.time() * 1000)
     tokens[key] = {
@@ -292,27 +324,29 @@ def _store_token(config: Settings, key: str, token_response: dict[str, object]) 
         "token_type": "Bearer",
         "scope": token_response.get("scope") or " ".join(SCOPES),
     }
-    _save_tokens(config, tokens)
+    _save_tokens(config, room_id, tokens)
 
 
-def _check_token(key: str, config: Settings) -> str:
+def _check_token(room_id: str, key: str, config: Settings) -> str:
     """Classify a single account's token status.
 
     Ports google-workspace-pack's plugins/oauth_gate/__init__.py::_check_token
     exactly, keyed by account_key instead of the raw LINE user id.
 
     Args:
-        key: account_key (lowercased room id) to check.
+        room_id: Raw LINE room/user/group id (original case), used to
+            locate this room's own tokens.json.
+        key: account_key (lowercased room id) to check, inside that file.
         config: Application settings.
 
     Returns:
         "missing" (no usable token), "missing_scopes" (token present but
         REQUIRED_SCOPES not fully granted), or "ok".
     """
-    if not config.google_tokens_path.exists():
+    if not config.room_google_tokens_path(room_id).exists():
         return "missing"
     try:
-        tokens = _load_tokens(config)
+        tokens = _load_tokens(config, room_id)
         if key not in tokens:
             return "missing"
         token_data = tokens[key]
@@ -350,8 +384,10 @@ def check_google_authorization(room_id: str, config: Settings) -> tuple[str, str
         return "ok", None
 
     key = account_key(room_id)
-    status = _check_token(key, config)
-    auth_url = f"{config.GOOGLE_OAUTH_PUBLIC_URL}/oauth/start?user_id={key}"
+    status = _check_token(room_id, key, config)
+    # Deliberately the raw room_id, not key — oauth_start needs the original
+    # case back to seed/locate the right data/<room_id>/google/ directory.
+    auth_url = f"{config.GOOGLE_OAUTH_PUBLIC_URL}/oauth/start?user_id={room_id}"
 
     if status == "missing":
         return "blocked", _BLOCKED_MSG_TEMPLATE.format(auth_url=auth_url)
