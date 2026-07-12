@@ -83,8 +83,8 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
   第 3 次出現 → 抽成共用函式/模組。第 1 次出現時不要預先抽象。
 - **對同一個值的 if/elif 達 4 個分支**（如 LINE `msg_type`、MCP tool `name`、plugin
   `command`）→ 改成 dict dispatch table（`{key: handler}`）。3 個以下維持 if/elif。
-  現況基準：`router.py::_resolve_inbound_text` 對 `msg_type` 是 4 個分支，剛好在門檻上
-  ——下次新增 LINE message type 時先改成 dispatch table，不要加第 5 個 if。
+  repo 內做對的例子：`line_events.py` 的 `_MESSAGE_HANDLERS` 對 `msg_type` 用
+  dispatch table（2026-07-12 從 router 的 4 分支 if/elif 改過來）。
 - **單一檔案超過 400 行** → 檢查是否混了兩種以上「改動理由」（用下方路由表的分類判斷）。
   有混 → 依改動理由拆檔；沒混（單一主題只是長，如 `google_oauth.py` 396 行整檔都是
   OAuth）→ 不動。
@@ -147,10 +147,10 @@ Linus Torvalds 講鏈結串列刪除節點時的 "good taste" 精神——特殊
    渲染（`_format_*`／`_load_mcp_manifest`／`_ensure_config_yaml`）。要新增 seed 種類
    或 config 渲染邏輯前先拆檔（seed → `room_seed.py`，渲染 → `hermes_config.py`），
    container 生命週期留在原檔；只是修 bug 則不必拆。
-6. **`router.py` 的 `_resolve_inbound_text`／`_download_and_note_media` 和
-   sticker／location 的中文 placeholder 是 LINE 訊息格式層邏輯，長在 router 層**
-   （違反「router 只做分派」）。現況可用；下次要新增 message type 或改任何
-   placeholder 文字時，先把這組函式搬到 `line_inbound.py` 再改。
+6. **已解決（2026-07-12）**：`_resolve_inbound_text`／`_download_and_note_media` 和
+   sticker／location placeholder 已從 router 搬到 `line_events.py`（LINE wire format
+   的 pydantic model 也在那裡），router 只呼叫 `resolve_inbound_text`。保留此條
+   編號避免其他條目的交叉引用失效。
 7. **特殊情況散落：`config.google_oauth_enabled` 的 if 出現在 5 處**——
    `container_manager.py` 的 `_ensure_mcp_seed`／`ensure_google_seed`／
    `_build_volume_config`，加上 `google_oauth.py` 的 `oauth_start`／
