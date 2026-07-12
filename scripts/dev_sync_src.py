@@ -174,7 +174,7 @@ def _clean_dest_dir(dest_dir: Path) -> None:
             entry.unlink()
 
 
-def clean_sync_template(src_dir: Path, dest_dir: Path) -> None:
+def clean_sync_template(src_dir: Path, dest_dir: Path, *, seed_dotenv: bool) -> None:
     """Force one template dir onto its room copy: dest becomes src + kept .env.
 
     Clean sync: wipe dest (except its .env), then copy src in with _SEED_IGNORE
@@ -184,10 +184,20 @@ def clean_sync_template(src_dir: Path, dest_dir: Path) -> None:
     Args:
         src_dir: Repo template directory (src/hermes/{mcp,plugin}/<name>).
         dest_dir: Room's seeded copy directory to overwrite.
+        seed_dotenv: When True and dest has no .env yet (first-time sync of a
+            room that was never seeded via container_manager._ensure_mcp_seed),
+            copy src's .env.example as dest's .env — mirrors _seed_templates'
+            seed_dotenv so a freshly-created mcp/<name>/ isn't left without the
+            secrets file its server.mjs expects to find next to it.
     """
     _clean_dest_dir(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src_dir, dest_dir, ignore=_SEED_IGNORE, dirs_exist_ok=True)
+    if seed_dotenv:
+        env_example = dest_dir / ".env.example"
+        env_path = dest_dir / ".env"
+        if env_example.exists() and not env_path.exists():
+            shutil.copyfile(env_example, env_path)
 
 
 def _skip_gated(
@@ -242,6 +252,7 @@ def _sync_template_group(
     *,
     gated: frozenset[str],
     google_enabled: bool,
+    seed_dotenv: bool,
 ) -> None:
     """Clean-sync every template under templates_root into dest_root.
 
@@ -250,6 +261,8 @@ def _sync_template_group(
         dest_root: Room's copy group root (data/<room>/mcp or .../plugins).
         gated: Google-gated template names (empty for the plugin group).
         google_enabled: Whether this deployment has Google OAuth configured.
+        seed_dotenv: Passed through to clean_sync_template (True for the mcp
+            group, False for plugins — mirrors _ensure_mcp_seed/_ensure_plugin_seed).
     """
     if not templates_root.is_dir():
         return
@@ -262,7 +275,7 @@ def _sync_template_group(
                 f"  跳過 Google-gated 樣板（未啟用且房間未 seed）：{template_dir.name}", flush=True
             )
             continue
-        clean_sync_template(template_dir, dest_dir)
+        clean_sync_template(template_dir, dest_dir, seed_dotenv=seed_dotenv)
         print(f"  已同步 {dest_dir}", flush=True)
     _warn_orphans(templates_root, dest_root)
 
@@ -282,13 +295,18 @@ def force_sync_room(room_dir: Path, templates_dir: Path, *, google_enabled: bool
     print(f"房間 {room_dir.name}：", flush=True)
     gated = _google_gated_names(templates_dir / "mcp")
     _sync_template_group(
-        templates_dir / "mcp", room_dir / "mcp", gated=gated, google_enabled=google_enabled
+        templates_dir / "mcp",
+        room_dir / "mcp",
+        gated=gated,
+        google_enabled=google_enabled,
+        seed_dotenv=True,
     )
     _sync_template_group(
         templates_dir / "plugin",
         room_dir / "plugins",
         gated=frozenset(),
         google_enabled=google_enabled,
+        seed_dotenv=False,
     )
 
 

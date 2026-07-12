@@ -96,6 +96,24 @@ def test_force_sync_deletes_stale_files(tmp_path: Path) -> None:
     assert (room / "mcp" / "secretary" / "server.mjs").read_text() == "v2"
 
 
+def test_force_sync_seeds_dotenv_on_first_creation(tmp_path: Path) -> None:
+    """A room whose mcp/<name>/ never existed gets .env seeded from .env.example.
+
+    Mirrors container_manager._ensure_mcp_seed's seed_dotenv behavior — without
+    this, a room that predates mcp seeding (or had its mcp/ dir deleted) would
+    be left with a template copy but no secrets file for server.mjs to load.
+    """
+    # Arrange
+    templates = _make_templates(tmp_path)
+    room = tmp_path / "data" / "roomA"  # no mcp/ dir at all yet
+
+    # Act
+    dev_sync_src.force_sync_room(room, templates, google_enabled=False)
+
+    # Assert
+    assert (room / "mcp" / "secretary" / ".env").read_text() == "KEY=example"
+
+
 def test_list_rooms_skips_underscore_and_dot(tmp_path: Path) -> None:
     """_google and dotfiles are not treated as rooms."""
     # Arrange
