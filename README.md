@@ -710,7 +710,11 @@ alice-office-router/
 ├── src/
 │   └── alice_office_router/
 │       ├── main.py              # FastAPI app factory + lifespan
-│       ├── router.py            # POST /webhook 端點 + 取得回覆並 push 回 LINE
+│       ├── channels/            # 訊息管道抽象（見 docs/channel-interface.md）
+│       │   ├── base.py          #   管道契約：InboundMessage、Responder、room_id 規則
+│       │   ├── pipeline.py      #   管道無關的處理管線：gate → container → agent → 回覆
+│       │   ├── line.py          #   LINE adapter：POST /webhook + reply-token-first 送信
+│       │   └── local.py         #   local dev channel：POST /channels/local/messages（TUI／curl）
 │       ├── line_verify.py       # LINE HMAC-SHA256 簽章驗證
 │       ├── line_client.py       # 呼叫 LINE Reply/Push Message API + Content API 下載媒體
 │       ├── line_format.py       # Markdown 去除 + 長文分段（LINE bubble 限制）
@@ -726,7 +730,9 @@ alice-office-router/
 │   ├── test_line_format.py
 │   ├── test_line_dedup.py
 │   ├── test_hermes_client.py
-│   ├── test_router.py
+│   ├── test_channel_line.py
+│   ├── test_channel_local.py
+│   ├── test_channel_pipeline.py
 │   ├── test_container_manager.py
 │   ├── test_google_oauth.py
 │   └── test_hermes_shared_node_deps.py  # 檢查各 MCP package.json 與共用 package.json 同步

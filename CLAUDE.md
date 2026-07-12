@@ -21,6 +21,10 @@ LINE Platform → FastAPI Router → Container A
 
 → Container C
 
+2026-07-12 起，訊息進出的接入層抽象為 `channels/` 管道介面（LINE 與 local dev
+channel 已接上；telegram／TUI／mobile 之後照 `docs/channel-interface.md` 的
+checklist 加）。管道無關的處理管線在 `channels/pipeline.py`，新增管道不動它。
+
 ## Hermes Container Model
 
 - 每個 LINE 聊天室對應一個獨立的 Hermes Agent container（`hermes_<room_id>`），由
@@ -116,6 +120,7 @@ Linus Torvalds 講鏈結串列刪除節點時的 "good taste" 精神——特殊
 | 改動理由 | 放這裡 |
 |---|---|
 | LINE wire format（event 結構、訊息型別解析、簽章、送訊長度/則數限制） | `src/alice_office_router/line_*.py` |
+| 訊息管道的接入與送出（webhook/HTTP 端點、每管道的 Responder、去重與格式化的接線） | `channels/<name>.py`，一管道一模組；共用契約（`InboundMessage`／`Responder`／room_id 規則）在 `channels/base.py`，管道無關的處理管線在 `channels/pipeline.py`（不 import 任何 adapter）。見 `docs/channel-interface.md` |
 | container 生命週期（建立/啟動/健康等待/URL 解析） | `container_manager.py`——**docker SDK 只允許在這個檔案 import**（現況已如此，維持住） |
 | 房間 write-once seed（複製 template 到 `data/<room_id>/`） | 目前在 `container_manager.py`；要新增 seed 種類時，先把 seed 函式群抽成 `room_seed.py` 再加 |
 | 「這則訊息該不該進 agent」的 gate 判斷（如 Google OAuth gate） | 獨立模組提供回傳 status 的純函式（比照 `google_oauth.check_google_authorization`），router 只呼叫、不寫判斷內容 |
@@ -149,8 +154,9 @@ Linus Torvalds 講鏈結串列刪除節點時的 "good taste" 精神——特殊
    container 生命週期留在原檔；只是修 bug 則不必拆。
 6. **已解決（2026-07-12）**：`_resolve_inbound_text`／`_download_and_note_media` 和
    sticker／location placeholder 已從 router 搬到 `line_events.py`（LINE wire format
-   的 pydantic model 也在那裡），router 只呼叫 `resolve_inbound_text`。保留此條
-   編號避免其他條目的交叉引用失效。
+   的 pydantic model 也在那裡），呼叫端只呼叫 `resolve_inbound_text`（呼叫端同日
+   從 `router.py` 移到 `channels/line.py`，見 `docs/channel-interface.md` 的對照表）。
+   保留此條編號避免其他條目的交叉引用失效。
 7. **特殊情況散落：`config.google_oauth_enabled` 的 if 出現在 5 處**——
    `container_manager.py` 的 `_ensure_mcp_seed`／`ensure_google_seed`／
    `_build_volume_config`，加上 `google_oauth.py` 的 `oauth_start`／

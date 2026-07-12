@@ -6,9 +6,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from alice_office_router.channels.line import router as line_channel_router
+from alice_office_router.channels.local import router as local_channel_router
 from alice_office_router.config import get_settings
 from alice_office_router.google_oauth import oauth_router
-from alice_office_router.router import router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,5 +38,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(router)
+app.include_router(line_channel_router)
+app.include_router(local_channel_router)
 app.include_router(oauth_router)

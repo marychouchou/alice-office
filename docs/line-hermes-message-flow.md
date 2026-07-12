@@ -7,6 +7,10 @@
 相關文件：`docs/hermes-agent-real-integration.md`（架構決策由來）、
 `docs/hermes-agent-line-gateway-comparison.md`（為何不用 Hermes 內建 LINE gateway、對照表）。
 
+> **2026-07-12 後的位置變動**：本文寫作時的 `router.py` 已拆成 `channels/line.py`
+> （LINE adapter）與 `channels/pipeline.py`（管道無關的處理管線）。流程本身不變；
+> 函式的新舊位置對照見 `docs/channel-interface.md`「程式碼位置對照」一節。
+
 ## 角色總覽
 
 | 角色 | 對應程式碼 | 職責 |

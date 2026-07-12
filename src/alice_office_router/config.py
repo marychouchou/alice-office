@@ -60,6 +60,11 @@ class Settings(BaseSettings):
     # inbound LINE messages are never blocked pending Google authorization
     # (see google_oauth.check_google_authorization).
     GOOGLE_OAUTH_GATE: bool = True
+    # Bearer token for the local dev channel (POST /channels/local/messages,
+    # used by scripts/chat_tui.py and future TUI/mobile clients). Empty
+    # (default) disables that endpoint entirely — set a random secret to
+    # enable it. See docs/channel-interface.md.
+    LOCAL_CHANNEL_TOKEN: str = ""
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
