@@ -72,3 +72,35 @@ async def test_ask_hermes_agent_raises_on_http_error() -> None:
         pytest.raises(httpx.HTTPStatusError),
     ):
         await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
+
+
+async def test_ask_hermes_agent_raises_on_empty_message_content() -> None:
+    """A choice whose message has blank content raises ValueError, not empty text."""
+    response = _mock_response(200, {"choices": [{"message": {"content": ""}}]})
+    with (
+        patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)),
+        pytest.raises(ValueError, match="no message content"),
+    ):
+        await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
+
+
+async def test_ask_hermes_agent_ignores_unknown_response_fields() -> None:
+    """Extra fields on the completion/choice/message must not break parsing."""
+    response = _mock_response(
+        200,
+        {
+            "id": "chatcmpl-1",
+            "model": "hermes",
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": "hi"},
+                }
+            ],
+        },
+    )
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)):
+        reply = await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
+
+    assert reply == "hi"

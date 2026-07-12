@@ -43,6 +43,7 @@ from urllib.parse import urlencode
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel, ConfigDict
 
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.container_manager import ensure_google_seed
@@ -51,6 +52,23 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+# How long to wait on Google's token endpoint before giving up. Without it the
+# per-request AsyncClient would inherit httpx's no-timeout default, so a hung
+# Google endpoint would block the OAuth callback indefinitely.
+_TOKEN_EXCHANGE_TIMEOUT_SECONDS = 30.0
+
+
+class _TokenResponse(BaseModel):
+    """Minimal view of Google's OAuth token endpoint JSON response."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    access_token: str | None = None
+    refresh_token: str | None = None
+    expires_in: int | None = None
+    scope: str | None = None
+
 
 # Scopes requested during the interactive OAuth consent flow.
 SCOPES = [
@@ -237,7 +255,7 @@ async def oauth_start(
 
 async def _exchange_code_for_token(
     code: str, config: Settings, client_id: str, client_secret: str
-) -> dict[str, object]:
+) -> _TokenResponse:
     """Exchange an OAuth authorization code for a token response.
 
     Args:
@@ -247,9 +265,9 @@ async def _exchange_code_for_token(
         client_secret: Web application OAuth client secret.
 
     Returns:
-        Google's token endpoint JSON response.
+        Google's parsed token endpoint response.
     """
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=_TOKEN_EXCHANGE_TIMEOUT_SECONDS) as client:
         response = await client.post(
             GOOGLE_TOKEN_URL,
             data={
@@ -260,8 +278,7 @@ async def _exchange_code_for_token(
                 "grant_type": "authorization_code",
             },
         )
-        result: dict[str, object] = response.json()
-        return result
+        return _TokenResponse.model_validate(response.json())
 
 
 @oauth_router.get("/oauth/callback")
@@ -294,7 +311,7 @@ async def oauth_callback(
     client_id, client_secret = _load_web_credentials(config, room_id)
     token_response = await _exchange_code_for_token(code or "", config, client_id, client_secret)
 
-    if "access_token" not in token_response:
+    if token_response.access_token is None:
         logger.error(f"Google OAuth token exchange failed for {key}: {token_response}")
         raise HTTPException(status_code=400, detail="OAuth failed")
 
@@ -302,9 +319,7 @@ async def oauth_callback(
     return HTMLResponse(content=_SUCCESS_HTML)
 
 
-def _store_token(
-    config: Settings, room_id: str, key: str, token_response: dict[str, object]
-) -> None:
+def _store_token(config: Settings, room_id: str, key: str, token_response: _TokenResponse) -> None:
     """Merge a freshly exchanged token into this room's own tokens.json.
 
     Args:
@@ -312,17 +327,17 @@ def _store_token(
         room_id: Raw LINE room/user/group id (original case), used to
             locate this room's own tokens.json.
         key: account_key to store the token under, inside that file.
-        token_response: Google's token endpoint JSON response.
+        token_response: Google's parsed token endpoint response.
     """
     tokens = _load_tokens(config, room_id)
-    expires_in = token_response.get("expires_in", 0)
+    expires_in = token_response.expires_in or 0
     now_ms = int(time.time() * 1000)
     tokens[key] = {
-        "access_token": token_response["access_token"],
-        "refresh_token": token_response.get("refresh_token", ""),
-        "expiry_date": now_ms + int(expires_in) * 1000,  # type: ignore[call-overload]
+        "access_token": token_response.access_token,
+        "refresh_token": token_response.refresh_token or "",
+        "expiry_date": now_ms + expires_in * 1000,
         "token_type": "Bearer",
-        "scope": token_response.get("scope") or " ".join(SCOPES),
+        "scope": token_response.scope or " ".join(SCOPES),
     }
     _save_tokens(config, room_id, tokens)
 

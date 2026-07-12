@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac as hmac_mod
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -216,190 +215,24 @@ async def test_multiple_events_are_all_dispatched(
 
 
 # ---------------------------------------------------------------------------
-# _resolve_room_id
-# ---------------------------------------------------------------------------
-
-
-class TestResolveRoomId:
-    def test_user_source_resolves_user_id(self) -> None:
-        from alice_office_router.router import _resolve_room_id
-
-        event = {"source": {"type": "user", "userId": "U123"}}
-        assert _resolve_room_id(event) == "U123"
-
-    def test_group_source_resolves_group_id(self) -> None:
-        from alice_office_router.router import _resolve_room_id
-
-        event = {"source": {"type": "group", "groupId": "C123"}}
-        assert _resolve_room_id(event) == "C123"
-
-    def test_missing_source_returns_none(self) -> None:
-        from alice_office_router.router import _resolve_room_id
-
-        assert _resolve_room_id({}) is None
-
-    def test_missing_id_field_returns_none(self) -> None:
-        from alice_office_router.router import _resolve_room_id
-
-        assert _resolve_room_id({"source": {"type": "room"}}) is None
-
-
-# ---------------------------------------------------------------------------
-# _resolve_inbound_text
-# ---------------------------------------------------------------------------
-
-
-class TestResolveInboundText:
-    async def test_text_message_returns_text(self) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "text", "text": "hello"}}
-        result = await _resolve_inbound_text(event, "room_A", _settings())
-        assert result == "hello"
-
-    async def test_blank_text_returns_none(self) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "text", "text": ""}}
-        result = await _resolve_inbound_text(event, "room_A", _settings())
-        assert result is None
-
-    async def test_sticker_with_keywords_returns_placeholder(self) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "sticker", "keywords": ["happy", "smile"]}}
-        result = await _resolve_inbound_text(event, "room_A", _settings())
-        assert result is not None
-        assert "happy" in result and "smile" in result
-
-    async def test_sticker_without_keywords_returns_generic_placeholder(self) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "sticker"}}
-        result = await _resolve_inbound_text(event, "room_A", _settings())
-        assert result == "[使用者傳送了貼圖]"
-
-    async def test_location_returns_placeholder_with_title_and_address(self) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "location", "title": "台北車站", "address": "台北市中正區"}}
-        result = await _resolve_inbound_text(event, "room_A", _settings())
-        assert result is not None
-        assert "台北車站" in result
-        assert "台北市中正區" in result
-
-    async def test_unsupported_type_returns_none(self) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "unknown_future_type"}}
-        result = await _resolve_inbound_text(event, "room_A", _settings())
-        assert result is None
-
-    async def test_image_message_downloads_saves_and_notes_path(self, tmp_path: Path) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "image", "id": "msg_123"}}
-        with patch(
-            "alice_office_router.router.download_line_content",
-            new=AsyncMock(return_value=b"fake-jpeg-bytes"),
-        ):
-            result = await _resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
-
-        saved = tmp_path / "room_A" / "incoming" / "msg_123.jpg"
-        assert saved.read_bytes() == b"fake-jpeg-bytes"
-        assert result is not None
-        assert "/opt/data/incoming/msg_123.jpg" in result
-
-    async def test_file_message_uses_line_provided_filename(self, tmp_path: Path) -> None:
-        """A LINE "file" event's real fileName (with its true extension) is used as-is."""
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {
-            "message": {
-                "type": "file",
-                "id": "msg_456",
-                "fileName": "report.pdf",
-                "fileSize": 12345,
-            }
-        }
-        with patch(
-            "alice_office_router.router.download_line_content",
-            new=AsyncMock(return_value=b"%PDF-1.4 fake"),
-        ):
-            result = await _resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
-
-        saved = tmp_path / "room_A" / "incoming" / "report.pdf"
-        assert saved.read_bytes() == b"%PDF-1.4 fake"
-        assert result is not None
-        assert "/opt/data/incoming/report.pdf" in result
-
-    async def test_file_message_without_filename_falls_back_to_message_id(
-        self, tmp_path: Path
-    ) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "file", "id": "msg_789"}}
-        with patch(
-            "alice_office_router.router.download_line_content",
-            new=AsyncMock(return_value=b"binary"),
-        ):
-            result = await _resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
-
-        saved = tmp_path / "room_A" / "incoming" / "msg_789.bin"
-        assert saved.read_bytes() == b"binary"
-        assert result is not None
-
-    async def test_file_message_filename_path_traversal_is_stripped(self, tmp_path: Path) -> None:
-        """A malicious/unexpected fileName can't escape the room's incoming dir."""
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {
-            "message": {
-                "type": "file",
-                "id": "msg_evil",
-                "fileName": "../../etc/passwd",
-            }
-        }
-        with patch(
-            "alice_office_router.router.download_line_content",
-            new=AsyncMock(return_value=b"nope"),
-        ):
-            await _resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
-
-        incoming_dir = tmp_path / "room_A" / "incoming"
-        assert list(incoming_dir.iterdir()) == [incoming_dir / "passwd"]
-        assert not (tmp_path / "etc" / "passwd").exists()
-
-    async def test_media_download_failure_returns_none(self, tmp_path: Path) -> None:
-        from alice_office_router.router import _resolve_inbound_text
-
-        event = {"message": {"type": "image", "id": "msg_123"}}
-        with patch(
-            "alice_office_router.router.download_line_content",
-            new=AsyncMock(side_effect=ApiException(status=404)),
-        ):
-            result = await _resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
-
-        assert result is None
-        assert not (tmp_path / "room_A" / "incoming").exists()
-
-
-# ---------------------------------------------------------------------------
 # _dispatch_event
 # ---------------------------------------------------------------------------
 
 
 class TestDispatchEvent:
     async def test_schedules_task_for_text_message(self) -> None:
+        from alice_office_router.line_events import Event
         from alice_office_router.router import _dispatch_event
 
-        event = {
-            "type": "message",
-            "webhookEventId": "evt_1",
-            "replyToken": "reply_1",
-            "source": {"type": "user", "userId": "U1"},
-            "message": {"type": "text", "text": "hi"},
-        }
+        event = Event.model_validate(
+            {
+                "type": "message",
+                "webhookEventId": "evt_1",
+                "replyToken": "reply_1",
+                "source": {"type": "user", "userId": "U1"},
+                "message": {"type": "text", "text": "hi"},
+            }
+        )
         background_tasks = BackgroundTasks()
         await _dispatch_event(event, background_tasks, _settings())
 
@@ -411,23 +244,27 @@ class TestDispatchEvent:
         assert task.args[3] == "reply_1"
 
     async def test_ignores_non_message_event_types(self) -> None:
+        from alice_office_router.line_events import Event
         from alice_office_router.router import _dispatch_event
 
-        event = {"type": "follow", "source": {"type": "user", "userId": "U1"}}
+        event = Event.model_validate({"type": "follow", "source": {"type": "user", "userId": "U1"}})
         background_tasks = BackgroundTasks()
         await _dispatch_event(event, background_tasks, _settings())
 
         assert background_tasks.tasks == []
 
     async def test_duplicate_webhook_event_id_is_skipped(self) -> None:
+        from alice_office_router.line_events import Event
         from alice_office_router.router import _dispatch_event
 
-        event = {
-            "type": "message",
-            "webhookEventId": "evt_dup",
-            "source": {"type": "user", "userId": "U1"},
-            "message": {"type": "text", "text": "hi"},
-        }
+        event = Event.model_validate(
+            {
+                "type": "message",
+                "webhookEventId": "evt_dup",
+                "source": {"type": "user", "userId": "U1"},
+                "message": {"type": "text", "text": "hi"},
+            }
+        )
         background_tasks = BackgroundTasks()
         await _dispatch_event(event, background_tasks, _settings())
         await _dispatch_event(event, background_tasks, _settings())
@@ -435,22 +272,28 @@ class TestDispatchEvent:
         assert len(background_tasks.tasks) == 1
 
     async def test_unresolvable_room_id_is_skipped(self) -> None:
+        from alice_office_router.line_events import Event
         from alice_office_router.router import _dispatch_event
 
-        event = {"type": "message", "source": {}, "message": {"type": "text", "text": "hi"}}
+        event = Event.model_validate(
+            {"type": "message", "source": {}, "message": {"type": "text", "text": "hi"}}
+        )
         background_tasks = BackgroundTasks()
         await _dispatch_event(event, background_tasks, _settings())
 
         assert background_tasks.tasks == []
 
     async def test_missing_reply_token_passes_none(self) -> None:
+        from alice_office_router.line_events import Event
         from alice_office_router.router import _dispatch_event
 
-        event = {
-            "type": "message",
-            "source": {"type": "user", "userId": "U1"},
-            "message": {"type": "text", "text": "hi"},
-        }
+        event = Event.model_validate(
+            {
+                "type": "message",
+                "source": {"type": "user", "userId": "U1"},
+                "message": {"type": "text", "text": "hi"},
+            }
+        )
         background_tasks = BackgroundTasks()
         await _dispatch_event(event, background_tasks, _settings())
 

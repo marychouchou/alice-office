@@ -3,10 +3,35 @@ from __future__ import annotations
 import logging
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 120.0
+
+
+class _ChatMessage(BaseModel):
+    """The `message` object inside a chat completion choice."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    content: str | None = None
+
+
+class _Choice(BaseModel):
+    """One entry of an OpenAI-compatible chat completion `choices` array."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    message: _ChatMessage | None = None
+
+
+class _ChatCompletion(BaseModel):
+    """Minimal view of Hermes's OpenAI-compatible chat completion response."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    choices: list[_Choice] = Field(default_factory=list)
 
 
 async def ask_hermes_agent(base_url: str, room_id: str, text: str, api_key: str) -> str:
@@ -41,12 +66,13 @@ async def ask_hermes_agent(base_url: str, room_id: str, text: str, api_key: str)
         )
         response.raise_for_status()
 
-    choices = response.json().get("choices")
-    if not choices:
+    completion = _ChatCompletion.model_validate(response.json())
+    if not completion.choices:
         raise ValueError("Hermes agent response had no choices")
 
-    content = choices[0].get("message", {}).get("content")
-    if not isinstance(content, str) or not content:
+    message = completion.choices[0].message
+    content = message.content if message else None
+    if not content:
         raise ValueError("Hermes agent response had no message content")
 
     return content
