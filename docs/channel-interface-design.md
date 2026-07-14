@@ -54,13 +54,46 @@
 
 ### 4.1 核心概念：一個 channel-free 函式 + 兩類入口
 
+```mermaid
+flowchart LR
+    subgraph external["外部"]
+        LINE["LINE Platform"]
+        TG["Telegram Platform<br/>（未來）"]
+        TUI["TUI / mobile app / dev curl<br/>（第一方 client）"]
+    end
+
+    subgraph router["alice-office-router（FastAPI）"]
+        subgraph channels["channels/ — per-channel wire 語意"]
+            LA["LineAdapter<br/>/webhooks/line<br/>驗簽・dedup・事件解析・媒體下載<br/>剝 markdown・切塊・reply-token/push"]
+            TA["TelegramAdapter<br/>（未來）"]
+            AA["ApiChannelAdapter<br/>/webhooks/api<br/>Bearer 驗證・同步回覆"]
+        end
+        CORE["core.process_inbound<br/>（channel-free）"]
+        GATE["google_oauth<br/>check_google_authorization"]
+        CM["container_manager<br/>get_or_create_container"]
+        HC["hermes_client<br/>ask_hermes_agent"]
+    end
+
+    subgraph docker["Docker network（每房間一個 Hermes container）"]
+        H1["hermes_line_U1234…<br/>HERMES_HOME = data/line_U1234…/"]
+        H2["hermes_api_mary<br/>HERMES_HOME = data/api_mary/"]
+    end
+
+    LINE -->|webhook| LA
+    TG -.-> TA
+    TUI -->|HTTP + Bearer| AA
+    LA --> CORE
+    TA -.-> CORE
+    AA --> CORE
+    CORE --> GATE
+    CORE --> CM
+    CORE --> HC
+    HC -->|"POST /v1/chat/completions"| H1
+    HC -.-> H2
+    CM -->|docker SDK| H1
 ```
-第三方 webhook 通道（LINE、之後的 Telegram）
-  POST /webhooks/line ──┐
-                        ├──► core.process_inbound(msg) ──► list[str]（依序送回房間的純文字）
-第一方 API 通道（TUI／mobile／dev curl）
-  POST /webhooks/api ───┘
-```
+
+（虛線＝尚未實作的通道；`core` 對每個 adapter 一視同仁。）
 
 core 是**一個函式，不是框架**。它不呼叫任何 channel 的送訊 API——收訊息、跑 gate、
 呼叫 agent，然後**回傳**要送回房間的文字清單，由呼叫它的 adapter 自己負責送出：
@@ -82,6 +115,42 @@ LINE 的 reply token 因此**根本不需要進 core**——adapter 的 handler 
 留著 token，拿到回傳值後自己決定 reply-token-優先-push-兜底。
 （若未來出現主動推播需求——cron 提醒、agent 主動發話——屆時才在 Protocol 加
 `send_text()`，見 §6。）
+
+一則 LINE 訊息的完整生命週期：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant L as LINE Platform
+    participant A as LineAdapter
+    participant C as core.process_inbound
+    participant G as google_oauth
+    participant M as container_manager
+    participant H as hermes_line_U…（container）
+
+    L->>A: POST /webhooks/line（events 批次）
+    A->>A: 驗簽 x-line-signature（失敗 → 400）
+    loop 每個 message event
+        A->>A: dedup（webhookEventId）
+        A->>A: 解析事件 → 純文字<br/>（媒體下載至 data/room_key/incoming/）
+        A->>C: InboundMessage(channel="line", room_key, text)
+        C->>G: check_google_authorization(room_key)
+        alt gate blocked
+            G-->>C: ("blocked", 授權引導訊息)
+            C-->>A: [授權引導訊息]（不呼叫 agent）
+        else ok / notice
+            G-->>C: ("ok", None) 或 ("notice", 側訊息)
+            C->>M: get_or_create_container(room_key)
+            M-->>C: base_url（必要時建容器＋write-once seed）
+            C->>H: POST /v1/chat/completions<br/>X-Hermes-Session-Key: room_key
+            H-->>C: agent 回覆（markdown）
+            C-->>A: [（notice,）agent 回覆]
+        end
+        A->>A: 剝 markdown、切塊（≤4500 字/泡泡、≤5 泡泡）
+        A->>L: reply（token）；token 失效 → push 兜底
+    end
+    A-->>L: 200 {"status": "ok"}
+```
 
 ### 4.2 介面
 
@@ -105,6 +174,45 @@ class ChannelAdapter(Protocol):
 `enabled_adapters(config) -> list[ChannelAdapter]`，`main.py` 逐一 mount。
 不做動態發現、不做 plugin 系統。
 
+靜態結構（class diagram）：
+
+```mermaid
+classDiagram
+    class ChannelAdapter {
+        <<Protocol>>
+        +str name
+        +api_router() APIRouter
+    }
+    class InboundMessage {
+        <<pydantic BaseModel>>
+        +str channel
+        +str room_key
+        +str text
+    }
+    class LineAdapter {
+        +str name
+        +api_router() APIRouter
+        -_dispatch_event(event)
+        -_deliver_texts(room_id, reply_token, texts)
+    }
+    class ApiChannelAdapter {
+        +str name
+        +api_router() APIRouter
+    }
+    class core {
+        <<module>>
+        +process_inbound(msg, config) list~str~
+    }
+
+    ChannelAdapter <|.. LineAdapter : name = "line"
+    ChannelAdapter <|.. ApiChannelAdapter : name = "api"
+    LineAdapter ..> InboundMessage : 組裝
+    ApiChannelAdapter ..> InboundMessage : 組裝
+    LineAdapter ..> core : 呼叫
+    ApiChannelAdapter ..> core : 呼叫
+    core ..> InboundMessage : 只認這個形狀
+```
+
 ### 4.3 room_key：channel 前綴的複合鍵
 
 - 格式：`f"{channel}_{native_id}"`，例：`line_U1234...`、`tg_123456789`、`api_mary`。
@@ -119,6 +227,22 @@ class ChannelAdapter(Protocol):
   （CLAUDE.md 消除特殊情況原則）。遷移含資料夾改名、舊容器移除、seeded 檔內
   舊 id 字串改寫、tokens.json key 改寫，見 plan Phase 3。
 
+room_key 是唯一的租戶鍵，所有下游身分都由它推導：
+
+```mermaid
+flowchart TD
+    NID["LINE native id：U1234…<br/>（只存在於 adapter 內部）"]
+    RK["room_key = line_U1234…<br/>（core 與所有下游唯一認得的鍵）"]
+
+    NID -->|"加前綴（events.py 出口，唯一產生點）"| RK
+    RK -->|"removeprefix（僅 adapter 送訊/下載時）"| NID
+
+    RK --> CN["docker 容器名＝network hostname<br/>hermes_line_U1234…（總長需 < 63）"]
+    RK --> DD["房間資料夾 data/line_U1234…/<br/>（bind mount 至容器 /opt/data）"]
+    RK --> SK["hermes 對話身分<br/>X-Hermes-Session-Key: line_U1234…"]
+    RK --> AK["Google account_key = lower(room_key)<br/>（tokens.json 的 key、MCP manifest 代入值）"]
+```
+
 ### 4.4 第一方通道不偽裝成 webhook
 
 TUI 和 mobile app 是我們控制兩端的 client：沒有第三方 wire format、驗簽、
@@ -129,6 +253,20 @@ POST /webhooks/api/messages
 Authorization: Bearer $API_CHANNEL_TOKEN
 {"room_key": "line_U1234...", "text": "..."}
   → 200 {"replies": ["...", ...]}
+```
+
+```mermaid
+sequenceDiagram
+    participant T as TUI / mobile / dev curl
+    participant A as ApiChannelAdapter
+    participant C as core.process_inbound
+
+    T->>A: POST /webhooks/api/messages（Bearer token）
+    A->>A: 驗 token（失敗 → 401）
+    A->>C: InboundMessage(channel="api", room_key, text)
+    Note over C: 同一條 gate → 容器 → agent 管線（見 §4.1 sequence）
+    C-->>A: list[str]
+    A-->>T: 200 replies（原始 markdown、同步回傳）
 ```
 
 - 回覆**同步**放在 HTTP response，不推送；回的是 agent 原始輸出（markdown 不剝除，
