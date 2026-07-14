@@ -230,6 +230,36 @@ uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "呼叫 math
    開啟 "Use webhook"
 3. 用手機加該 OA 為好友，傳訊息 → 應收到 Hermes 回覆
 
+### 用 API 通道打進房間（不經 LINE）
+
+TUI、mobile app 與開發時的 curl 走**第一方 API 通道**（`channels/api.py`，設計
+文件 §4.4）：不需要 LINE 驗簽或 reply token，回覆**同步**放在 HTTP response，
+且是 agent 的**原始 markdown**（不剝除、不切塊——渲染交給 client 自己）。它走
+跟 LINE 完全相同的 gate → 容器 → agent 管線。
+
+先在 `.env` 設 `API_CHANNEL_TOKEN`（`openssl rand -hex 32`；留空＝通道不掛載，
+端點回 `404`），重啟 router，即可對**任何 `room_key`** 發訊：
+
+```bash
+# 開一個新的 api_* 房間（api_<slug>，slug 為 [a-z0-9-]{1,32}）
+curl -s -X POST localhost:8000/webhooks/api/messages \
+  -H "Authorization: Bearer $API_CHANNEL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"room_key":"api_dev","text":"回覆一個字：好"}'
+# → {"replies": ["好"]}
+
+# 也能打進既有 line_* 房間除錯（回覆只回到 curl，不驚動真的 LINE 使用者）
+curl -s -X POST localhost:8000/webhooks/api/messages \
+  -H "Authorization: Bearer $API_CHANNEL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"room_key":"line_U0123456789abcdef0123456789abcdef","text":"你剛剛用了什麼工具？"}'
+```
+
+token 不對 → `401`；`room_key` 不是 `line_<native id>` 或 `api_<slug>`、或 `text`
+空白 → `422`。第一次打某個新 `room_key` 會拉起它自己的 `hermes_<room_key>` 容器
+並 seed `data/<room_key>/`（同 LINE 房間，開機 30–60 秒）。除錯用途另見
+[docs/troubleshooting.md §2.7](docs/troubleshooting.md)。
+
 ## 開發工作流程
 
 ### 三條開發線
@@ -776,6 +806,7 @@ alice-office-router/
 | `DEFAULT_PLUGINS` | | 寫入每個新房間 config.yaml 的預設 plugin 清單（逗號分隔，預設 `local-tools`），名稱需對應 `HERMES_TEMPLATES_DIR/plugin/` 底下已 seed 的目錄名 |
 | `GOOGLE_OAUTH_PUBLIC_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝ Google Workspace 整合停用，見「[Google Workspace 整合](#google-workspace-整合)」 |
 | `GOOGLE_OAUTH_GATE` | | 預設 `true`。設 `false` 時 Google OAuth 路由照常運作，只是不擋任何房間的訊息 |
+| `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
 
 ## 安全性
 

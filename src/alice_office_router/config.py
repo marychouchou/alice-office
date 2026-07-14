@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     # inbound LINE messages are never blocked pending Google authorization
     # (see google_oauth.check_google_authorization).
     GOOGLE_OAUTH_GATE: bool = True
+    # First-party API channel (TUI / mobile / dev) bearer token. Unset (None)
+    # means the channel is not mounted at all (see channels.enabled_adapters).
+    API_CHANNEL_TOKEN: str | None = None
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
