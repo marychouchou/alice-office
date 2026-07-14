@@ -6,12 +6,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from alice_office_router.channels import enabled_adapters
 from alice_office_router.config import get_settings
 from alice_office_router.google_oauth import oauth_router
-from alice_office_router.router import router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Deprecated single-channel path kept while the LINE OA console still posts
+# here; remove once it points at /webhooks/line (see channel-interface-plan.md).
+_LEGACY_LINE_WEBHOOK_PATH = "/webhook"
 
 
 @asynccontextmanager
@@ -37,5 +41,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(router)
+for adapter in enabled_adapters(get_settings()):
+    app.include_router(adapter.api_router(), prefix=f"/webhooks/{adapter.name}")
+    if adapter.name == "line":
+        # Legacy alias: the LINE OA console still posts to /webhook. Same handler
+        # logic; remove once the console points at /webhooks/line.
+        app.include_router(adapter.api_router(), prefix=_LEGACY_LINE_WEBHOOK_PATH)
+
 app.include_router(oauth_router)

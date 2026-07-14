@@ -709,27 +709,30 @@ uv run ruff check . && uv run mypy src/ && uv run pytest
 alice-office-router/
 ├── src/
 │   └── alice_office_router/
-│       ├── main.py              # FastAPI app factory + lifespan
-│       ├── router.py            # POST /webhook 端點 + 取得回覆並 push 回 LINE
-│       ├── line_verify.py       # LINE HMAC-SHA256 簽章驗證
-│       ├── line_client.py       # 呼叫 LINE Reply/Push Message API + Content API 下載媒體
-│       ├── line_format.py       # Markdown 去除 + 長文分段（LINE bubble 限制）
-│       ├── line_dedup.py        # Webhook event 去重（in-memory）
+│       ├── main.py              # FastAPI app factory + lifespan；mount enabled_adapters() 的 routers
+│       ├── core.py              # process_inbound：channel-free gate → 容器 → agent → list[str]
 │       ├── hermes_client.py     # 呼叫 Hermes 容器的 /v1/chat/completions
 │       ├── container_manager.py # Docker 容器動態管理
 │       ├── google_oauth.py      # Google OAuth 路由 + 授權 gate（見「Google Workspace 整合」）
-│       └── config.py            # pydantic-settings 設定
+│       ├── config.py            # pydantic-settings 設定
+│       └── channels/            # channel adapters（每個通道自己的 wire format）
+│           ├── __init__.py      # enabled_adapters(config)
+│           ├── base.py          # InboundMessage、ChannelAdapter Protocol
+│           └── line/
+│               ├── adapter.py   # LineAdapter：POST /webhooks/line 端點 + 回覆送出（reply token 優先，push 兜底）
+│               ├── verify.py    # LINE HMAC-SHA256 簽章驗證
+│               ├── client.py    # 呼叫 LINE Reply/Push Message API + Content API 下載媒體
+│               ├── format.py    # Markdown 去除 + 長文分段（LINE bubble 限制）
+│               ├── dedup.py     # Webhook event 去重（in-memory）
+│               └── events.py    # LINE webhook 事件 pydantic model + inbound 文字解析
 ├── tests/
 │   ├── conftest.py
-│   ├── test_line_verify.py
-│   ├── test_line_client.py
-│   ├── test_line_format.py
-│   ├── test_line_dedup.py
+│   ├── test_core.py
 │   ├── test_hermes_client.py
-│   ├── test_router.py
 │   ├── test_container_manager.py
 │   ├── test_google_oauth.py
-│   └── test_hermes_shared_node_deps.py  # 檢查各 MCP package.json 與共用 package.json 同步
+│   ├── test_hermes_shared_node_deps.py  # 檢查各 MCP package.json 與共用 package.json 同步
+│   └── channels/line/           # LINE wire-format 測試（test_adapter/verify/client/format/dedup/events）
 ├── src/hermes/                  # MCP / plugin 原始碼樣板（seed 進每個房間，見上方「C. Plugin / MCP」）
 │   ├── config.template.yml      # 每個新房間 config.yaml 的樣板（_ensure_config_yaml 讀取後 .format() 填值）
 │   ├── mcp/

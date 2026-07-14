@@ -26,9 +26,9 @@ _READY_TIMEOUT_SECONDS = 60.0
 _READY_POLL_INTERVAL_SECONDS = 1.0
 
 # Bind path for each room's data volume inside its Hermes container. Exported
-# so callers outside this module (e.g. router.py, when telling the agent
-# where an inbound media file landed) can reference the same path without
-# duplicating the string.
+# so callers outside this module (e.g. channels/line/events.py, when telling
+# the agent where an inbound media file landed) can reference the same path
+# without duplicating the string.
 CONTAINER_DATA_DIR = "/opt/data"
 
 # Path (inside CONTAINER_DATA_DIR, so already covered by its rw bind mount —

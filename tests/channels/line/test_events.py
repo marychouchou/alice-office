@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock, patch
 
 from linebot.v3.messaging.exceptions import ApiException
 
+from alice_office_router.channels.line.events import Event, WebhookBody, resolve_inbound_text
 from alice_office_router.config import Settings
-from alice_office_router.line_events import Event, WebhookBody, resolve_inbound_text
 
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"
 
-_DOWNLOAD_TARGET = "alice_office_router.line_events.download_line_content"
+_DOWNLOAD_TARGET = "alice_office_router.channels.line.events.download_line_content"
 
 
 def _settings(**overrides: object) -> Settings:

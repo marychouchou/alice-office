@@ -19,9 +19,9 @@ Hermes Agent 原生也有一套功能完整的 LINE 整合（gateway 內建的 2
 
 | 面向 | alice-office-router（本專案） | Hermes Agent 內建 LINE Gateway |
 |---|---|---|
-| 誰接收 LINE Webhook | Router（FastAPI `POST /webhook`，`router.py`） | Hermes gateway 自己起一個 HTTP server（預設 `LINE_PORT=8646`，path `/line/webhook`） |
-| 簽章驗證 (`x-line-signature`) | Router 自己算 HMAC-SHA256 比對，失敗回 400（`line_verify.py`） | Hermes adapter 內部用 `LINE_CHANNEL_SECRET` 驗證 |
-| 誰送出回覆 | Router：reply token 優先（免費、單次、~60 秒內），過期/被拒才 fallback 到 Push（`line_client.py`、`router.py::_deliver_reply`） | Hermes adapter 自己送，同樣是 reply-token-first + Push fallback |
+| 誰接收 LINE Webhook | Router（FastAPI `POST /webhooks/line`，保留 `/webhook` alias，`channels/line/adapter.py`） | Hermes gateway 自己起一個 HTTP server（預設 `LINE_PORT=8646`，path `/line/webhook`） |
+| 簽章驗證 (`x-line-signature`) | Router 自己算 HMAC-SHA256 比對，失敗回 400（`channels/line/verify.py`） | Hermes adapter 內部用 `LINE_CHANNEL_SECRET` 驗證 |
+| 誰送出回覆 | Router：reply token 優先（免費、單次、~60 秒內），過期/被拒才 fallback 到 Push（`channels/line/client.py`、`channels/line/adapter.py::LineAdapter._deliver_reply`） | Hermes adapter 自己送，同樣是 reply-token-first + Push fallback |
 | LINE 憑證存放位置 | 只有 router 持有 `LINE_CHANNEL_SECRET` / `LINE_CHANNEL_ACCESS_TOKEN`；Hermes container 完全拿不到（`container_manager.py` 明確不傳） | 每個 profile 自己在 config/`.env` 存一份完整憑證 |
 | Router ↔ Agent 溝通協定 | `POST /v1/chat/completions`（`api_server` platform），純文字進、純文字出，帶 `X-Hermes-Session-Id: room_id`（`hermes_client.py`） | 無此層——LINE adapter 與同進程內的 `AIAgent` 直接呼叫，不透過 HTTP API |
 | 多租戶隔離單位 | 每個 `room_id` → 各自獨立 Docker container + 獨立 volume（OS/容器層級硬隔離） | 每個「profile」（`hermes -p <name>`）→ 各自 `HERMES_HOME`、記憶、skills、PID；**同一 profile 內**的多個 LINE 使用者/群組/聊天室共用同一份記憶與 skills，只靠 session store 做邏輯區隔，不是硬隔離 |
@@ -75,17 +75,17 @@ Hermes Agent 原生也有一套功能完整的 LINE 整合（gateway 內建的 2
 
 | 缺口 | 狀態 | 做法 |
 |---|---|---|
-| 下載 LINE 傳來的圖片/檔案/語音/影片 | ✅ 已完成 | `line_client.py::download_line_content()` 用 `AsyncMessagingApiBlob.get_message_content` 下載 |
-| 把媒體交給 Hermes agent | ✅ 已完成（採「共享檔案落地」而非 base64 多模態） | `router.py::_download_and_note_media()` 把檔案寫進 `config.DATA_DIR/room_id/incoming/`（container 內對應 `CONTAINER_DATA_DIR/incoming/`，見 `container_manager.py`），送一則文字通知 agent 路徑，讓 container 內**真正的 Hermes agent** 用自己的 vision/STT/檔案工具處理——這是刻意選擇，因為每個房間本來就跑真實 Hermes agent，不必疊床架屋改走 base64 多模態 API |
-| Reply token 優先、Push 為 fallback | ✅ 已完成 | `router.py::_deliver_reply()`：有 `replyToken` 就先 reply，被 LINE 拒絕（過期/已用）才 fallback push；不做本地 TTL 預判，交給 LINE API 自己的回應驅動 |
-| 長文字自動分段 | ✅ 已完成 | `line_format.py::split_for_line()`，1:1 port `adapter.py:212-257` 的演算法 |
-| Markdown 去除 | ✅ 已完成 | `line_format.py::strip_markdown_preserving_urls()`，1:1 port `adapter.py:174-211` |
-| Webhook 事件去重 | ✅ 已完成 | `line_dedup.py::EventDeduplicator`，1:1 port `adapter.py:373-390`（用 `webhookEventId`） |
-| 貼圖/位置轉文字 | ✅ 已完成 | `router.py::_resolve_inbound_text()` 轉成 `[使用者傳送了貼圖：...]` / `[使用者傳送了位置：...]` 佔位文字 |
+| 下載 LINE 傳來的圖片/檔案/語音/影片 | ✅ 已完成 | `channels/line/client.py::download_line_content()` 用 `AsyncMessagingApiBlob.get_message_content` 下載 |
+| 把媒體交給 Hermes agent | ✅ 已完成（採「共享檔案落地」而非 base64 多模態） | `channels/line/events.py::_download_and_note_media()` 把檔案寫進 `config.DATA_DIR/room_id/incoming/`（container 內對應 `CONTAINER_DATA_DIR/incoming/`，見 `container_manager.py`），送一則文字通知 agent 路徑，讓 container 內**真正的 Hermes agent** 用自己的 vision/STT/檔案工具處理——這是刻意選擇，因為每個房間本來就跑真實 Hermes agent，不必疊床架屋改走 base64 多模態 API |
+| Reply token 優先、Push 為 fallback | ✅ 已完成 | `channels/line/adapter.py::LineAdapter._deliver_reply()`：有 `replyToken` 就先 reply，被 LINE 拒絕（過期/已用）才 fallback push；不做本地 TTL 預判，交給 LINE API 自己的回應驅動 |
+| 長文字自動分段 | ✅ 已完成 | `channels/line/format.py::split_for_line()`，1:1 port `adapter.py:212-257` 的演算法 |
+| Markdown 去除 | ✅ 已完成 | `channels/line/format.py::strip_markdown_preserving_urls()`，1:1 port `adapter.py:174-211` |
+| Webhook 事件去重 | ✅ 已完成 | `channels/line/dedup.py::EventDeduplicator`，1:1 port `adapter.py:373-390`（用 `webhookEventId`） |
+| 貼圖/位置轉文字 | ✅ 已完成 | `channels/line/events.py::resolve_inbound_text()` 轉成 `[使用者傳送了貼圖：...]` / `[使用者傳送了位置：...]` 佔位文字 |
 | Agent 產生的圖片/檔案送回 LINE（outbound 媒體） | ⏳ 未做（Phase 2） | 需要新協定（agent 寫檔到 volume + marker）+ router 自建簽名 token 檔案伺服端點 + router 本身要有公開 HTTPS URL；見 `~/.claude/plans/optimized-munching-glade.md` |
 | Slow-LLM postback 按鈕 | ⏳ 未做（Phase 2） | 需要 pending 狀態快取 + `postback` 事件處理，port `adapter.py` 的 `State`/`RequestCache`/`_keep_typing` |
 
-多事件批次處理與 `events[0]` 限制也一併修掉了：原本 `router.py` 只處理 webhook body 的第一個
+多事件批次處理與 `events[0]` 限制也一併修掉了：原本 `channels/line/adapter.py` 只處理 webhook body 的第一個
 event，現在會 loop 過整個 `events` 陣列（`_dispatch_event`），每個 event 各自去重、解析、排背景任務。
 
 ## 為什麼不用 Hermes 內建的 LINE Gateway

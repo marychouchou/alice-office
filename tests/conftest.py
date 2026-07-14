@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from collections.abc import AsyncGenerator
 
 import pytest
@@ -11,16 +12,23 @@ from httpx import ASGITransport, AsyncClient
 
 from alice_office_router.config import Settings
 
+TEST_SECRET = "test_channel_secret"
+TEST_TOKEN = "test_channel_access_token"
+
 # Unit tests must be hermetic: never read the developer's real .env, whose
 # optional keys (HERMES_TEMPLATES_DIR, …) would leak into Settings()
 # instances constructed by tests. Must run before test modules import —
-# module-level Settings (e.g. SETTINGS_IN_DOCKER) are built at import time.
+# module-level Settings are built at import time.
 Settings.model_config["env_file"] = None
 
-from alice_office_router.main import app  # noqa: E402
+# main.py mounts enabled_adapters(get_settings()) at import time, so the
+# required Settings fields must be present in the process env before app is
+# imported. setdefault keeps any real value the developer already exported.
+os.environ.setdefault("LINE_CHANNEL_SECRET", TEST_SECRET)
+os.environ.setdefault("LINE_CHANNEL_ACCESS_TOKEN", TEST_TOKEN)
+os.environ.setdefault("HERMES_API_SERVER_KEY", "test_api_server_key")
 
-TEST_SECRET = "test_channel_secret"
-TEST_TOKEN = "test_channel_access_token"
+from alice_office_router.main import app  # noqa: E402
 
 
 def _compute_signature(body: bytes, secret: str) -> str:

@@ -12,7 +12,7 @@
 | 角色 | 對應程式碼 | 職責 |
 |---|---|---|
 | LINE Platform | — | 使用者訊息的來源；接收 webhook 回傳、接收 Reply/Push Message API 呼叫 |
-| Router（`alice-office-router`） | `router.py`、`line_client.py`、`line_format.py`、`line_dedup.py`、`main.py` | 驗簽、去重、逐一解析每個事件（含下載媒體）、管理 container 生命週期、串接 Hermes、組裝回覆並送回 LINE（Reply token 優先、Push 為 fallback）。**唯一**持有 LINE 憑證的元件 |
+| Router（`alice-office-router`） | `channels/line/adapter.py`、`channels/line/client.py`、`channels/line/format.py`、`channels/line/dedup.py`、`channels/line/events.py`、`core.py`、`main.py` | 驗簽、去重、逐一解析每個事件（含下載媒體）、管理 container 生命週期、串接 Hermes、組裝回覆並送回 LINE（Reply token 優先、Push 為 fallback）。**唯一**持有 LINE 憑證的元件 |
 | Hermes Agent container | `container_manager.py` 建立、`nousresearch/hermes-agent` image | 每個聊天室一個，透過內建 `api_server` platform（OpenAI-compatible）純粹「收文字、吐文字」，完全不碰 LINE；使用者傳送的媒體檔案透過共用 volume 落地，由 container 內agent 自己的工具讀取 |
 | Docker Engine | `container_manager.py` | 依 `room_id` 動態建立/啟動/重用 container |
 
@@ -50,9 +50,9 @@ flowchart TD
 
 ### 1. LINE Platform → Router：接收與驗簽
 
-- Endpoint：`POST /webhook`（`router.py::line_webhook`）。
+- Endpoint：`POST /webhooks/line`（`channels/line/adapter.py::LineAdapter`；保留 `/webhook` legacy alias）。
 - Router 先讀取 raw body 與 `x-line-signature` header，呼叫
-  `verify_line_signature()`（`line_verify.py`）：用 `LINE_CHANNEL_SECRET` 對 raw body 算
+  `verify_line_signature()`（`channels/line/verify.py`）：用 `LINE_CHANNEL_SECRET` 對 raw body 算
   HMAC-SHA256，base64 編碼後與 header 值做**常數時間比對**（`hmac.compare_digest`）。
 - 驗簽失敗 → 直接 `raise HTTPException(400)`，不處理、不記錄成功事件，符合
   CLAUDE.md「驗簽失敗必須回傳 400，不可靜默忽略」的要求。
@@ -65,11 +65,11 @@ flowchart TD
 
 ### 2. 逐一走訪 events 陣列，分派每個事件（`_dispatch_event`）
 
-`router.py::_dispatch_event`，對 `events` 陣列裡的**每一個**元素各自執行（不再像早期版本
+`channels/line/adapter.py::LineAdapter._dispatch_event`，對 `events` 陣列裡的**每一個**元素各自執行（不再像早期版本
 只看 `events[0]`）：
 
 1. 型別不是 `message` 的事件（`follow`、`postback`、`unsend`…）直接跳過。
-2. 用 `webhookEventId` 查 `EventDeduplicator`（`line_dedup.py`）：LINE 的 webhook 是
+2. 用 `webhookEventId` 查 `EventDeduplicator`（`channels/line/dedup.py`）：LINE 的 webhook 是
    at-least-once 語意，同一個 event 可能因為 router 回應太慢而被重送；命中就記 log 後跳過，
    避免同一則訊息被回覆兩次。
 3. 解析 `source` 取得 `room_id`（`user`/`group`/`room` 三種 source type 動態取
@@ -84,12 +84,12 @@ flowchart TD
 
 ### 3. `_resolve_inbound_text`：把單一事件轉成要送給 agent 的文字
 
-`router.py::_resolve_inbound_text`，依 `message.type` 分流：
+`channels/line/events.py::resolve_inbound_text`，依 `message.type` 分流：
 
 | 訊息類型 | 處理方式 |
 |---|---|
 | `text` | 直接使用 `message.text` |
-| `image` / `audio` / `video` / `file` | 呼叫 `_download_and_note_media()` → `line_client.py::download_line_content()` 用 LINE Content API（`AsyncMessagingApiBlob.get_message_content`）下載二進位內容，寫進 `config.DATA_DIR/<room_id>/incoming/`（container 內對應 `CONTAINER_DATA_DIR/incoming/`，即 `/opt/data/incoming/`），回傳一則文字通知 agent 檔案路徑；下載失敗（`ApiException`）記 log 後回傳 `None`（該事件視為無文字可轉發） |
+| `image` / `audio` / `video` / `file` | 呼叫 `_download_and_note_media()` → `channels/line/client.py::download_line_content()` 用 LINE Content API（`AsyncMessagingApiBlob.get_message_content`）下載二進位內容，寫進 `config.DATA_DIR/<room_id>/incoming/`（container 內對應 `CONTAINER_DATA_DIR/incoming/`，即 `/opt/data/incoming/`），回傳一則文字通知 agent 檔案路徑；下載失敗（`ApiException`）記 log 後回傳 `None`（該事件視為無文字可轉發） |
 | `sticker` | 轉成 `[使用者傳送了貼圖：<keywords>]` 佔位文字 |
 | `location` | 轉成 `[使用者傳送了位置：<title> <address>]` 佔位文字 |
 | 其他／未知類型 | 記一行 log 後回傳 `None` |
@@ -117,7 +117,7 @@ return {"status": "ok"}
 
 ### 5. `_process_and_reply`：三個獨立步驟
 
-`router.py::_process_and_reply`，每一步各自 `try/except`、失敗只記 log 不 raise（因為此時已經
+`core.py::process_inbound`（容器/agent 兩步在 `core.py::_ask_agent`），每一步各自 `try/except`、失敗只記 log 不 raise（因為此時已經
 沒有 HTTP response 可以回傳錯誤給任何人了）：
 
 ```mermaid
@@ -199,7 +199,7 @@ Container 收到請求後由 `api_server` platform 轉交給同進程內的 agen
 
 ### 9. `_deliver_reply`：送回 LINE，reply token 優先、Push 為 fallback
 
-`router.py::_deliver_reply`：
+`channels/line/adapter.py::LineAdapter._deliver_reply`：
 
 ```mermaid
 flowchart TD
@@ -217,7 +217,7 @@ flowchart TD
   驅動 fallback，比自行猜測時效更準確。
 - Push fallback 用 `line-bot-sdk` 的 `AsyncMessagingApi.push_message()`，目標 `to` 直接沿用
   第 2 步解析出的 `room_id`。
-- 送出前，`line_client.py::_build_text_messages()` 會先用 `line_format.py` 去除 Markdown
+- 送出前，`channels/line/client.py::_build_text_messages()` 會先用 `channels/line/format.py` 去除 Markdown
   （`strip_markdown_preserving_urls`，保留連結可點擊）並依 LINE 單則 bubble 上限智慧分段
   （`split_for_line`，最多 5 則/次）。
 - reply 與 push 都失敗（例如 `to` 無效）時只記 error log，不會重試。

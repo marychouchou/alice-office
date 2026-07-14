@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from alice_office_router.line_dedup import EventDeduplicator
+from alice_office_router.channels.line.dedup import EventDeduplicator
 
 
 def test_first_occurrence_is_not_duplicate() -> None:

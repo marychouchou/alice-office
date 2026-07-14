@@ -91,6 +91,8 @@ import httpx
 # ---------------------------------------------------------------------------
 
 ENV_FILE = Path(__file__).parent.parent / ".env"
+# Legacy alias of the canonical LINE webhook path /webhooks/line; kept working
+# while the LINE OA console still points here (see channel-interface-plan.md).
 ROUTER_URL = "http://localhost:8000/webhook"
 WAIT_SECONDS = 8  # how long to wait for LLM to respond before checking logs
 # POST /webhook 本身的 client 端逾時。router 立刻回 200，但第一次對一個全新房間

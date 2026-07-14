@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from alice_office_router.line_format import (
+from alice_office_router.channels.line.format import (
     format_for_line,
     split_for_line,
     strip_markdown_preserving_urls,

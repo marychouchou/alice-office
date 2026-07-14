@@ -2,7 +2,7 @@
 
 聚焦說明：`alice-office-router` 怎麼把訊息送進某個聊天室專屬的 Hermes Agent
 container，以及 container 內的 Hermes Agent 怎麼收、怎麼回。內容依現行實作整理
-（`router.py`、`container_manager.py`、`hermes_client.py`），非設計文件。
+（`core.py`、`container_manager.py`、`hermes_client.py`），非設計文件。
 
 範圍**不含** LINE Platform 端的簽章驗證、webhook 事件解析與 Push 回覆——那部分見
 `docs/line-hermes-message-flow.md`；為何整體架構選擇這種 router-issued
@@ -86,7 +86,7 @@ Body:
 
 圖片/語音/影片/檔案**不會**編碼進 `/v1/chat/completions` 的 request body（Hermes
 `api_server` 本身也只吃 `image_url`/inline base64 圖片，不吃 file/audio/video
-part）。Router 改用「共享檔案落地」策略（`router.py::_download_and_note_media()`）：
+part）。Router 改用「共享檔案落地」策略（`channels/line/events.py::_download_and_note_media()`）：
 
 1. Router 用 LINE Content API 把二進位下載下來，寫進
    `config.DATA_DIR/{room_id}/incoming/{filename}`。
@@ -156,7 +156,7 @@ sequenceDiagram
 | `ask_hermes_agent` | HTTP 錯誤（非 2xx、連線失敗、逾時） | `httpx.HTTPError`，log error，中止 |
 | `ask_hermes_agent` | 回應無 `choices` 或 `content` 為空 | `raise ValueError`，log error，中止 |
 
-`router.py::_process_and_reply()` 對這兩步各自 `try/except`，失敗只記 log 不
+`core.py::_ask_agent()` 對這兩步各自 `try/except`，失敗只記 log 不
 往外拋——此時 LINE webhook 早已回過 200，沒有 HTTP response 可以再回錯誤給任何
 人，只能從 router 的 log 觀察到。
 

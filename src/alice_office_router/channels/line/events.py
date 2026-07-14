@@ -4,7 +4,7 @@ This module owns the LINE wire format: it validates the raw webhook JSON into
 pydantic models (only the fields this router actually reads are modeled) and
 turns a single inbound message event into the text forwarded to a room's
 Hermes agent. Per CLAUDE.md's routing table, all LINE message-format logic
-lives in `line_*` modules; the router only orchestrates dispatch and delivery.
+lives in `channels/line/`; the adapter only orchestrates dispatch and delivery.
 
 Validation is deliberately lenient about *values* but strict about *shape*:
 unknown event/message type strings parse fine (LINE keeps adding new ones),
@@ -21,9 +21,9 @@ from pathlib import Path
 from linebot.v3.messaging.exceptions import ApiException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from alice_office_router.channels.line.client import download_line_content
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import CONTAINER_DATA_DIR
-from alice_office_router.line_client import download_line_content
 
 logger = logging.getLogger(__name__)
 

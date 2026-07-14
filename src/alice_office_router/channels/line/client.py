@@ -12,7 +12,7 @@ from linebot.v3.messaging import (
     TextMessage,
 )
 
-from alice_office_router.line_format import format_for_line
+from alice_office_router.channels.line.format import format_for_line
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ import base64
 import hashlib
 import hmac
 
-from alice_office_router.line_verify import verify_line_signature
+from alice_office_router.channels.line.verify import verify_line_signature
 
 SECRET = "my_test_secret"
 BODY = b'{"events":[{"type":"message"}]}'
