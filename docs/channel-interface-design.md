@@ -334,11 +334,13 @@ tests/ 鏡射：LINE wire-format 測試搬進 `tests/channels/line/`，
 
 ## 7. 附帶修正（實作時一併處理）
 
-1. **Session header 語意**：`hermes_client.py:59` 用 `X-Hermes-Session-Id: room_id`，
-   但 hermes 官方語意中 session id 是 transcript-scoped（`/new`／`/reset` 會輪替），
-   穩定對話身分應該用 `X-Hermes-Session-Key`。改用後對話會開新 session
-   （舊 transcript 檔案仍在房間資料夾）。實作時需真機驗證 hermes `api_server`
-   接受此 header。
+1. **Session header 語意**：~~建議改用 `X-Hermes-Session-Key`~~——**已於
+   2026-07-14 實機驗證後推翻，維持 `X-Hermes-Session-Id`**。對 image 內
+   `gateway/platforms/api_server.py` 原始碼的檢查發現：`Session-Id` 才是
+   `/v1/chat/completions` 載入對話歷史（`state.db`）的 key；`Session-Key`
+   只做 long-term memory（Honcho）scoping，不載入 transcript——改用它會讓
+   每則訊息失憶。本部署 router 從不觸發 `/new`／`/reset`，Session-Id 事實上
+   恆定，原做法正確。詳見 plan 文件 Phase 3 的驗證紀錄。
 2. **gate 文案去 LINE 化**：`google_oauth.py` 的 `_SUCCESS_HTML`「請回到 LINE」→
    「請回到聊天視窗」。
 3. **殘留 bytecode**：`src/alice_office_router/channels/__pycache__/` 是舊分支產物
