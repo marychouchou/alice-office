@@ -31,5 +31,7 @@ node_modules/
 # --- 本專案 runtime／私人設定 ---
 .env
 data/
+# One-shot migration backups (scripts/migrate_room_keys.py; cp -a data data.bak-<date>).
+data.bak-*/
 tmp/
 CLAUDE.local.md

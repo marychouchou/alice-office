@@ -92,6 +92,28 @@ Commit: `refactor: move LINE wire format into channels/line adapter`
 
 Commit: `feat: namespace room keys by channel (line_*) with one-shot migration`
 
+> **2026-07-14 實機驗證結果（item 3，決定：維持 `X-Hermes-Session-Id`）**
+> 對 `HERMES_IMAGE=alice-hermes-agent:local` 內的
+> `gateway/platforms/api_server.py` 原始碼做靜態檢查（當下無執行中的
+> `hermes_*` 容器，起容器 curl 太重，改讀 image 內原始碼——語意權威來源相同）。
+> 發現 `/v1/chat/completions` 兩個 header 的語意其實**不同**：
+> - `X-Hermes-Session-Id`：session continuity——**有帶才會從 `state.db`
+>   載入該 session 的歷史對話**（`_parse` 後 `db.get_messages_as_conversation`）。
+>   本 router 每則訊息只送單一則 user message、不送歷史，所以「跨訊息記得上下文」
+>   完全靠這個 header。
+> - `X-Hermes-Session-Key`：只做 **long-term memory（Honcho）scoping**，
+>   與 Session-Id 獨立，`/new` 後仍穩定；但**它本身不會載入 transcript 歷史**。
+>
+> 也就是說 Session-Key 雖被 api_server 接受，但它**不是** `/v1/chat/completions`
+> 的「穩定對話身分」——若改成只送 Session-Key 並拿掉 Session-Id，歷史載入分支
+> 不會執行，每則訊息都會失憶（continuity 退化）。因此落在計畫的「不接受／語意
+> 不符 → 維持原 header」分支：**保留 `X-Hermes-Session-Id`**。
+> 其 header 值本來就已是 `room_key`（core 傳 `msg.room_key`），Phase 3 後自然變成
+> `line_<id>`，每房間仍是穩定且隔離的 session（各房間各自一個容器）。已知影響
+> （item 6）維持成立：值從 `U…` 變 `line_U…`，等於各房間從新 session 開始。
+> 設計文件 §7 的前提（Session-Id 會隨 `/new` 輪替）在本部署不成立——router 從不
+> 觸發 `/new`／`/reset`，Session-Id 事實上恆定，故無需改用 Session-Key。
+
 ## Phase 4 — 第一方 API 通道（TUI／mobile／dev）
 
 **目標**：不經 LINE 就能打進任何房間；TUI 與 mobile 的正式入口。

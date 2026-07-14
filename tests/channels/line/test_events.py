@@ -38,24 +38,29 @@ def _settings(**overrides: object) -> Settings:
 
 
 class TestEventRoomId:
-    def test_user_source_resolves_user_id(self) -> None:
+    def test_user_source_resolves_native_id_and_prefixed_room_key(self) -> None:
         event = Event.model_validate({"source": {"type": "user", "userId": "U123"}})
-        assert event.room_id == "U123"
+        assert event.native_id == "U123"
+        assert event.room_key == "line_U123"
 
     def test_group_source_resolves_group_id(self) -> None:
         event = Event.model_validate({"source": {"type": "group", "groupId": "C123"}})
-        assert event.room_id == "C123"
+        assert event.native_id == "C123"
+        assert event.room_key == "line_C123"
 
     def test_missing_source_returns_none(self) -> None:
-        assert Event.model_validate({}).room_id is None
+        assert Event.model_validate({}).native_id is None
+        assert Event.model_validate({}).room_key is None
 
     def test_missing_id_field_returns_none(self) -> None:
-        assert Event.model_validate({"source": {"type": "room"}}).room_id is None
+        assert Event.model_validate({"source": {"type": "room"}}).native_id is None
+        assert Event.model_validate({"source": {"type": "room"}}).room_key is None
 
     def test_group_source_ignores_extra_user_id(self) -> None:
         """A group source also carrying userId still resolves to the groupId."""
         event = Event.model_validate({"source": {"type": "group", "groupId": "C1", "userId": "U9"}})
-        assert event.room_id == "C1"
+        assert event.native_id == "C1"
+        assert event.room_key == "line_C1"
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +94,7 @@ class TestWebhookBody:
             }
         )
         assert len(body.events) == 1
-        assert body.events[0].room_id == "U1"
+        assert body.events[0].native_id == "U1"
 
     def test_extra_fields_are_ignored(self) -> None:
         body = WebhookBody.model_validate(
@@ -162,9 +167,11 @@ class TestResolveInboundText:
     async def test_image_message_downloads_saves_and_notes_path(self, tmp_path: Path) -> None:
         event = Event.model_validate({"message": {"type": "image", "id": "msg_123"}})
         with patch(_DOWNLOAD_TARGET, new=AsyncMock(return_value=b"fake-jpeg-bytes")):
-            result = await resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
+            result = await resolve_inbound_text(event, "line_room_A", _settings(DATA_DIR=tmp_path))
 
-        saved = tmp_path / "room_A" / "incoming" / "msg_123.jpg"
+        # Media is written under the prefixed room_key dir — the one the
+        # room's container bind-mounts (see events.py resolve_inbound_text).
+        saved = tmp_path / "line_room_A" / "incoming" / "msg_123.jpg"
         assert saved.read_bytes() == b"fake-jpeg-bytes"
         assert result is not None
         assert "/opt/data/incoming/msg_123.jpg" in result
@@ -182,9 +189,9 @@ class TestResolveInboundText:
             }
         )
         with patch(_DOWNLOAD_TARGET, new=AsyncMock(return_value=b"%PDF-1.4 fake")):
-            result = await resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
+            result = await resolve_inbound_text(event, "line_room_A", _settings(DATA_DIR=tmp_path))
 
-        saved = tmp_path / "room_A" / "incoming" / "report.pdf"
+        saved = tmp_path / "line_room_A" / "incoming" / "report.pdf"
         assert saved.read_bytes() == b"%PDF-1.4 fake"
         assert result is not None
         assert "/opt/data/incoming/report.pdf" in result
@@ -194,9 +201,9 @@ class TestResolveInboundText:
     ) -> None:
         event = Event.model_validate({"message": {"type": "file", "id": "msg_789"}})
         with patch(_DOWNLOAD_TARGET, new=AsyncMock(return_value=b"binary")):
-            result = await resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
+            result = await resolve_inbound_text(event, "line_room_A", _settings(DATA_DIR=tmp_path))
 
-        saved = tmp_path / "room_A" / "incoming" / "msg_789.bin"
+        saved = tmp_path / "line_room_A" / "incoming" / "msg_789.bin"
         assert saved.read_bytes() == b"binary"
         assert result is not None
 
@@ -206,16 +213,16 @@ class TestResolveInboundText:
             {"message": {"type": "file", "id": "msg_evil", "fileName": "../../etc/passwd"}}
         )
         with patch(_DOWNLOAD_TARGET, new=AsyncMock(return_value=b"nope")):
-            await resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
+            await resolve_inbound_text(event, "line_room_A", _settings(DATA_DIR=tmp_path))
 
-        incoming_dir = tmp_path / "room_A" / "incoming"
+        incoming_dir = tmp_path / "line_room_A" / "incoming"
         assert list(incoming_dir.iterdir()) == [incoming_dir / "passwd"]
         assert not (tmp_path / "etc" / "passwd").exists()
 
     async def test_media_download_failure_returns_none(self, tmp_path: Path) -> None:
         event = Event.model_validate({"message": {"type": "image", "id": "msg_123"}})
         with patch(_DOWNLOAD_TARGET, new=AsyncMock(side_effect=ApiException(status=404))):
-            result = await resolve_inbound_text(event, "room_A", _settings(DATA_DIR=tmp_path))
+            result = await resolve_inbound_text(event, "line_room_A", _settings(DATA_DIR=tmp_path))
 
         assert result is None
-        assert not (tmp_path / "room_A" / "incoming").exists()
+        assert not (tmp_path / "line_room_A" / "incoming").exists()

@@ -30,7 +30,7 @@ def _settings(**overrides: object) -> Settings:
     return Settings(**defaults)  # type: ignore[arg-type]
 
 
-def _msg(text: str = "哈囉", room_key: str = "room_AAA") -> InboundMessage:
+def _msg(text: str = "哈囉", room_key: str = "line_room_AAA") -> InboundMessage:
     """Build a channel-free InboundMessage for the tests.
 
     Args:
@@ -58,7 +58,7 @@ async def test_ok_status_returns_only_agent_reply() -> None:
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
             "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_room_AAA:8642",
+            return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
         patch(
             "alice_office_router.core.ask_hermes_agent",
@@ -67,9 +67,9 @@ async def test_ok_status_returns_only_agent_reply() -> None:
     ):
         texts = await process_inbound(_msg(), settings)
 
-    mock_get_container.assert_called_once_with("room_AAA", settings)
+    mock_get_container.assert_called_once_with("line_room_AAA", settings)
     mock_ask.assert_awaited_once_with(
-        "http://hermes_room_AAA:8642", "room_AAA", "哈囉", "test_api_server_key"
+        "http://hermes_line_room_AAA:8642", "line_room_AAA", "哈囉", "test_api_server_key"
     )
     assert texts == ["哈囉，我是 Hermes"]
 
@@ -114,7 +114,7 @@ async def test_notice_returns_notice_then_agent_reply() -> None:
         ),
         patch(
             "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_room_AAA:8642",
+            return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
         patch(
             "alice_office_router.core.ask_hermes_agent",
@@ -123,7 +123,7 @@ async def test_notice_returns_notice_then_agent_reply() -> None:
     ):
         texts = await process_inbound(_msg(), settings)
 
-    mock_get_container.assert_called_once_with("room_AAA", settings)
+    mock_get_container.assert_called_once_with("line_room_AAA", settings)
     assert len(texts) == 2
     assert "oauth/start" in texts[0]
     assert texts[1] == "哈囉，我是 Hermes"
@@ -144,7 +144,7 @@ async def test_agent_error_returns_no_texts() -> None:
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
             "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_room_AAA:8642",
+            return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
             "alice_office_router.core.ask_hermes_agent",
@@ -189,7 +189,7 @@ async def test_notice_kept_when_agent_fails() -> None:
         ),
         patch(
             "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_room_AAA:8642",
+            return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
             "alice_office_router.core.ask_hermes_agent",

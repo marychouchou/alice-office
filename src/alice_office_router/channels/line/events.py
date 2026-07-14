@@ -33,6 +33,14 @@ _INCOMING_SUBDIR = "incoming"
 # the media message types handled by _download_and_note_media.
 _MEDIA_EXTENSIONS = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": ".bin"}
 
+# Channel prefix for a LINE room_key. The bare LINE id (userId/groupId/roomId)
+# is LINE-platform-scoped and only valid for LINE API calls; core and every
+# downstream (container name, data/<room_key>/, Google account_key, hermes
+# session) route on the prefixed key instead — see docs/channel-interface-
+# design.md §4.3. Must equal LineAdapter.name + "_"; the adapter strips it back
+# off via room_key.removeprefix(f"{self.name}_") only at the LINE send boundary.
+_ROOM_KEY_PREFIX = "line_"
+
 
 class Message(BaseModel):
     """A LINE `message` object — only the fields this router reads are modeled."""
@@ -59,12 +67,13 @@ class Source(BaseModel):
     roomId: str | None = None
 
     @property
-    def room_id(self) -> str | None:
-        """Resolve the room/user/group id matching this source's own type.
+    def native_id(self) -> str | None:
+        """Resolve the bare LINE id matching this source's own type.
 
         Returns:
-            The `<type>Id` value (e.g. `userId` for a user source), or None
-            when the type is unknown/absent or that id field is empty.
+            The `<type>Id` value (e.g. `userId` for a user source) — a
+            LINE-platform id valid only for LINE API calls, never a room_key —
+            or None when the type is unknown/absent or that id field is empty.
         """
         if not self.type:
             return None
@@ -84,13 +93,29 @@ class Event(BaseModel):
     message: Message | None = None
 
     @property
-    def room_id(self) -> str | None:
-        """Resolve this event's room/user/group id from its source.
+    def native_id(self) -> str | None:
+        """Resolve this event's bare LINE id from its source.
 
         Returns:
-            The resolved room id, or None if the source is missing/unresolvable.
+            The LINE-platform id (only for LINE API calls), or None if the
+            source is missing/unresolvable.
         """
-        return self.source.room_id if self.source else None
+        return self.source.native_id if self.source else None
+
+    @property
+    def room_key(self) -> str | None:
+        """The channel-prefixed room key core and every downstream route on.
+
+        The single production point of a LINE room_key: `line_<native_id>`
+        (see docs/channel-interface-design.md §4.3). None propagates straight
+        through when the native id is unresolvable, so callers keep the exact
+        same single guard they already had.
+
+        Returns:
+            `line_<native_id>`, or None if the source is missing/unresolvable.
+        """
+        native = self.native_id
+        return f"{_ROOM_KEY_PREFIX}{native}" if native is not None else None
 
 
 class WebhookBody(BaseModel):
@@ -151,7 +176,7 @@ def _resolve_media_filename(message: Message, msg_type: str, message_id: str) ->
     return f"{message_id}{_MEDIA_EXTENSIONS.get(msg_type, '.bin')}"
 
 
-async def _download_and_note_media(message: Message, room_id: str, config: Settings) -> str | None:
+async def _download_and_note_media(message: Message, room_key: str, config: Settings) -> str | None:
     """Download a LINE media message's binary content into the room's shared volume.
 
     The room's Hermes agent container mounts the same directory at
@@ -161,7 +186,8 @@ async def _download_and_note_media(message: Message, room_id: str, config: Setti
 
     Args:
         message: The LINE `message` object (type in image/audio/video/file).
-        room_id: Room identifier, used to resolve the shared volume path.
+        room_key: Prefixed room key; names the room's data dir (the directory
+            the room's container bind-mounts), never the bare LINE id.
         config: Application settings (LINE token + data dir).
 
     Returns:
@@ -180,7 +206,7 @@ async def _download_and_note_media(message: Message, room_id: str, config: Setti
         return None
 
     filename = _resolve_media_filename(message, msg_type, message_id)
-    incoming_dir = config.DATA_DIR / room_id / _INCOMING_SUBDIR
+    incoming_dir = config.DATA_DIR / room_key / _INCOMING_SUBDIR
     incoming_dir.mkdir(parents=True, exist_ok=True)
     (incoming_dir / filename).write_bytes(content)
 
@@ -191,13 +217,13 @@ async def _download_and_note_media(message: Message, room_id: str, config: Setti
     )
 
 
-async def _handle_text(message: Message, room_id: str, config: Settings) -> str | None:
+async def _handle_text(message: Message, room_key: str, config: Settings) -> str | None:
     """Return a text message's content, or None when it is blank."""
     text = message.text
     return text if text else None
 
 
-async def _handle_sticker(message: Message, room_id: str, config: Settings) -> str | None:
+async def _handle_sticker(message: Message, room_key: str, config: Settings) -> str | None:
     """Turn a sticker message into a short zh-TW placeholder for the agent."""
     keywords = message.keywords
     if keywords:
@@ -205,7 +231,7 @@ async def _handle_sticker(message: Message, room_id: str, config: Settings) -> s
     return "[使用者傳送了貼圖]"
 
 
-async def _handle_location(message: Message, room_id: str, config: Settings) -> str | None:
+async def _handle_location(message: Message, room_key: str, config: Settings) -> str | None:
     """Turn a location message into a short zh-TW placeholder for the agent."""
     title = message.title or ""
     address = message.address or ""
@@ -223,7 +249,7 @@ _MESSAGE_HANDLERS: dict[str, Callable[[Message, str, Settings], Awaitable[str | 
 }
 
 
-async def resolve_inbound_text(event: Event, room_id: str, config: Settings) -> str | None:
+async def resolve_inbound_text(event: Event, room_key: str, config: Settings) -> str | None:
     """Turn a single LINE message event into text to forward to the Hermes agent.
 
     Text messages pass through as-is. Media messages (image/audio/video/file)
@@ -233,7 +259,8 @@ async def resolve_inbound_text(event: Event, room_id: str, config: Settings) -> 
 
     Args:
         event: A single LINE webhook "message" event.
-        room_id: The resolved room_id, used for the shared volume path.
+        room_key: The prefixed room key, naming the room's shared volume path
+            (the directory the room's container mounts).
         config: Application settings.
 
     Returns:
@@ -246,4 +273,4 @@ async def resolve_inbound_text(event: Event, room_id: str, config: Settings) -> 
     if handler is None:
         logger.info(f"Ignoring unsupported LINE message type: {message.type!r}")
         return None
-    return await handler(message, room_id, config)
+    return await handler(message, room_key, config)

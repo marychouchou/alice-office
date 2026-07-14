@@ -96,9 +96,9 @@ class LineAdapter:
         if not webhook.events:
             return {"status": "ok"}
 
-        # Envelope-level check: the first event must resolve to a room id,
+        # Envelope-level check: the first event must resolve to a room key,
         # otherwise this webhook call is malformed and we reject it outright.
-        if webhook.events[0].room_id is None:
+        if webhook.events[0].room_key is None:
             raise HTTPException(status_code=400, detail="Missing source/room id in event")
 
         for event in webhook.events:
@@ -128,20 +128,35 @@ class LineAdapter:
             logger.info(f"Skipping duplicate LINE webhook event {event_id}")
             return
 
-        room_id = event.room_id
-        if room_id is None:
+        room_key = event.room_key
+        if room_key is None:
             logger.warning("Skipping LINE message event with unresolvable room id")
             return
 
-        text = await resolve_inbound_text(event, room_id, config)
+        text = await resolve_inbound_text(event, room_key, config)
         if text is None:
             return
 
         reply_token = event.replyToken or None
-        background_tasks.add_task(self._process_and_reply, room_id, text, config, reply_token)
+        background_tasks.add_task(self._process_and_reply, room_key, text, config, reply_token)
+
+    def _native_id(self, room_key: str) -> str:
+        """Strip the channel prefix back off to recover the bare LINE id.
+
+        The one boundary conversion (design §4.3): core routes on the prefixed
+        `room_key`, but LINE's own APIs (reply/push targets) only accept the
+        bare native id. A key without the prefix is returned unchanged.
+
+        Args:
+            room_key: The prefixed room key, e.g. `line_U1234...`.
+
+        Returns:
+            The bare LINE user/group/room id, e.g. `U1234...`.
+        """
+        return room_key.removeprefix(f"{self.name}_")
 
     async def _process_and_reply(
-        self, room_id: str, text: str, config: Settings, reply_token: str | None = None
+        self, room_key: str, text: str, config: Settings, reply_token: str | None = None
     ) -> None:
         """Run one inbound LINE message through core and deliver its replies.
 
@@ -152,17 +167,18 @@ class LineAdapter:
         from raising here.
 
         Args:
-            room_id: Unique chatroom identifier (bare LINE id in Phase 2).
+            room_key: Channel-prefixed room key core routes on (`line_<id>`);
+                stripped back to the bare LINE id only for the send targets.
             text: User message text (or media/sticker/location notice).
             config: Application settings.
             reply_token: LINE reply token from the triggering event, if any.
         """
-        msg = InboundMessage(channel=self.name, room_key=room_id, text=text)
+        msg = InboundMessage(channel=self.name, room_key=room_key, text=text)
         texts = await process_inbound(msg, config)
-        await self._deliver_texts(room_id, texts, reply_token, config)
+        await self._deliver_texts(self._native_id(room_key), texts, reply_token, config)
 
     async def _deliver_texts(
-        self, room_id: str, texts: list[str], reply_token: str | None, config: Settings
+        self, native_id: str, texts: list[str], reply_token: str | None, config: Settings
     ) -> None:
         """Deliver core's ordered reply texts back to the LINE room.
 
@@ -171,17 +187,17 @@ class LineAdapter:
         pushed, since a reply token can only answer once.
 
         Args:
-            room_id: Target LINE user/group/room id.
+            native_id: Bare LINE user/group/room id (the send target).
             texts: Reply texts from core.process_inbound, in delivery order.
             reply_token: Reply token from the triggering event, if any.
             config: Application settings.
         """
         for index, text in enumerate(texts):
             token = reply_token if index == 0 else None
-            await self._deliver_reply(room_id, text, token, config)
+            await self._deliver_reply(native_id, text, token, config)
 
     async def _deliver_reply(
-        self, room_id: str, text: str, reply_token: str | None, config: Settings
+        self, native_id: str, text: str, reply_token: str | None, config: Settings
     ) -> None:
         """Deliver a reply to LINE, preferring the free reply token over Push.
 
@@ -192,7 +208,7 @@ class LineAdapter:
         more accurate than guessing locally.
 
         Args:
-            room_id: Target LINE user/group/room ID (used for the Push fallback).
+            native_id: Bare LINE user/group/room id (used for the Push fallback).
             text: Reply text to send.
             reply_token: Reply token from the triggering event, if any.
             config: Application settings.
@@ -203,10 +219,10 @@ class LineAdapter:
                 return
             except ApiException as exc:
                 logger.info(
-                    f"LINE reply token rejected for room {room_id} ({exc}); falling back to push"
+                    f"LINE reply token rejected for room {native_id} ({exc}); falling back to push"
                 )
 
         try:
-            await push_line_message(room_id, text, config.LINE_CHANNEL_ACCESS_TOKEN)
+            await push_line_message(native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN)
         except Exception as exc:
-            logger.error(f"Failed to push LINE reply for room {room_id}: {exc}")
+            logger.error(f"Failed to push LINE reply for room {native_id}: {exc}")

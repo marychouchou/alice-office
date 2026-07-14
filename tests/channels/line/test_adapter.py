@@ -222,8 +222,8 @@ class TestDispatchEvent:
 
         assert len(background_tasks.tasks) == 1
         task = background_tasks.tasks[0]
-        # room_id and text are the first two positional args.
-        assert task.args[0] == "U1"
+        # room_key (prefixed) and text are the first two positional args.
+        assert task.args[0] == "line_U1"
         assert task.args[1] == "hi"
         assert task.args[3] == "reply_1"
 
@@ -328,8 +328,9 @@ async def test_process_and_reply_pushes_single_text_when_no_reply_token() -> Non
         ),
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
     ):
-        await LineAdapter()._process_and_reply("room_AAA", "哈囉", _settings())
+        await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
 
+    # room_key comes in prefixed; the Push target is the stripped native id.
     mock_push.assert_awaited_once_with("room_AAA", "哈囉，我是 Hermes", TEST_TOKEN)
 
 
@@ -343,7 +344,9 @@ async def test_process_and_reply_uses_reply_token_for_first_text() -> None:
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
     ):
-        await LineAdapter()._process_and_reply("room_AAA", "哈囉", _settings(), "reply_token_1")
+        await LineAdapter()._process_and_reply(
+            "line_room_AAA", "哈囉", _settings(), "reply_token_1"
+        )
 
     mock_reply.assert_awaited_once()
     mock_push.assert_not_called()
@@ -359,7 +362,9 @@ async def test_process_and_reply_first_text_reply_token_rest_push() -> None:
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
     ):
-        await LineAdapter()._process_and_reply("room_AAA", "哈囉", _settings(), "reply_token_1")
+        await LineAdapter()._process_and_reply(
+            "line_room_AAA", "哈囉", _settings(), "reply_token_1"
+        )
 
     mock_reply.assert_awaited_once_with("reply_token_1", "notice", TEST_TOKEN)
     mock_push.assert_awaited_once_with("room_AAA", "agent reply", TEST_TOKEN)
@@ -375,7 +380,9 @@ async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
     ):
-        await LineAdapter()._process_and_reply("room_AAA", "哈囉", _settings(), "reply_token_1")
+        await LineAdapter()._process_and_reply(
+            "line_room_AAA", "哈囉", _settings(), "reply_token_1"
+        )
 
     mock_reply.assert_not_called()
     mock_push.assert_not_called()
