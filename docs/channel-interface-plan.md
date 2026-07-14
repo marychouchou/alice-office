@@ -145,6 +145,24 @@ Commit: `feat: add first-party API channel for TUI/mobile/dev access`
 | TUI 本體 | API 通道就緒後另開 task，TUI 是獨立 client 專案不進本 repo 的 src |
 | 移除 `/webhook` alias | LINE console 改指 `/webhooks/line` 之後 |
 
+## 實作紀錄（2026-07-14，四個 Phase 全部完成）
+
+計畫照做的部分不重複；下表只記「實作期才定案的決定與發現」，讓本檔＋設計文件
+足以獨立理解這次變動的全貌（更細的內容看各 commit 的 diff）。
+
+| Phase | Commit | 計畫外的決定／發現 |
+|---|---|---|
+| 1 | `3e1ebd7` | 照計畫完成；notice 時序差異如計畫第 4 點所預告。 |
+| 2 | `ec95f85` | `LineAdapter.__init__` 不收 config（handler 沿用 `Depends(get_settings)`，避免無用的 lifecycle state）；`/webhook` alias 在 mount 迴圈用單一 if 處理（標註臨時，Phase 5 表格有移除條件）；`main.py` 於 import 時 mount routes，因此 conftest 需在 import app 前先 `setdefault` 三個必要 env。 |
+| 3 | `1e673bf` | **session header 維持 `X-Hermes-Session-Id`**（驗證紀錄見上方 2026-07-14 note）；遷移改寫範圍＝`config.yaml`＋`tokens.json` 而已——`cron-recipes.md`／`config-snippet.yaml` 裡的 id 是真正的 LINE 送訊目標（`line_send_message` 的 `to=`），不是 room_key，**刻意不改**；webhook wire body 的 `roomId` 維持 native 形狀（LINE 平台不會送 `line_` 前綴），前綴的唯一產生點是 `events.py` 的 `Event.room_key`。實際遷移了 1 個房間，備份 `data.bak-20260714/`。 |
+| 4 | `cf2a42d` | room_key 驗證採顯式 allowlist（`line_[UCR][0-9a-f]{32}` 或 `api_[a-z0-9-]{1,32}`，fullmatch），寧可新通道來時加一條也不放寬；已知 quirk：FastAPI 先解 body 再驗 auth，無 token＋壞 body 回 422 而非 401（第一方通道可接受，要嚴格先驗 auth 就把 bearer 檢查改成 `Depends`）；提醒：新 `api_*` 房間在 `GOOGLE_OAUTH_GATE=true` 部署下同樣會被 Google gate 擋，TUI／mobile onboarding 要納入流程。 |
+| docs | `45c90c1`、`c26a861` | 設計文件加五張 mermaid 圖；§7 的 session header 建議依 Phase 3 驗證結果修正（原建議已推翻）。 |
+
+**真機驗收狀態**：API 通道已完整 e2e（真容器＋真 LLM，`api_dev` 房間 17s 收到
+正確回覆，測試產物已清除）；可重跑版本見 `scripts/e2e_smoke.py`
+（`uv run python scripts/e2e_smoke.py`）。LINE 路徑的真機 round-trip 仍待
+使用者實傳一則訊息驗證遷移後的房間（容器重建＋Google gate 認得遷移後 tokens）。
+
 ## 風險與回退
 
 - Phase 1–2 是行為保持的重構，回退 = revert commit。
