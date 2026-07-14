@@ -230,7 +230,7 @@ async def oauth_start(
 
     # This may be this room's very first contact with the filesystem: the
     # gate blocks a new room before get_or_create_container ever runs (see
-    # router._apply_google_gate), so data/<room_id>/google/ might not exist
+    # core.process_inbound), so data/<room_id>/google/ might not exist
     # yet. ensure_google_seed is idempotent — a no-op if already seeded.
     ensure_google_seed(user_id, config)
     client_id, _ = _load_web_credentials(config, user_id)

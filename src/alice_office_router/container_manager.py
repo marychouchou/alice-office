@@ -232,7 +232,7 @@ def ensure_google_seed(room_id: str, config: Settings) -> None:
     Called from both _create_container (so a fresh container's bind mount
     has something to see) and google_oauth.oauth_start: a room's very first
     message is gated *before* its container/data dir would otherwise be
-    created (see router._apply_google_gate running ahead of
+    created (see core.process_inbound running the gate ahead of
     get_or_create_container), so the OAuth routes must be able to seed a
     room's google/ dir on demand, not only at container-creation time.
 

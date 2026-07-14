@@ -3,14 +3,12 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from linebot.v3.messaging.exceptions import ApiException
 
+from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings, get_settings
-from alice_office_router.container_manager import get_or_create_container
-from alice_office_router.google_oauth import check_google_authorization
-from alice_office_router.hermes_client import ask_hermes_agent
+from alice_office_router.core import process_inbound
 from alice_office_router.line_client import push_line_message, reply_line_message
 from alice_office_router.line_dedup import EventDeduplicator
 from alice_office_router.line_events import Event, WebhookBody, resolve_inbound_text
@@ -92,66 +90,45 @@ async def _deliver_reply(
         logger.error(f"Failed to push LINE reply for room {room_id}: {exc}")
 
 
-async def _apply_google_gate(room_id: str, config: Settings, reply_token: str | None) -> bool:
-    """Check Google OAuth authorization for a room and act on the result.
+async def _deliver_texts(
+    room_id: str, texts: list[str], reply_token: str | None, config: Settings
+) -> None:
+    """Deliver core's ordered reply texts back to the LINE room.
+
+    The first text may use the single-use reply token (falling back to Push
+    when it's expired/used, via _deliver_reply); every later text is pushed,
+    since a reply token can only answer once.
 
     Args:
-        room_id: Unique chatroom identifier.
+        room_id: Target LINE user/group/room id.
+        texts: Reply texts from core.process_inbound, in delivery order.
+        reply_token: Reply token from the triggering event, if any.
         config: Application settings.
-        reply_token: LINE reply token from the triggering event, if any.
-
-    Returns:
-        True if the caller should stop processing (the room is blocked
-        pending authorization and its auth-link message has already been
-        delivered); False to continue with the normal agent flow (either
-        fully authorized, or authorized-with-notice — the notice has
-        already been pushed as a side message in that case).
     """
-    status, message = check_google_authorization(room_id, config)
-    if status == "blocked" and message is not None:
-        await _deliver_reply(room_id, message, reply_token, config)
-        return True
-    if status == "notice" and message is not None:
-        try:
-            await push_line_message(room_id, message, config.LINE_CHANNEL_ACCESS_TOKEN)
-        except Exception as exc:
-            logger.error(f"Failed to push Google OAuth notice for room {room_id}: {exc}")
-    return False
+    for index, text in enumerate(texts):
+        token = reply_token if index == 0 else None
+        await _deliver_reply(room_id, text, token, config)
 
 
 async def _process_and_reply(
     room_id: str, text: str, config: Settings, reply_token: str | None = None
 ) -> None:
-    """Get/create the room's Hermes agent container, ask it for a reply, and deliver it to LINE.
+    """Run one inbound LINE message through core and deliver its replies to LINE.
 
-    Each step is independently guarded: a failure in one is logged without
-    raising, since this runs in a background task after the router has
-    already returned 200 OK to LINE. Before contacting the agent, checks
-    whether the room still needs Google OAuth authorization — if blocked,
-    the agent is never invoked and the auth link is delivered instead.
+    Builds the channel-free InboundMessage, runs core.process_inbound (Google
+    gate -> container -> agent), and delivers each returned text back to LINE.
+    Runs in a background task after the router already returned 200 OK, so
+    core's own per-step error guards keep any failure from raising here.
 
     Args:
-        room_id: Unique chatroom identifier used to resolve the container and session.
-        text: User message text (or media/sticker/location notice) to send to the agent.
+        room_id: Unique chatroom identifier (bare LINE id in Phase 1).
+        text: User message text (or media/sticker/location notice).
         config: Application settings.
         reply_token: LINE reply token from the triggering event, if any.
     """
-    if await _apply_google_gate(room_id, config, reply_token):
-        return
-
-    try:
-        target_url = get_or_create_container(room_id, config)
-    except Exception as exc:
-        logger.error(f"Failed to get/create container for room {room_id}: {exc}")
-        return
-
-    try:
-        reply_text = await ask_hermes_agent(target_url, room_id, text, config.HERMES_API_SERVER_KEY)
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.error(f"Hermes agent request failed for room {room_id}: {exc}")
-        return
-
-    await _deliver_reply(room_id, reply_text, reply_token, config)
+    msg = InboundMessage(channel="line", room_key=room_id, text=text)
+    texts = await process_inbound(msg, config)
+    await _deliver_texts(room_id, texts, reply_token, config)
 
 
 @router.post("/webhook")
