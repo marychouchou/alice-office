@@ -221,6 +221,30 @@ curl -s -X POST localhost:8000/webhooks/api/messages \
 name=hermes_api_dev`、`ls data/api_dev/`。錯誤回應：token 不對 → `401`；
 `room_key` 不是 `line_<native id>` 或 `api_<slug>`、或 `text` 空白 → `422`。
 
+### 2.8 一鍵 e2e smoke test（整條管線的可重複驗收）
+
+`scripts/e2e_smoke.py` 把 2.7 的手動 curl 驗證固化成**一個指令**：它會自己起一個
+拋棄式的 uvicorn（另開一個 port，用進程環境變數注入 `API_CHANNEL_TOKEN` 並設
+`GOOGLE_OAUTH_GATE=false`，**不改動 `.env`**），依序打 API 通道的授權／驗證與一次
+真實 happy path（router → core → container_manager → 真容器 → 真 LLM → 回覆），
+最後把自己建立的 container／`data/` 資料夾清乾淨。
+
+```bash
+uv run python scripts/e2e_smoke.py            # 只跑 API 通道（拋棄式房間 api_e2e）
+uv run python scripts/e2e_smoke.py --line      # 另外送一則合法簽章的 LINE webhook
+uv run python scripts/e2e_smoke.py --keep       # 保留 container / data 供事後檢查
+uv run python scripts/e2e_smoke.py --port 8901  # 預設 8899 被占用時換 port
+```
+
+每一項檢查印成一行 numbered PASS/FAIL，全過退出碼 `0`、任一失敗 `1`。它會驗：無
+Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空白 `text` →
+`422`、happy path → `200` 且 `replies` 非空、容器 `hermes_api_e2e` 存在且
+`data/api_e2e/` 已 seed。`--line` 另外驗 `POST /webhooks/line` 合法簽章回 `200`
+（但 outbound 送達**無法**驗證——用的是假 replyToken，router 的 push fallback 會對
+真實 LINE API 失敗並記 log，屬預期）。前置條件同 2.7：Docker 可用、`HERMES_IMAGE`
+已 build、`.env` 已設成 host 模式。失敗時 router 的完整輸出會落在腳本印出的
+`router log →` 路徑，可據此排查。
+
 ## 3. 指令速查表
 
 | 想做什麼 | 指令 |
