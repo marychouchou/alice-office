@@ -1,7 +1,24 @@
 # Channel Interface 設計文件
 
 日期：2026-07-14
-狀態：已定案，實作計畫見 [channel-interface-plan.md](channel-interface-plan.md)
+狀態：**已實作完成**（2026-07-14，四個 Phase 全數 commit）。實作計畫與實作期
+決策紀錄見 [channel-interface-plan.md](channel-interface-plan.md)。
+
+## 0. 一頁摘要
+
+- core 收斂成一個 channel-free 函式 `core.process_inbound(InboundMessage) -> list[str]`
+  （gate → 容器 → agent）。它不呼叫任何送訊 API，只回傳要送回房間的文字清單，
+  由呼叫它的 adapter 自己送出。
+- 每個通道一個 adapter（`channels/<name>/`），實作 `ChannelAdapter` Protocol
+  （`name` + `api_router()`）。驗簽、reply token、切塊等 wire 語意全封在 adapter
+  內，永不外洩到 core。
+- 房間鍵改為 channel 前綴複合鍵 `room_key = f"{channel}_{native_id}"`（如
+  `line_U1234…`），是唯一的租戶鍵：容器名、`data/` 資料夾、hermes session、
+  Google account_key 全由它推導。既有裸 id 房間已做一次性遷移。
+- 第一方入口（TUI／mobile／dev curl）不偽裝成 webhook：
+  `POST /webhooks/api/messages`（Bearer 驗證），回覆同步放在 HTTP response。
+- session header 維持 `X-Hermes-Session-Id`——設計期曾建議改用 `Session-Key`，
+  實機驗證發現會失去對話歷史載入，已推翻（見 §7 與 plan Phase 3 驗證紀錄）。
 
 ## 1. 動機
 

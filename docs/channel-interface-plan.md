@@ -2,6 +2,9 @@
 
 日期：2026-07-14
 設計依據：[channel-interface-design.md](channel-interface-design.md)
+狀態：**四個 Phase 全部完成**（2026-07-14）。各 Phase 保留計畫原文（未來式），
+實作期才定案的決定與發現收在文末「實作紀錄」一節——讀的時候把 Phase 內容
+當成「已發生的變更說明」。
 
 每個 Phase 是一個獨立可 commit 的單位（conventional commits），commit 前必跑
 `uv run ruff check . && uv run mypy src/ && uv run pytest`。
@@ -28,7 +31,8 @@ subagent 執行（planning 已完成於本文件；執行可用 sonnet 5 / opus 
 5. 測試：`test_router.py` 中 gate／agent 編排的測試搬成 `tests/test_core.py`
    （mock `container_manager`、`hermes_client`、`check_google_authorization`）；
    wire-format 測試留在 `test_router.py`。
-6. 驗收：三件套綠；真機 LINE round-trip（`scripts/test_webhook.py` 或實機傳訊）。
+6. 驗收：三件套（ruff／mypy／pytest）綠；真機 LINE round-trip
+   （`scripts/test_webhook.py` 或實機傳訊）。
 
 Commit: `refactor: extract channel-free core.process_inbound from router`
 
