@@ -54,6 +54,22 @@ async def test_ask_hermes_agent_sends_auth_and_session_headers() -> None:
     assert kwargs["json"]["messages"] == [{"role": "user", "content": "hi"}]
 
 
+async def test_ask_hermes_agent_prepends_system_message_when_given() -> None:
+    """A `system` argument is sent as a leading system message before the user turn."""
+    response = _mock_response(200, {"choices": [{"message": {"content": "ok"}}]})
+    mock_post = AsyncMock(return_value=response)
+    with patch.object(httpx.AsyncClient, "post", new=mock_post):
+        await ask_hermes_agent(
+            "http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key", system="be brief"
+        )
+
+    _, kwargs = mock_post.call_args
+    assert kwargs["json"]["messages"] == [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "hi"},
+    ]
+
+
 async def test_ask_hermes_agent_raises_on_missing_choices() -> None:
     """A response with no choices raises ValueError instead of returning empty text."""
     response = _mock_response(200, {"choices": []})

@@ -44,12 +44,26 @@ class ChannelAdapter(Protocol):
 class InboundMessage(BaseModel):
     """The only inbound shape the channel-free core understands.
 
+    The four group fields all default so a 1:1 message and every existing
+    caller build the exact same value they did before (is_group=False,
+    addressed=True) — the group path is opt-in, set only by an adapter that
+    parsed a multi-party room.
+
     Attributes:
         channel: Originating adapter name, e.g. "line".
         room_key: Globally unique room key the core routes on. In Phase 1 this
             is still the bare native room id; channel prefixing is Phase 3.
         text: Plain user text; media/sticker/location are already resolved to a
             placeholder by the adapter before this model is built.
+        is_group: True when this room holds multiple people (a LINE group/room),
+            switching core onto the group path (observe vs. addressed reply).
+        addressed: Whether this message is directed at the bot. Always True in a
+            1:1 room; in a group it is True only for an @mention or a configured
+            call-word, and unaddressed group messages are merely observed.
+        sender_id: The speaker's native id inside a group (LINE userId), or None
+            when the channel can't resolve one (never set for 1:1 rooms).
+        sender_name: The speaker's display name inside a group, resolved by the
+            adapter with its own fallbacks; None for 1:1 rooms.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -57,3 +71,7 @@ class InboundMessage(BaseModel):
     channel: str
     room_key: str
     text: str
+    is_group: bool = False
+    addressed: bool = True
+    sender_id: str | None = None
+    sender_name: str | None = None

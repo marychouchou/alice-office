@@ -42,6 +42,29 @@ _MEDIA_EXTENSIONS = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": 
 _ROOM_KEY_PREFIX = "line_"
 
 
+class Mentionee(BaseModel):
+    """One `@mention` target inside a LINE text message's `mention` object.
+
+    LINE marks the OA's own mention with `isSelf == true` (supported since
+    2024-10-30). A `type == "all"` (@All) mentionee carries no `isSelf`, so it
+    never counts as addressing the bot (design §4).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    type: str | None = None
+    userId: str | None = None
+    isSelf: bool | None = None
+
+
+class Mention(BaseModel):
+    """A LINE text message's `mention` object (only the mentionees are read)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    mentionees: list[Mentionee] = Field(default_factory=list)
+
+
 class Message(BaseModel):
     """A LINE `message` object — only the fields this router reads are modeled."""
 
@@ -54,6 +77,7 @@ class Message(BaseModel):
     keywords: list[str] | None = None
     title: str | None = None
     address: str | None = None
+    mention: Mention | None = None
 
 
 class Source(BaseModel):
@@ -116,6 +140,44 @@ class Event(BaseModel):
         """
         native = self.native_id
         return f"{_ROOM_KEY_PREFIX}{native}" if native is not None else None
+
+    @property
+    def is_group(self) -> bool:
+        """Whether this event comes from a multi-party LINE room.
+
+        Returns:
+            True for a `group` or `room` source (many people share one room —
+            the observe/addressed group path applies), False for a 1:1 `user`
+            source or a missing source.
+        """
+        return self.source is not None and self.source.type in {"group", "room"}
+
+    @property
+    def sender_id(self) -> str | None:
+        """The bare LINE userId of whoever sent this event, if present.
+
+        Distinct from `native_id`: in a group the room id is the groupId/roomId
+        while the speaker is this userId (LINE may omit it for very old PC-only
+        accounts — see design §13).
+
+        Returns:
+            The source `userId`, or None when the source is missing/absent.
+        """
+        return self.source.userId if self.source else None
+
+    @property
+    def mention_is_self(self) -> bool:
+        """Whether this message @mentions the bot's own Official Account.
+
+        Returns:
+            True if any mentionee is flagged `isSelf` (LINE's own marker for
+            the OA). An @All mention carries no `isSelf`, so it never counts
+            (design §4).
+        """
+        message = self.message
+        if message is None or message.mention is None:
+            return False
+        return any(bool(mentionee.isSelf) for mentionee in message.mention.mentionees)
 
 
 class WebhookBody(BaseModel):

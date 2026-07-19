@@ -11,6 +11,7 @@ from fastapi import BackgroundTasks
 from httpx import AsyncClient
 from linebot.v3.messaging.exceptions import ApiException
 
+from alice_office_router.channels.base import InboundMessage
 from alice_office_router.channels.line.adapter import LineAdapter
 from alice_office_router.channels.line.events import Event
 from alice_office_router.config import Settings
@@ -271,6 +272,159 @@ class TestDispatchEvent:
         await LineAdapter()._dispatch_event(event, background_tasks, _settings())
 
         assert background_tasks.tasks[0].args[3] is None
+
+
+# ---------------------------------------------------------------------------
+# LineAdapter._dispatch_event — group + join routing
+# ---------------------------------------------------------------------------
+
+
+class TestGroupDispatch:
+    async def _dispatch(self, event_dict: dict[str, object], settings: Settings) -> BackgroundTasks:
+        """Dispatch one event with sender-name lookup stubbed, returning the tasks."""
+        event = Event.model_validate(event_dict)
+        background_tasks = BackgroundTasks()
+        with patch(f"{_ADAPTER}.resolve_sender_name", new=AsyncMock(return_value="王小明")):
+            await LineAdapter()._dispatch_event(event, background_tasks, settings)
+        return background_tasks
+
+    def _group_text(self, text: str, **message: object) -> dict[str, object]:
+        return {
+            "type": "message",
+            "webhookEventId": "evt_g",
+            "replyToken": "reply_g",
+            "source": {"type": "group", "groupId": "C1", "userId": "U9"},
+            "message": {"type": "text", "text": text, **message},
+        }
+
+    async def test_group_mention_is_addressed(self) -> None:
+        mention = {"mention": {"mentionees": [{"index": 0, "length": 6, "isSelf": True}]}}
+        background_tasks = await self._dispatch(
+            self._group_text("@Alice 幫我排會議", **mention), _settings()
+        )
+
+        task = background_tasks.tasks[0]
+        assert task.args[0] == "line_C1"
+        assert task.kwargs["is_group"] is True
+        assert task.kwargs["addressed"] is True
+        assert task.kwargs["sender_id"] == "U9"
+        assert task.kwargs["sender_name"] == "王小明"
+
+    async def test_group_call_word_is_addressed(self) -> None:
+        background_tasks = await self._dispatch(
+            self._group_text("小幫手 幫我排會議"), _settings(GROUP_TRIGGER_PREFIXES="小幫手")
+        )
+
+        assert background_tasks.tasks[0].kwargs["addressed"] is True
+
+    async def test_group_plain_message_is_not_addressed(self) -> None:
+        background_tasks = await self._dispatch(self._group_text("早安"), _settings())
+
+        task = background_tasks.tasks[0]
+        assert task.kwargs["is_group"] is True
+        assert task.kwargs["addressed"] is False
+
+    async def test_group_sticker_is_group_but_not_addressed(self) -> None:
+        event_dict = {
+            "type": "message",
+            "webhookEventId": "evt_s",
+            "source": {"type": "group", "groupId": "C1", "userId": "U9"},
+            "message": {"type": "sticker", "keywords": ["smile"]},
+        }
+        background_tasks = await self._dispatch(event_dict, _settings())
+
+        task = background_tasks.tasks[0]
+        assert task.kwargs["is_group"] is True
+        assert task.kwargs["addressed"] is False
+
+    async def test_direct_message_has_no_group_kwargs(self) -> None:
+        """Regression: a 1:1 message schedules the exact same positional-only task as before."""
+        event = Event.model_validate(
+            {
+                "type": "message",
+                "webhookEventId": "evt_d",
+                "replyToken": "reply_d",
+                "source": {"type": "user", "userId": "U1"},
+                "message": {"type": "text", "text": "hi"},
+            }
+        )
+        background_tasks = BackgroundTasks()
+        await LineAdapter()._dispatch_event(event, background_tasks, _settings())
+
+        task = background_tasks.tasks[0]
+        assert task.args[0] == "line_U1"
+        assert task.args[1] == "hi"
+        assert task.args[3] == "reply_d"
+        assert task.kwargs == {}
+
+    async def test_join_event_schedules_greeting_reply(self) -> None:
+        event = Event.model_validate(
+            {
+                "type": "join",
+                "webhookEventId": "evt_j",
+                "replyToken": "reply_j",
+                "source": {"type": "group", "groupId": "C1"},
+            }
+        )
+        background_tasks = BackgroundTasks()
+        await LineAdapter()._dispatch_event(event, background_tasks, _settings())
+
+        assert len(background_tasks.tasks) == 1
+        task = background_tasks.tasks[0]
+        # _deliver_reply(native_id, greeting, reply_token, config)
+        assert task.args[0] == "C1"
+        assert "小幫手" in task.args[1]
+        assert task.args[2] == "reply_j"
+
+    async def test_duplicate_join_event_is_skipped(self) -> None:
+        event = Event.model_validate(
+            {
+                "type": "join",
+                "webhookEventId": "evt_j_dup",
+                "replyToken": "reply_j",
+                "source": {"type": "group", "groupId": "C1"},
+            }
+        )
+        adapter = LineAdapter()
+        background_tasks = BackgroundTasks()
+        await adapter._dispatch_event(event, background_tasks, _settings())
+        await adapter._dispatch_event(event, background_tasks, _settings())
+
+        assert len(background_tasks.tasks) == 1
+
+    async def test_process_and_reply_forwards_group_fields_and_sends_nothing_when_empty(
+        self,
+    ) -> None:
+        """An unaddressed group message (core returns []) sends nothing to LINE."""
+        captured: dict[str, InboundMessage] = {}
+
+        async def _fake_process(msg: InboundMessage, config: Settings) -> list[str]:
+            captured["msg"] = msg
+            return []
+
+        with (
+            patch(f"{_ADAPTER}.process_inbound", new=_fake_process),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
+        ):
+            await LineAdapter()._process_and_reply(
+                "line_C1",
+                "早安",
+                _settings(),
+                None,
+                is_group=True,
+                addressed=False,
+                sender_id="U9",
+                sender_name="王小明",
+            )
+
+        msg = captured["msg"]
+        assert msg.is_group is True
+        assert msg.addressed is False
+        assert msg.sender_id == "U9"
+        assert msg.sender_name == "王小明"
+        mock_push.assert_not_called()
+        mock_reply.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

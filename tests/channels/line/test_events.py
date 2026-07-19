@@ -64,6 +64,110 @@ class TestEventRoomId:
 
 
 # ---------------------------------------------------------------------------
+# Event group helpers — is_group / sender_id / mention_is_self
+# ---------------------------------------------------------------------------
+
+
+class TestEventGroupHelpers:
+    def test_group_source_is_group(self) -> None:
+        event = Event.model_validate({"source": {"type": "group", "groupId": "C1"}})
+        assert event.is_group is True
+
+    def test_room_source_is_group(self) -> None:
+        event = Event.model_validate({"source": {"type": "room", "roomId": "R1"}})
+        assert event.is_group is True
+
+    def test_user_source_is_not_group(self) -> None:
+        event = Event.model_validate({"source": {"type": "user", "userId": "U1"}})
+        assert event.is_group is False
+
+    def test_missing_source_is_not_group(self) -> None:
+        assert Event.model_validate({}).is_group is False
+
+    def test_sender_id_reads_source_user_id(self) -> None:
+        """In a group the speaker is source.userId, distinct from the group id."""
+        event = Event.model_validate({"source": {"type": "group", "groupId": "C1", "userId": "U9"}})
+        assert event.native_id == "C1"
+        assert event.sender_id == "U9"
+
+    def test_sender_id_missing_returns_none(self) -> None:
+        assert (
+            Event.model_validate({"source": {"type": "group", "groupId": "C1"}}).sender_id is None
+        )
+
+    def test_mention_is_self_true_when_bot_mentioned(self) -> None:
+        event = Event.model_validate(
+            {
+                "message": {
+                    "type": "text",
+                    "text": "@Alice hi",
+                    "mention": {"mentionees": [{"index": 0, "length": 6, "isSelf": True}]},
+                }
+            }
+        )
+        assert event.mention_is_self is True
+
+    def test_mention_is_self_false_when_other_user_mentioned(self) -> None:
+        event = Event.model_validate(
+            {
+                "message": {
+                    "type": "text",
+                    "text": "@Bob hi",
+                    "mention": {"mentionees": [{"userId": "U2", "isSelf": False}]},
+                }
+            }
+        )
+        assert event.mention_is_self is False
+
+    def test_mention_is_self_false_when_no_mention(self) -> None:
+        event = Event.model_validate({"message": {"type": "text", "text": "hi"}})
+        assert event.mention_is_self is False
+
+    def test_at_all_mention_does_not_count_as_self(self) -> None:
+        """An @All mentionee carries type "all" and no isSelf, so it never addresses the bot."""
+        event = Event.model_validate(
+            {
+                "message": {
+                    "type": "text",
+                    "text": "@All hi",
+                    "mention": {"mentionees": [{"index": 0, "length": 4, "type": "all"}]},
+                }
+            }
+        )
+        assert event.mention_is_self is False
+
+    def test_mention_is_self_true_when_any_mentionee_is_self(self) -> None:
+        event = Event.model_validate(
+            {
+                "message": {
+                    "type": "text",
+                    "text": "@Bob @Alice hi",
+                    "mention": {
+                        "mentionees": [
+                            {"userId": "U2", "isSelf": False},
+                            {"isSelf": True},
+                        ]
+                    },
+                }
+            }
+        )
+        assert event.mention_is_self is True
+
+    def test_group_non_text_message_is_group_but_not_text(self) -> None:
+        """A group sticker event is a group message whose type isn't text (never addressed)."""
+        event = Event.model_validate(
+            {
+                "source": {"type": "group", "groupId": "C1", "userId": "U9"},
+                "message": {"type": "sticker", "keywords": ["smile"]},
+            }
+        )
+        assert event.is_group is True
+        assert event.mention_is_self is False
+        assert event.message is not None
+        assert event.message.type == "sticker"
+
+
+# ---------------------------------------------------------------------------
 # WebhookBody parsing tolerance
 # ---------------------------------------------------------------------------
 

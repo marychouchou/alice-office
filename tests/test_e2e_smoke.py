@@ -108,7 +108,24 @@ def test_build_line_webhook_body_uses_room_source_and_text() -> None:
 
     event = json.loads(raw)["events"][0]
     assert event["source"] == {"type": "room", "roomId": "U" + "f" * 32}
-    assert event["message"] == {"type": "text", "text": "哈囉"}
+    assert event["message"]["type"] == "text"
+    assert event["message"]["text"] == "哈囉"
+
+
+def test_build_line_webhook_body_addresses_bot_via_self_mention() -> None:
+    """The body @mentions the bot so it hits the addressed (agent/container) path.
+
+    Guards the regression where an unaddressed room message was merely observed
+    and never created a container, silently gutting the --line pipeline check.
+    Verified through the real Event model: is_group + mention_is_self => addressed.
+    """
+    from alice_office_router.channels.line.events import Event
+
+    raw = e2e_smoke.build_line_webhook_body("U" + "f" * 32, "哈囉")
+    event = Event.model_validate(json.loads(raw)["events"][0])
+
+    assert event.is_group is True
+    assert event.mention_is_self is True
 
 
 def test_sign_matches_reference_hmac() -> None:

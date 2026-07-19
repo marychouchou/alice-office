@@ -18,12 +18,22 @@ from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import get_or_create_container
 from alice_office_router.google_oauth import check_google_authorization
+from alice_office_router.group_context import (
+    GROUP_SYSTEM_PROMPT,
+    build_group_prompt,
+    clear_observed,
+    is_silence,
+    peek_observed,
+    record_observed,
+)
 from alice_office_router.hermes_client import ask_hermes_agent
 
 logger = logging.getLogger(__name__)
 
 
-async def _ask_agent(room_key: str, text: str, config: Settings) -> str | None:
+async def _ask_agent(
+    room_key: str, text: str, config: Settings, *, system: str | None = None
+) -> str | None:
     """Resolve the room's Hermes container and ask it for a reply.
 
     Each step is independently guarded: a failure is logged and yields None
@@ -34,6 +44,8 @@ async def _ask_agent(room_key: str, text: str, config: Settings) -> str | None:
         room_key: Unique room key used to resolve the container and session.
         text: User message text to forward to the agent.
         config: Application settings.
+        system: Optional ephemeral system message for this turn (the group
+            path passes GROUP_SYSTEM_PROMPT); None keeps the 1:1 request plain.
 
     Returns:
         The agent's reply text, or None if the container or agent call failed.
@@ -45,10 +57,54 @@ async def _ask_agent(room_key: str, text: str, config: Settings) -> str | None:
         return None
 
     try:
-        return await ask_hermes_agent(target_url, room_key, text, config.HERMES_API_SERVER_KEY)
+        return await ask_hermes_agent(
+            target_url, room_key, text, config.HERMES_API_SERVER_KEY, system=system
+        )
     except (httpx.HTTPError, ValueError) as exc:
         logger.error(f"Hermes agent request failed for room {room_key}: {exc}")
         return None
+
+
+async def _ask_group_agent(msg: InboundMessage, config: Settings) -> str | None:
+    """Ask the agent for an addressed group message, managing buffer and silence.
+
+    Folds the room's observed background into a tagged prompt (design §7), asks
+    the agent under the group system message, then clears only the records that
+    were folded in (a failure keeps the whole context for a retry; and any
+    unaddressed message observed during the agent call survives, since only the
+    peeked records are dropped — see group_context.clear_observed), and drops a
+    silence-token reply.
+
+    Args:
+        msg: The addressed group inbound message.
+        config: Application settings.
+
+    Returns:
+        The agent's reply, or None when the agent failed or chose to stay silent.
+    """
+    observed = peek_observed(config, msg.room_key)
+    prompt = build_group_prompt(observed, msg)
+    reply = await _ask_agent(msg.room_key, prompt, config, system=GROUP_SYSTEM_PROMPT)
+    if reply is None:
+        return None
+    clear_observed(config, msg.room_key, observed)
+    return None if is_silence(reply) else reply
+
+
+async def _reply_for(msg: InboundMessage, config: Settings) -> str | None:
+    """Ask the agent for a reply, taking the group path for group messages.
+
+    Args:
+        msg: The inbound message (already past the observe short-circuit, so a
+            group message here is one addressed to the bot).
+        config: Application settings.
+
+    Returns:
+        The agent's reply text, or None if nothing should be delivered.
+    """
+    if msg.is_group:
+        return await _ask_group_agent(msg, config)
+    return await _ask_agent(msg.room_key, msg.text, config)
 
 
 async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
@@ -63,11 +119,20 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
         config: Application settings.
 
     Returns:
-        Texts to send back to the room, in order. Gate "blocked" returns only
-        the authorization message (agent not called); "notice" returns the
-        notice followed by the agent reply; "ok" returns just the agent reply.
-        A container/agent failure drops the agent reply, keeping any notice.
+        Texts to send back to the room, in order. An unaddressed group message
+        is only observed and returns nothing. Gate "blocked" returns only the
+        authorization message (agent not called); "notice" returns the notice
+        followed by the agent reply; "ok" returns just the agent reply. A
+        container/agent failure (or a silence-token group reply) drops the
+        agent reply, keeping any notice.
     """
+    # Observe short-circuit, before the OAuth gate: an unaddressed group
+    # message must neither ask the agent nor trigger an auth prompt; a
+    # blocked room still accumulates background to carry once authorized.
+    if msg.is_group and not msg.addressed:
+        record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
+        return []
+
     status, message = check_google_authorization(msg.room_key, config)
     if status == "blocked" and message is not None:
         return [message]
@@ -76,7 +141,7 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
     if status == "notice" and message is not None:
         replies.append(message)
 
-    reply = await _ask_agent(msg.room_key, msg.text, config)
+    reply = await _reply_for(msg, config)
     if reply is not None:
         replies.append(reply)
     return replies

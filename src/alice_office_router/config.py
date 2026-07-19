@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # First-party API channel (TUI / mobile / dev) bearer token. Unset (None)
     # means the channel is not mounted at all (see channels.enabled_adapters).
     API_CHANNEL_TOKEN: str | None = None
+    # Comma-separated call-words that address the bot in a group chat, an
+    # @mention fallback for LINE clients that can't @ an OA (desktop/old
+    # mobile). Empty (default) = a group message is addressed only via
+    # @mention. Parsed into a tuple by group_trigger_prefixes().
+    GROUP_TRIGGER_PREFIXES: str = ""
+    # Per-room cap on the group observed buffer (data/<room_id>/group_state/
+    # observed.jsonl): background messages beyond this are dropped oldest-first.
+    GROUP_OBSERVED_MAX_MESSAGES: int = 50
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
@@ -201,6 +209,35 @@ class Settings(BaseSettings):
             by the google-calendar-mcp server for this room.
         """
         return self.room_google_dir(room_id) / "gcp-oauth.keys.installed.json"
+
+    def room_group_state_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's group-chat observed-buffer directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom, same raw (original
+                case) value used for DATA_DIR / room_id elsewhere — must not
+                be lowercased, or this would diverge from the directory
+                container_manager actually creates for the room.
+
+        Returns:
+            DATA_DIR / room_id / "group_state" — holds this room's
+            observed.jsonl background buffer. Lives inside the room's own
+            /opt/data mount but is named so it never collides with anything
+            Hermes gateway manages, so Hermes leaves it alone.
+        """
+        return self.DATA_DIR / room_id / "group_state"
+
+    def group_trigger_prefixes(self) -> tuple[str, ...]:
+        """Parse GROUP_TRIGGER_PREFIXES into the non-empty call-words to match.
+
+        Returns:
+            The comma-separated prefixes, each stripped, with blanks dropped.
+            An empty tuple (the default) means a group message is addressed
+            only by an @mention, never by a leading call-word.
+        """
+        return tuple(
+            part.strip() for part in self.GROUP_TRIGGER_PREFIXES.split(",") if part.strip()
+        )
 
     @property
     def google_oauth_enabled(self) -> bool:

@@ -163,7 +163,15 @@ def sign(body: str, secret: str) -> str:
 
 
 def build_line_webhook_body(native_id: str, text: str) -> str:
-    """Build a synthetic LINE webhook body for a single text message.
+    """Build a synthetic LINE webhook body for one *addressed* group message.
+
+    The event is a group/room text message that @mentions the bot (a mentionee
+    flagged ``isSelf``), so core takes the group *addressed* path and drives the
+    full container/agent pipeline. Without the mention the message would be
+    classified unaddressed and merely observed — never reaching
+    get_or_create_container — which would make run_line_check pass while
+    exercising nothing (see run_line_check). No ``source.userId`` is included,
+    so speaker-name resolution falls back locally without hitting the LINE API.
 
     Args:
         native_id: The bare LINE id (becomes room_key line_<native_id>).
@@ -180,7 +188,11 @@ def build_line_webhook_body(native_id: str, text: str) -> str:
                 "webhookEventId": "e2e-smoke-line-event",
                 "replyToken": "e2e-smoke-fake-reply-token",
                 "source": {"type": "room", "roomId": native_id},
-                "message": {"type": "text", "text": text},
+                "message": {
+                    "type": "text",
+                    "text": text,
+                    "mention": {"mentionees": [{"index": 0, "length": 1, "isSelf": True}]},
+                },
             }
         ]
     }

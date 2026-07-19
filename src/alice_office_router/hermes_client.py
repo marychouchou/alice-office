@@ -34,7 +34,26 @@ class _ChatCompletion(BaseModel):
     choices: list[_Choice] = Field(default_factory=list)
 
 
-async def ask_hermes_agent(base_url: str, room_id: str, text: str, api_key: str) -> str:
+def _build_messages(text: str, system: str | None) -> list[dict[str, str]]:
+    """Build the chat `messages` array, prepending a system message if given.
+
+    Args:
+        text: The user message content.
+        system: An ephemeral system message to layer on top of the room's core
+            prompt for this one turn, or None for the plain user-only request.
+
+    Returns:
+        `[user]` when `system` is None, else `[system, user]`.
+    """
+    user_message = {"role": "user", "content": text}
+    if system is None:
+        return [user_message]
+    return [{"role": "system", "content": system}, user_message]
+
+
+async def ask_hermes_agent(
+    base_url: str, room_id: str, text: str, api_key: str, *, system: str | None = None
+) -> str:
     """Send a user message to a room's Hermes agent and return its reply text.
 
     Uses the agent's built-in OpenAI-compatible api_server platform. The room_id
@@ -46,6 +65,9 @@ async def ask_hermes_agent(base_url: str, room_id: str, text: str, api_key: str)
         room_id: Unique chatroom identifier, used as the Hermes session id.
         text: User message text to send.
         api_key: Bearer token matching the container's API_SERVER_KEY.
+        system: Optional ephemeral system message prepended for this one turn
+            (used by the group path to carry GROUP_SYSTEM_PROMPT); None sends
+            the plain user-only request, byte-identical to the 1:1 path.
 
     Returns:
         The assistant's reply text.
@@ -58,7 +80,7 @@ async def ask_hermes_agent(base_url: str, room_id: str, text: str, api_key: str)
         "Authorization": f"Bearer {api_key}",
         "X-Hermes-Session-Id": room_id,
     }
-    payload = {"messages": [{"role": "user", "content": text}]}
+    payload = {"messages": _build_messages(text, system)}
 
     async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(
