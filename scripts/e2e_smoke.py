@@ -297,7 +297,7 @@ def start_router(port: int, log_path: Path) -> subprocess.Popen[bytes]:
         "--log-level",
         "info",
     ]
-    log_fh = open(log_path, "wb")  # noqa: SIM115 — fd is inherited by the child; parent copy closed below
+    log_fh = log_path.open("wb")  # noqa: SIM115 — fd is inherited by the child; parent copy closed below
     proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=log_fh, stderr=subprocess.STDOUT)
     log_fh.close()
     return proc

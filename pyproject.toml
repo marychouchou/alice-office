@@ -40,8 +40,24 @@ target-version = "py312"
 extend-exclude = ["data", "src/hermes"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+select = ["E", "F", "I", "UP", "B", "SIM", "PTH", "T201", "D", "PLR0915"]
+# D100/D104: 模組／套件層 docstring 不要求，只強制函式／類別層
+ignore = ["E501", "D100", "D104"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
+# scripts/ 是 CLI 除錯／部署腳本：print 是正常輸出方式，長 main() 不值得為 lint 重構
+"scripts/**" = ["D", "T201", "PLR0915"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+required-imports = ["from __future__ import annotations"]
+
+[tool.ruff.lint.pylint]
+# 近似 CLAUDE.md 原「函式長度上限 30 行」規則（statements ≈ 行數下界）
+max-statements = 30
 
 [tool.mypy]
 strict = true
