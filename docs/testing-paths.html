@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>訊息進出的三條路:真實 LINE、偽造 webhook、API curl</title>
+<style>
+  :root {
+    --blue: #2563eb; --orange: #d97706; --green: #16a34a;
+    --ink: #1e293b; --muted: #64748b; --line: #e2e8f0; --bg: #f8fafc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 4rem; color: var(--ink); background: #fff;
+    font-family: system-ui, -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    line-height: 1.75; font-size: 16px;
+  }
+  main { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 1.6rem; line-height: 1.4; margin: 0 0 .5rem; }
+  h2 { font-size: 1.25rem; margin: 2.5rem 0 .75rem; padding-top: 1.25rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.75rem 0 .5rem; }
+  p { margin: .6rem 0; }
+  .subtitle { color: var(--muted); margin-bottom: 1.5rem; }
+  .callout {
+    background: var(--bg); border-left: 4px solid var(--ink); border-radius: 6px;
+    padding: .9rem 1.1rem; margin: 1.25rem 0; font-weight: 600;
+  }
+  .callout small { display: block; font-weight: 400; color: var(--muted); margin-top: .35rem; }
+  .diagram-wrap { overflow-x: auto; margin: 1rem 0 1.5rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+  .diagram-wrap svg { display: block; min-width: 1000px; width: 100%; height: auto; }
+  .legend { display: flex; gap: 1.4rem; flex-wrap: wrap; font-size: .88rem; color: var(--muted); margin: .75rem 0 0; }
+  .legend span { display: inline-flex; align-items: center; gap: .45rem; }
+  .swatch { display: inline-block; width: 26px; height: 0; border-top: 3px solid var(--muted); }
+  .swatch.dashed { border-top-style: dashed; }
+  .path-blue { color: var(--blue); } .path-orange { color: var(--orange); } .path-green { color: var(--green); }
+  code, pre {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--bg); border-radius: 5px;
+  }
+  code { padding: .1em .4em; font-size: .875em; }
+  pre { padding: .9rem 1.1rem; overflow-x: auto; border: 1px solid var(--line); line-height: 1.55; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .92rem; }
+  th, td { border: 1px solid var(--line); padding: .55rem .75rem; text-align: left; vertical-align: top; }
+  th { background: var(--bg); }
+  td:first-child { white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+  .ok { color: var(--green); font-weight: 600; }
+  .no { color: #94a3b8; }
+  .warn { color: var(--orange); font-weight: 600; }
+  ul { padding-left: 1.4rem; }
+  li { margin: .35rem 0; }
+  .note { color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>訊息進出的三條路</h1>
+<p class="subtitle">真實 LINE 路徑 vs 兩條免手機測試路——各自怎麼進、回覆怎麼出、要什麼憑證。</p>
+
+<p>回答一個問題:<strong>不開手機 LINE app,要怎麼測 end-to-end、又要去哪裡看回覆?</strong></p>
+
+<div class="callout">
+  這個系統沒有統一的「送回覆」機制——誰把訊息帶進來,誰負責送回去。
+  <small><code>core.process_inbound</code> 只「回傳」文字給 adapter,它不送訊。
+  所以訊息從哪條路進來,就決定了回覆從哪條路出去、需要什麼憑證。</small>
+</div>
+
+<h2>全景圖:三條路的進與出</h2>
+
+<div class="legend">
+  <span><span class="swatch"></span>實線=訊息進來的路</span>
+  <span><span class="swatch dashed"></span>虛線=回覆走的路</span>
+  <span class="path-blue">■ 真實 LINE</span>
+  <span class="path-orange">■ 偽造 webhook</span>
+  <span class="path-green">■ API curl</span>
+</div>
+
+<div class="diagram-wrap">
+<svg viewBox="0 0 1150 660" xmlns="http://www.w3.org/2000/svg" font-family="system-ui, -apple-system, 'PingFang TC', sans-serif">
+  <defs>
+    <marker id="m-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="m-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d97706"/>
+    </marker>
+    <marker id="m-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#16a34a"/>
+    </marker>
+    <marker id="m-gray" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- router 外框 -->
+  <rect x="470" y="40" width="340" height="580" rx="14" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="640" y="66" text-anchor="middle" font-size="14" font-weight="700" fill="#475569">router</text>
+
+  <!-- 左側來源節點 -->
+  <rect x="30" y="90" width="130" height="60" rx="10" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="95" y="115" text-anchor="middle" font-size="14" font-weight="600">📱 手機</text>
+  <text x="95" y="136" text-anchor="middle" font-size="12" fill="#64748b">LINE app</text>
+
+  <rect x="200" y="90" width="150" height="60" rx="10" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="275" y="115" text-anchor="middle" font-size="14" font-weight="600">LINE Platform</text>
+  <text x="275" y="136" text-anchor="middle" font-size="12" fill="#64748b">(LINE 的伺服器)</text>
+
+  <rect x="30" y="230" width="200" height="60" rx="10" fill="#fff" stroke="#d97706" stroke-width="1.5"/>
+  <text x="130" y="255" text-anchor="middle" font-size="14" font-weight="600">🧪 test_webhook.py</text>
+  <text x="130" y="276" text-anchor="middle" font-size="12" fill="#64748b">偽造簽章 webhook</text>
+
+  <rect x="30" y="500" width="200" height="60" rx="10" fill="#fff" stroke="#16a34a" stroke-width="1.5"/>
+  <text x="130" y="525" text-anchor="middle" font-size="14" font-weight="600">💻 curl / 之後的 TUI</text>
+  <text x="130" y="546" text-anchor="middle" font-size="12" fill="#64748b">回覆直接印在終端機</text>
+
+  <!-- router 內部節點 -->
+  <rect x="500" y="90" width="280" height="86" rx="10" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="640" y="115" text-anchor="middle" font-size="14" font-weight="600">LineAdapter</text>
+  <text x="640" y="136" text-anchor="middle" font-size="12" fill="#64748b">POST /webhooks/line</text>
+  <text x="640" y="154" text-anchor="middle" font-size="12" fill="#64748b">驗 x-line-signature</text>
+
+  <rect x="500" y="290" width="280" height="100" rx="10" fill="#eef2ff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="640" y="318" text-anchor="middle" font-size="14" font-weight="600">core.process_inbound</text>
+  <text x="640" y="340" text-anchor="middle" font-size="12" fill="#64748b">gate → 容器 → agent</text>
+  <text x="640" y="358" text-anchor="middle" font-size="12" fill="#64748b">只回傳文字,不送訊</text>
+
+  <rect x="500" y="500" width="280" height="86" rx="10" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="640" y="525" text-anchor="middle" font-size="14" font-weight="600">ApiChannelAdapter</text>
+  <text x="640" y="546" text-anchor="middle" font-size="12" fill="#64748b">POST /webhooks/api/messages</text>
+  <text x="640" y="564" text-anchor="middle" font-size="12" fill="#64748b">驗 Bearer API_CHANNEL_TOKEN</text>
+
+  <!-- Hermes 容器節點 -->
+  <rect x="890" y="290" width="230" height="100" rx="10" fill="#fff" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="1005" y="325" text-anchor="middle" font-size="14" font-weight="600">🤖 hermes_&lt;room_key&gt;</text>
+  <text x="1005" y="348" text-anchor="middle" font-size="12" fill="#64748b">容器(Hermes agent)</text>
+
+  <!-- router 內部與 Hermes 的灰線 -->
+  <line x1="640" y1="176" x2="640" y2="286" stroke="#64748b" stroke-width="1.5" marker-end="url(#m-gray)"/>
+  <line x1="640" y1="500" x2="640" y2="394" stroke="#64748b" stroke-width="1.5" marker-end="url(#m-gray)"/>
+  <line x1="784" y1="340" x2="886" y2="340" stroke="#64748b" stroke-width="1.5" marker-start="url(#m-gray)" marker-end="url(#m-gray)"/>
+
+  <!-- 🔵 真實 LINE:進 -->
+  <line x1="160" y1="108" x2="196" y2="108" stroke="#2563eb" stroke-width="2" marker-end="url(#m-blue)"/>
+  <text x="178" y="98" text-anchor="middle" font-size="11" fill="#2563eb">①</text>
+  <line x1="350" y1="108" x2="496" y2="108" stroke="#2563eb" stroke-width="2" marker-end="url(#m-blue)"/>
+  <text x="423" y="87" text-anchor="middle" font-size="11" fill="#2563eb">② webhook</text>
+  <text x="423" y="101" text-anchor="middle" font-size="10" fill="#2563eb">簽章+真 replyToken</text>
+  <text x="426" y="124" text-anchor="middle" font-size="10" fill="#2563eb">router 立即回 200,先收下</text>
+
+  <!-- 🔵 真實 LINE:回 -->
+  <line x1="500" y1="140" x2="354" y2="140" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#m-blue)"/>
+  <text x="427" y="153" text-anchor="middle" font-size="10" fill="#2563eb">③ 另開新連線打 LINE API</text>
+  <text x="420" y="166" text-anchor="middle" font-size="10" fill="#2563eb">用 replyToken / access token</text>
+  <line x1="200" y1="140" x2="164" y2="140" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#m-blue)"/>
+  <text x="182" y="158" text-anchor="middle" font-size="10" fill="#2563eb">④ 推播</text>
+
+  <!-- 🟠 偽造 webhook:進(從下方進 LineAdapter) -->
+  <path d="M230 260 H530 Q540 260 540 250 V178" fill="none" stroke="#d97706" stroke-width="2" marker-end="url(#m-orange)"/>
+  <text x="385" y="236" text-anchor="middle" font-size="10" fill="#d97706">真簽章 + 假 replyToken</text>
+  <text x="385" y="252" text-anchor="middle" font-size="10" fill="#d97706">驗簽會過,分不出真假</text>
+
+  <!-- 🟠 偽造 webhook:回(打真 LINE API 被拒) -->
+  <path d="M500 172 H320 Q310 172 310 164 V152" fill="none" stroke="#d97706" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#m-orange)"/>
+  <text x="360" y="188" text-anchor="middle" font-size="10" fill="#d97706">假 replyToken → 被 LINE 拒絕 ❌</text>
+  <text x="360" y="202" text-anchor="middle" font-size="10" fill="#d97706">回覆哪都沒去,只留在 router log(預期)</text>
+
+  <!-- 🟢 API curl:進 -->
+  <line x1="230" y1="522" x2="496" y2="522" stroke="#16a34a" stroke-width="2" marker-end="url(#m-green)"/>
+  <text x="363" y="512" text-anchor="middle" font-size="10" fill="#16a34a">Bearer token,連線掛著等</text>
+
+  <!-- 🟢 API curl:回 -->
+  <line x1="500" y1="556" x2="234" y2="556" stroke="#16a34a" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#m-green)"/>
+  <text x="367" y="576" text-anchor="middle" font-size="10" fill="#16a34a">回覆放進同一條連線的 response</text>
+  <text x="367" y="590" text-anchor="middle" font-size="10" fill="#16a34a">{"replies": […]},全程不經過 LINE</text>
+</svg>
+</div>
+
+<p>三條路在 <code>core.process_inbound</code> 之後<strong>完全共用</strong>同一段:gate → 找/建
+<code>hermes_&lt;room_key&gt;</code> 容器 → 問 Hermes agent。差別全部在「進」和「出」。</p>
+
+<h2>逐條說明</h2>
+
+<h3 class="path-blue">🔵 真實路徑:手機 LINE app</h3>
+<p>回覆是<strong>兩段式</strong>的:webhook 進來時 router 只回 200 表示「收到」,連線就斷了;
+agent 算完後,router <strong>另開一條新連線</strong>打 LINE 的伺服器(先用 replyToken 回覆,
+失敗改用 access token push),LINE 再推播到手機。這就是為什麼 LINE 回覆需要 token——
+回覆是一個獨立的出站 request,對 LINE 來說要驗明正身。</p>
+
+<h3 class="path-orange">🟠 測試路 A:偽造簽章的 webhook(<code>scripts/test_webhook.py</code>)</h3>
+<p>自己扮演 LINE Platform:組一樣格式的事件 JSON,用 <code>.env</code> 裡的
+<code>LINE_CHANNEL_SECRET</code> 算出<strong>真的</strong>簽章,POST 到
+<code>/webhooks/line</code>——router 驗簽會過,分不出真假。但 replyToken 是捏造的
+(LINE 從沒發過這個 token),所以回覆那段打到真 LINE API 時<strong>必定被拒</strong>,
+只會留在 router log 裡(<span class="warn">預期行為,不代表管線壞掉</span>)。</p>
+<pre><code># router 先跑著:uv run uvicorn alice_office_router.main:app --port 8000
+uv run python scripts/test_webhook.py --text "今天天氣如何?"</code></pre>
+<p class="note">用途:測 LINE 那段 code(驗簽、事件解析、去重、房間路由)。
+看回覆:router log 或 <code>scripts/debug_room.py &lt;room_id&gt;</code>,不在終端機 response 裡。</p>
+
+<h3 class="path-green">🟢 測試路 B:API curl(<code>/webhooks/api/messages</code>)</h3>
+<p>回覆是<strong>一段式</strong>的:curl 的連線一直掛著,router 在這條連線裡同步跑完
+gate → 容器 → agent,把回覆<strong>塞進同一個 HTTP response</strong> 原路還你。
+全程不經過 LINE,所以<strong>不需要 LINE 的任何 token</strong>;唯一要的是
+<code>API_CHANNEL_TOKEN</code>——你自己在 <code>.env</code> 設的一組密碼,
+擋別人亂打你的 router(沒設這個環境變數,這個 endpoint 根本不會掛載)。</p>
+<pre><code>curl -s http://localhost:8000/webhooks/api/messages \
+  -H "Authorization: Bearer $API_CHANNEL_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"room_key": "api_test1", "text": "你好"}' | jq
+# → {"replies": ["agent 的回覆就在這裡"]}</code></pre>
+
+<p><code>room_key</code> 有兩種用法:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>room_key</th><th>意思</th><th>容器 / session</th></tr>
+  <tr><td><code>api_&lt;slug&gt;</code>(如 <code>api_test1</code>)</td><td>開一個純測試房</td><td>全新的 <code>hermes_api_test1</code></td></tr>
+  <tr><td><code>line_&lt;native id&gt;</code>(U/C/R+32hex)</td><td><strong>插話進既有 LINE 房間</strong></td><td>跟手機共用同一個容器、同一段對話記憶</td></tr>
+</table>
+</div>
+<p class="note">注意:用 <code>line_…</code> 插話時,回覆一樣只出現在你的終端機,
+<strong>不會</strong>推到手機(回覆跟著進來的路走);但對話記憶是共用的——
+agent 之後在手機上記得你 curl 說過的話。</p>
+
+<h2>兩種 token,別搞混</h2>
+<div class="table-wrap">
+<table>
+  <tr><th></th><th>LINE 的 token</th><th><code>API_CHANNEL_TOKEN</code></th></tr>
+  <tr><td>是什麼</td><td>replyToken(LINE 每則訊息發的一次性回覆券)+ channel access token</td><td>你自己在 <code>.env</code> 亂數自訂的一組密碼</td></tr>
+  <tr><td>誰發的</td><td>LINE Platform</td><td>你自己</td></tr>
+  <tr><td>用在哪</td><td>router <strong>送回覆給 LINE</strong> 時(出站)</td><td>curl <strong>進門</strong>時的 <code>Authorization: Bearer</code>(入站)</td></tr>
+  <tr><td>curl 測試需要嗎</td><td><strong>不需要</strong>(回覆不經過 LINE)</td><td>需要</td></tr>
+</table>
+</div>
+
+<h2>總對照</h2>
+<div class="table-wrap">
+<table>
+  <tr><th></th><th class="path-blue">🔵 真實 LINE</th><th class="path-orange">🟠 偽造 webhook</th><th class="path-green">🟢 API curl</th></tr>
+  <tr><td>進來的路</td><td>LINE Platform → <code>/webhooks/line</code></td><td>自己 POST <code>/webhooks/line</code>(真簽章)</td><td>自己 POST <code>/webhooks/api/messages</code></td></tr>
+  <tr><td>LINE 段 code(驗簽/解析)</td><td class="ok">✅ 測到</td><td class="ok">✅ 測到</td><td class="no">✘ 跳過</td></tr>
+  <tr><td>core 段(gate/容器/agent)</td><td class="ok">✅ 測到</td><td class="ok">✅ 測到</td><td class="ok">✅ 測到</td></tr>
+  <tr><td><strong>回覆方式</strong></td><td>另開連線打 LINE API → 推播到手機</td><td>同左,但假 token 被拒 ❌</td><td><strong>同一條連線的 HTTP response</strong></td></tr>
+  <tr><td>在哪看回覆</td><td>手機</td><td>router log</td><td>終端機(response body)</td></tr>
+  <tr><td>需要的憑證</td><td>LINE secret + access token(router 端)</td><td><code>.env</code> 的 LINE_CHANNEL_SECRET(算簽章用)</td><td><code>.env</code> 的 API_CHANNEL_TOKEN</td></tr>
+  <tr><td>手機</td><td>要</td><td>不用</td><td>不用</td></tr>
+</table>
+</div>
+
+<h2>日常怎麼選</h2>
+<ul>
+  <li><strong>改 core / 容器 / agent / MCP / plugin</strong> → <span class="path-green">🟢 curl</span>(最快、回覆直接看得到、能互動,還能用 <code>line_…</code> 插進真房間重現問題)。</li>
+  <li><strong>改 <code>channels/line/</code> 的解析/驗簽/路由</strong> → <span class="path-orange">🟠 偽造 webhook</span>。</li>
+  <li><strong>commit 前整條驗一次</strong> → <code>uv run python scripts/e2e_smoke.py</code>(一鍵自動跑 🟢,加 <code>--line</code> 連 🟠 一起跑,測完自己清乾淨)。</li>
+  <li><strong>只有「真的送到 LINE、手機上的顯示效果」</strong>(切則、長訊息、推播)要用手機——這段走 LINE 官方 API 的穩定介面,不太會因為改 code 而壞,release 前點一輪即可。</li>
+</ul>
+
+<p class="note">出問題先跑 <code>uv run python scripts/debug_room.py &lt;room_id&gt;</code>
+一鍵看容器狀態與 log;症狀排查見 <code>docs/troubleshooting.md</code>;
+channel 介面的設計背景見 <code>docs/channel-interface-design.md</code>。</p>
+
+</main>
+</body>
+</html>
