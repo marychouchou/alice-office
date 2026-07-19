@@ -35,3 +35,8 @@ data/
 data.bak-*/
 tmp/
 CLAUDE.local.md
+
+# .claude/ 底下只有 rules/（path-scoped 的 agent 規則）要進版控，
+# 其餘（settings.local.json、快取等）是個人／機器本地的
+.claude/*
+!.claude/rules/
