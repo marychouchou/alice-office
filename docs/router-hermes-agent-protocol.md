@@ -67,20 +67,27 @@ flowchart TD
 POST {base_url}/v1/chat/completions
 Headers:
   Authorization: Bearer {HERMES_API_SERVER_KEY}
-  X-Hermes-Session-Id: {room_id}
+  X-Hermes-Session-Id: {session_id}
 Body:
   {"messages": [{"role": "user", "content": "<使用者訊息文字>"}]}
 ```
 
-- **`X-Hermes-Session-Id: room_id`**：讓同一聊天室的對話在 Hermes 端維持 session
-  連續性；不同房間天生是不同 container，互不相通。
+- **`X-Hermes-Session-Id: session_id`**：讓同一聊天室的對話在 Hermes 端維持 session
+  連續性；不同房間天生是不同 container，互不相通。session id **不再固定等於
+  `room_key`**：router 依房間目前的 session epoch 推導（`session_hygiene.session_id_for`）
+  ——epoch 0 送裸 `room_key`（與既有 session 相容），epoch N>0 送 `room_key#N`。換一個
+  新值 = Hermes 靜默開全新 session，是本 repo 控制 context 成長的手段，完整規則見
+  `docs/session-hygiene.md`。
 - **`Authorization: Bearer`**：跟容器建立時注入的 `API_SERVER_KEY` 比對，是
   router↔container 唯一的驗證機制。
 - **Timeout 120 秒**（`_REQUEST_TIMEOUT_SECONDS`），比 LINE webhook 本身的等待
   時間長得多——這也是為什麼整段呼叫必須在 `BackgroundTasks` 裡進行，而不是同步
   等待再回應 LINE。
-- **回應解析**：取 `choices[0].message.content` 當回覆文字；`choices` 為空或
-  `content` 不是非空字串時 `raise ValueError`，視為 Hermes 沒給出可用回覆。
+- **回應解析**：`ask_hermes_agent` 回傳 `AgentReply{text, prompt_tokens}`。`text` 取
+  `choices[0].message.content`；`choices` 為空或 `content` 不是非空字串時 `raise
+  ValueError`，視為 Hermes 沒給出可用回覆。`prompt_tokens` 取自回應的 `usage.prompt_tokens`
+  （缺 `usage` 或回報 <=0 → 正規化為 `None`，0 是 server「沒統計」的預設），供 session
+  輪替的 token 水位判斷用（累計語意警語見 `docs/session-hygiene.md`）。
 
 ### 媒體訊息不走這條 API body
 
@@ -137,7 +144,7 @@ sequenceDiagram
     D-->>R: container URL（Docker DNS 或 localhost:port）
 
     Note over R,H: 核心請求
-    R->>H: POST /v1/chat/completions<br/>Authorization: Bearer HERMES_API_SERVER_KEY<br/>X-Hermes-Session-Id: room_id<br/>body: {"messages":[{"role":"user","content":text}]}
+    R->>H: POST /v1/chat/completions<br/>Authorization: Bearer HERMES_API_SERVER_KEY<br/>X-Hermes-Session-Id: session_id（room_key 或 room_key#epoch）<br/>body: {"messages":[{"role":"user","content":text}]}
     H->>H: 驗證 Bearer token
     H->>H: 依 X-Hermes-Session-Id 解析/建立 session
     H->>H: agent 核心處理（skills / 記憶 / LLM 呼叫，黑盒）

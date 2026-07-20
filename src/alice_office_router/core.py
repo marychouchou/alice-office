@@ -27,18 +27,68 @@ from alice_office_router.group_context import (
     record_observed,
 )
 from alice_office_router.hermes_client import ask_hermes_agent
+from alice_office_router.session_hygiene import (
+    HANDOFF_PROMPT,
+    RESET_CONFIRMATION,
+    begin_turn,
+    build_turn_text,
+    check_reset_command,
+    complete_turn,
+    reset_session,
+    session_id_for,
+)
 
 logger = logging.getLogger(__name__)
+
+
+async def _generate_handoff(
+    target_url: str, room_key: str, retired_epoch: int, config: Settings
+) -> str | None:
+    """Best-effort: ask the just-retired session for a one-shot handoff summary.
+
+    Sends one extra request to the retired epoch's session id (the rotation has
+    already happened in begin_turn) asking for a short summary of unfinished
+    items, preferences, and in-progress tasks. Any failure is logged and
+    swallowed — the new epoch then continues clean-slate, since a fresh session
+    with no summary still beats an ever-growing one. The summary is never
+    persisted: it exists only to be injected into this turn's user message.
+
+    Args:
+        target_url: The room's Hermes container base URL.
+        room_key: The room key core routes on.
+        retired_epoch: The epoch just closed (whose session is summarized).
+        config: Application settings.
+
+    Returns:
+        The handoff summary text, or None when the summary request failed.
+    """
+    old_session_id = session_id_for(room_key, retired_epoch)
+    try:
+        reply = await ask_hermes_agent(
+            target_url, old_session_id, HANDOFF_PROMPT, config.HERMES_API_SERVER_KEY
+        )
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(
+            f"Handoff summary failed for room {room_key}; continuing clean-slate ({exc})"
+        )
+        return None
+    return reply.text
 
 
 async def _ask_agent(
     room_key: str, text: str, config: Settings, *, system: str | None = None
 ) -> str | None:
-    """Resolve the room's Hermes container and ask it for a reply.
+    """Resolve the room's Hermes container, rotate if due, and ask for a reply.
 
     Each step is independently guarded: a failure is logged and yields None
     (the caller then delivers nothing for it), mirroring the original
     background-task contract where a downstream error must never propagate.
+    Session hygiene is applied here so 1:1 and group turns share it: begin_turn
+    evaluates the triggers and rotates atomically (before any await); a rotated
+    turn then fetches a one-shot handoff summary from the retired epoch's
+    session and folds it into this turn's user text; a successful turn records
+    its token watermark (see session_hygiene, including the accepted trade-offs
+    of the non-persisted handoff).
 
     Args:
         room_key: Unique room key used to resolve the container and session.
@@ -56,13 +106,29 @@ async def _ask_agent(
         logger.error(f"Failed to get/create container for room {room_key}: {exc}")
         return None
 
+    plan = begin_turn(config, room_key)
+    # retired_epoch is set exactly when this turn rotated (see TurnPlan).
+    handoff = (
+        await _generate_handoff(target_url, room_key, plan.retired_epoch, config)
+        if plan.retired_epoch is not None
+        else None
+    )
+
+    session_id = session_id_for(room_key, plan.epoch)
     try:
-        return await ask_hermes_agent(
-            target_url, room_key, text, config.HERMES_API_SERVER_KEY, system=system
+        result = await ask_hermes_agent(
+            target_url,
+            session_id,
+            build_turn_text(handoff, text),
+            config.HERMES_API_SERVER_KEY,
+            system=system,
         )
     except (httpx.HTTPError, ValueError) as exc:
         logger.error(f"Hermes agent request failed for room {room_key}: {exc}")
         return None
+
+    complete_turn(config, room_key, epoch=plan.epoch, prompt_tokens=result.prompt_tokens)
+    return result.text
 
 
 async def _ask_group_agent(msg: InboundMessage, config: Settings) -> str | None:
@@ -120,11 +186,12 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
 
     Returns:
         Texts to send back to the room, in order. An unaddressed group message
-        is only observed and returns nothing. Gate "blocked" returns only the
-        authorization message (agent not called); "notice" returns the notice
-        followed by the agent reply; "ok" returns just the agent reply. A
-        container/agent failure (or a silence-token group reply) drops the
-        agent reply, keeping any notice.
+        is only observed and returns nothing. A manual reset command rotates the
+        room's session and returns only the fixed confirmation (agent not
+        called). Gate "blocked" returns only the authorization message (agent
+        not called); "notice" returns the notice followed by the agent reply;
+        "ok" returns just the agent reply. A container/agent failure (or a
+        silence-token group reply) drops the agent reply, keeping any notice.
     """
     # Observe short-circuit, before the OAuth gate: an unaddressed group
     # message must neither ask the agent nor trigger an auth prompt; a
@@ -132,6 +199,14 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
     if msg.is_group and not msg.addressed:
         record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
         return []
+
+    # Manual session reset, before the OAuth gate: rotate to a fresh epoch (no
+    # handoff — a deliberate clean slate), drop any group background so it can't
+    # leak into the new epoch, and confirm without spending an agent turn.
+    if check_reset_command(msg, config):
+        reset_session(config, msg.room_key)
+        clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
+        return [RESET_CONFIRMATION]
 
     status, message = check_google_authorization(msg.room_key, config)
     if status == "blocked" and message is not None:

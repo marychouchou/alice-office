@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock, patch
 
 from linebot.v3.messaging.exceptions import ApiException
 
-from alice_office_router.channels.line.events import Event, WebhookBody, resolve_inbound_text
+from alice_office_router.channels.line.events import (
+    Event,
+    Mention,
+    WebhookBody,
+    _strip_self_mentions,
+    resolve_inbound_text,
+)
 from alice_office_router.config import Settings
 
 TEST_SECRET = "test_channel_secret"
@@ -330,3 +336,81 @@ class TestResolveInboundText:
 
         assert result is None
         assert not (tmp_path / "line_room_A" / "incoming").exists()
+
+    async def test_text_with_self_mention_is_stripped(self) -> None:
+        """An "@bot /reset" reaches the agent as the bare command."""
+        event = Event.model_validate(
+            {
+                "message": {
+                    "type": "text",
+                    "text": "@Alice /reset",
+                    "mention": {"mentionees": [{"index": 0, "length": 6, "isSelf": True}]},
+                }
+            }
+        )
+        result = await resolve_inbound_text(event, "line_C1", _settings())
+        assert result == "/reset"
+
+
+# ---------------------------------------------------------------------------
+# _strip_self_mentions
+# ---------------------------------------------------------------------------
+
+
+def _mention(mentionees: list[dict[str, object]]) -> Mention:
+    """Build a Mention from raw mentionee dicts."""
+    return Mention.model_validate({"mentionees": mentionees})
+
+
+class TestStripSelfMentions:
+    def test_no_mention_object_returns_text_unchanged(self) -> None:
+        assert _strip_self_mentions("hello", None) == "hello"
+
+    def test_removes_self_mention_span(self) -> None:
+        text = "@Alice /new"  # "@Alice" is 6 UTF-16 code units
+        mention = _mention([{"index": 0, "length": 6, "isSelf": True}])
+        assert _strip_self_mentions(text, mention) == "/new"
+
+    def test_keeps_non_self_mention(self) -> None:
+        text = "@Bob 早安"
+        mention = _mention([{"index": 0, "length": 4, "userId": "U2", "isSelf": False}])
+        assert _strip_self_mentions(text, mention) == text
+
+    def test_removes_only_self_keeping_other_mentions(self) -> None:
+        text = "@Bob @Alice hi"  # @Bob = [0,4), @Alice = [5,11)
+        mention = _mention(
+            [
+                {"index": 0, "length": 4, "userId": "U2", "isSelf": False},
+                {"index": 5, "length": 6, "isSelf": True},
+            ]
+        )
+        assert _strip_self_mentions(text, mention) == "@Bob  hi"
+
+    def test_mention_only_poke_keeps_original_text(self) -> None:
+        text = "@Alice"
+        mention = _mention([{"index": 0, "length": 6, "isSelf": True}])
+        assert _strip_self_mentions(text, mention) == "@Alice"
+
+    def test_span_not_starting_with_at_aborts_stripping(self) -> None:
+        """A misaligned span (no leading @) abandons stripping and keeps the text."""
+        text = "hello world"
+        mention = _mention([{"index": 0, "length": 5, "isSelf": True}])
+        assert _strip_self_mentions(text, mention) == "hello world"
+
+    def test_uses_utf16_offsets_past_a_surrogate_pair(self) -> None:
+        """An emoji before the mention is 2 UTF-16 units, so offsets must be UTF-16."""
+        text = "🍎 @Alice hi"  # 🍎 = units 0-1, space = 2, "@Alice" = [3,9)
+        mention = _mention([{"index": 3, "length": 6, "isSelf": True}])
+        assert _strip_self_mentions(text, mention) == "🍎  hi"
+
+    def test_span_end_splitting_surrogate_pair_aborts_without_crashing(self) -> None:
+        """A span whose end splits a surrogate pair must abort, never raise.
+
+        The span [0,3) covers "@A" plus only the FIRST half of 🍎's surrogate
+        pair: the "@" start-guard passes (its decode replaces errors), but the
+        leftover half-pair would crash a strict final decode — the strip must
+        catch that and keep the original text (the webhook path must not 500).
+        """
+        text = "@A🍎 hi"  # @=0, A=1, 🍎=units 2-3, space=4
+        mention = _mention([{"index": 0, "length": 3, "isSelf": True}])
+        assert _strip_self_mentions(text, mention) == "@A🍎 hi"

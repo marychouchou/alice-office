@@ -71,6 +71,24 @@ class Settings(BaseSettings):
     # Per-room cap on the group observed buffer (data/<room_id>/group_state/
     # observed.jsonl): background messages beyond this are dropped oldest-first.
     GROUP_OBSERVED_MAX_MESSAGES: int = 50
+    # Router-owned session-epoch rotation (see session_hygiene.py). Idle
+    # threshold in minutes: when a room's previous agent turn was longer ago
+    # than this, its next agent-bound message rotates to a fresh Hermes session
+    # (carrying a best-effort handoff summary). <=0 disables idle rotation.
+    SESSION_IDLE_RESET_MINUTES: int = 1440
+    # Prompt-token watermark: when the last turn's reported prompt_tokens
+    # exceeds this, the next agent-bound message rotates the session. <=0
+    # disables it. IMPORTANT: usage.prompt_tokens is the SUM across all internal
+    # tool-loop iterations of one request, not the context-window size — it
+    # overestimates the live context and therefore fires early, which is the
+    # safe direction. Do not "fix" this threshold assuming context-size
+    # semantics; keep it well below Hermes's own compression trigger. Calibrated
+    # against live measurement: a single simple turn in a FRESH session already
+    # reports ~27k prompt_tokens in this deployment (huge Hermes system prompt +
+    # skills index, summed over iterations), so a routine 2-3-iteration tool
+    # turn would trip a 60k threshold with a near-empty transcript; 120000
+    # leaves that headroom.
+    SESSION_ROTATE_PROMPT_TOKENS: int = 120000
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
@@ -226,6 +244,24 @@ class Settings(BaseSettings):
             Hermes gateway manages, so Hermes leaves it alone.
         """
         return self.DATA_DIR / room_id / "group_state"
+
+    def room_router_state_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's session-hygiene state directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom, same raw (original
+                case) value used for DATA_DIR / room_id elsewhere — must not
+                be lowercased, or this would diverge from the directory
+                container_manager actually creates for the room.
+
+        Returns:
+            DATA_DIR / room_id / "router_state" — holds this room's session.json
+            (the epoch, activity/token watermarks, and any pending handoff; see
+            session_hygiene.py). Lives inside the room's own /opt/data mount but
+            is named so it never collides with anything Hermes gateway manages,
+            so Hermes leaves it alone.
+        """
+        return self.DATA_DIR / room_id / "router_state"
 
     def group_trigger_prefixes(self) -> tuple[str, ...]:
         """Parse GROUP_TRIGGER_PREFIXES into the non-empty call-words to match.

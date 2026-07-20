@@ -232,6 +232,9 @@ class LineAdapter:
             return False
         if event.mention_is_self:
             return True
+        # Call-word prefix matching also lives in session_hygiene's
+        # check_reset_command — second occurrence, kept in sync by hand; a
+        # change to call-word semantics must update both.
         stripped = text.strip()
         return any(stripped.startswith(prefix) for prefix in config.group_trigger_prefixes())
 

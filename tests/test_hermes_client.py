@@ -38,7 +38,8 @@ async def test_ask_hermes_agent_returns_reply_content() -> None:
             "http://hermes_room_AAA:8642", "room_AAA", "哈囉", "test_key"
         )
 
-    assert reply == "哈囉，我是 Hermes"
+    assert reply.text == "哈囉，我是 Hermes"
+    assert reply.prompt_tokens is None
 
 
 async def test_ask_hermes_agent_sends_auth_and_session_headers() -> None:
@@ -119,4 +120,40 @@ async def test_ask_hermes_agent_ignores_unknown_response_fields() -> None:
     with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)):
         reply = await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
 
-    assert reply == "hi"
+    assert reply.text == "hi"
+
+
+async def test_ask_hermes_agent_parses_prompt_tokens_from_usage() -> None:
+    """A reported usage.prompt_tokens is surfaced on the AgentReply."""
+    response = _mock_response(
+        200,
+        {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 1234}},
+    )
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)):
+        reply = await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
+
+    assert reply.prompt_tokens == 1234
+
+
+async def test_ask_hermes_agent_missing_usage_yields_none_prompt_tokens() -> None:
+    """No usage object at all leaves prompt_tokens None (nothing to watermark)."""
+    response = _mock_response(200, {"choices": [{"message": {"content": "hi"}}]})
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)):
+        reply = await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
+
+    assert reply.prompt_tokens is None
+
+
+@pytest.mark.parametrize("reported", [0, -5])
+async def test_ask_hermes_agent_normalizes_nonpositive_prompt_tokens_to_none(
+    reported: int,
+) -> None:
+    """A reported 0/negative is the server's "didn't count" default -> None."""
+    response = _mock_response(
+        200,
+        {"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": reported}},
+    )
+    with patch.object(httpx.AsyncClient, "post", new=AsyncMock(return_value=response)):
+        reply = await ask_hermes_agent("http://hermes_room_AAA:8642", "room_AAA", "hi", "test_key")
+
+    assert reply.prompt_tokens is None

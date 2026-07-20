@@ -55,6 +55,13 @@ class Mentionee(BaseModel):
     type: str | None = None
     userId: str | None = None
     isSelf: bool | None = None
+    # Span of this mention within the message text. index/length count UTF-16
+    # code units (the Messaging API's character-counting unit — an emoji or
+    # some Kanji is two units), so _strip_self_mentions slices against the
+    # text's UTF-16 encoding, not its Python code points. Both optional: an
+    # @All mentionee and older payloads may omit them.
+    index: int | None = None
+    length: int | None = None
 
 
 class Mention(BaseModel):
@@ -279,10 +286,67 @@ async def _download_and_note_media(message: Message, room_key: str, config: Sett
     )
 
 
+def _strip_self_mentions(text: str, mention: Mention | None) -> str:
+    """Remove the bot's own @mention span(s) from a group text message.
+
+    LINE reports each mention as an (index, length) span counted in UTF-16 code
+    units (see Mentionee), so the spans are sliced against the text's UTF-16
+    encoding rather than its Python code points — the latter would misalign past
+    any surrogate-pair character (an emoji, some Kanji). Only isSelf spans are
+    removed, highest index first so an earlier removal doesn't shift a later
+    span. Defensive: if a computed span doesn't start with "@" the offsets
+    aren't lining up as expected, so stripping is abandoned and the original
+    text returned; the same abort applies when a span's end splits a surrogate
+    pair (the leftover half would fail the final strict decode); and a result
+    that is blank (a mention-only poke) keeps the original text.
+
+    Args:
+        text: The raw text message content.
+        mention: The message's mention object, or None when it has none.
+
+    Returns:
+        The text with the bot's own @mention(s) removed, or the original text
+        unchanged when there is nothing to strip or a span looks misaligned.
+    """
+    if mention is None:
+        return text
+    spans: list[tuple[int, int]] = []
+    for mentionee in mention.mentionees:
+        if mentionee.isSelf and mentionee.index is not None and mentionee.length is not None:
+            spans.append((mentionee.index, mentionee.length))
+    if not spans:
+        return text
+    units = text.encode("utf-16-le")  # 2 bytes per UTF-16 code unit
+    for index, length in sorted(spans, reverse=True):
+        start, end = index * 2, (index + length) * 2
+        if not units[start:end].decode("utf-16-le", errors="replace").startswith("@"):
+            return text
+        units = units[:start] + units[end:]
+    try:
+        result = units.decode("utf-16-le").strip()
+    except UnicodeDecodeError:
+        # A span whose END splits a surrogate pair passes the "@" start-guard
+        # above (that decode replaces errors) yet leaves half a pair behind;
+        # abort stripping rather than crash the webhook path with a strict
+        # decode failure.
+        logger.warning("Self-mention span split a surrogate pair; keeping original text")
+        return text
+    return result if result else text
+
+
 async def _handle_text(message: Message, room_key: str, config: Settings) -> str | None:
-    """Return a text message's content, or None when it is blank."""
+    """Return a text message's content with the bot's own @mention stripped.
+
+    Removing the self-@mention lets a group member address the bot and still
+    have their bare text reach the agent (e.g. "@bot /new" -> "/new"). An
+    @mention is the only way to address the bot when no call-words are
+    configured, so without this a group could never issue a reset command; a
+    non-text or unaddressed message carries no self-mention, so it is unaffected.
+    """
     text = message.text
-    return text if text else None
+    if not text:
+        return None
+    return _strip_self_mentions(text, message.mention)
 
 
 async def _handle_sticker(message: Message, room_key: str, config: Settings) -> str | None:
