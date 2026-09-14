@@ -1,0 +1,471 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+from alice_office_router.conversation_log import TurnEnvelope
+from alice_office_router.conversation_store import (
+    SCHEMA_VERSION_MAX,
+    check_schema_version,
+    connect_state_db,
+    list_room_ids,
+    parse_since,
+    read_envelopes,
+    read_messages,
+    read_sessions,
+    room_summary,
+    search_messages,
+    short_sender,
+    summarize_tool_calls,
+)
+
+# scripts/ is not an importable package, so load the CLI by file path (same
+# pattern as tests/test_debug_room.py).
+_SCRIPT_PATH = Path(__file__).parent.parent / "scripts" / "conversations.py"
+_spec = importlib.util.spec_from_file_location("conversations", _SCRIPT_PATH)
+assert _spec is not None and _spec.loader is not None
+conversations = importlib.util.module_from_spec(_spec)
+# The module must be in sys.modules before it runs: @dataclass resolves its
+# field types through sys.modules[cls.__module__].
+sys.modules[_spec.name] = conversations
+_spec.loader.exec_module(conversations)
+
+_ROOM = "line_room_AAA"
+_SESSION = "line_room_AAA#1"
+
+# The columns this repo reads; a fixture that carries only these is enough,
+# since every query names its columns explicitly (conversation_store).
+_SESSIONS_DDL = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY, source TEXT, model TEXT, started_at REAL, ended_at REAL,
+    end_reason TEXT, message_count INTEGER, tool_call_count INTEGER,
+    input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
+    title TEXT, api_call_count INTEGER
+)
+"""
+
+_MESSAGES_DDL = """
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT,
+    tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL,
+    token_count INTEGER, finish_reason TEXT, reasoning TEXT, reasoning_content TEXT,
+    active INTEGER DEFAULT 1, compacted INTEGER DEFAULT 0
+)
+"""
+
+_TOOL_CALLS_JSON = json.dumps(
+    [{"id": "c1", "type": "function", "function": {"name": "drive_list_files", "arguments": "{}"}}]
+)
+
+# (role, content, tool_name, tool_calls, timestamp, reasoning)
+_ROWS: list[tuple[str, str, str | None, str | None, float, str | None]] = [
+    ("user", "我的行事曆上有什麼會議", None, None, 1_000.0, None),
+    ("assistant", "", None, _TOOL_CALLS_JSON, 1_002.0, "先查一下行事曆"),
+    ("tool", "x" * 900, "drive_list_files", None, 1_003.0, None),
+    ("assistant", "今天下午三點有一場產品會議。", None, None, 1_005.0, None),
+    ("user", "幫我改到四點", None, None, 1_100.0, None),
+    ("assistant", "已經改到四點了。", None, None, 1_104.0, None),
+]
+
+
+def _build_state_db(path: Path) -> None:
+    """Write a minimal Hermes-shaped state.db (sessions + messages + fts5 trigram).
+
+    Args:
+        path: Where to create the database file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    with connection:
+        connection.execute("CREATE TABLE schema_version (version INTEGER)")
+        connection.execute("INSERT INTO schema_version VALUES (20)")
+        connection.execute(_SESSIONS_DDL)
+        connection.execute(_MESSAGES_DDL)
+        connection.execute(
+            "CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content, tokenize='trigram')"
+        )
+        connection.execute(
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                _SESSION,
+                "api_server",
+                "hermes-4",
+                1_000.0,
+                None,
+                None,
+                6,
+                1,
+                5000,
+                300,
+                0.0123,
+                "行事曆",
+                3,
+            ),
+        )
+        for role, content, tool_name, tool_calls, ts, reasoning in _ROWS:
+            cursor = connection.execute(
+                "INSERT INTO messages (session_id, role, content, tool_calls, tool_name, "
+                "timestamp, reasoning) VALUES (?,?,?,?,?,?,?)",
+                (_SESSION, role, content, tool_calls, tool_name, ts, reasoning),
+            )
+            connection.execute(
+                "INSERT INTO messages_fts_trigram (rowid, content) VALUES (?, ?)",
+                (cursor.lastrowid, content),
+            )
+    connection.close()
+
+
+@pytest.fixture
+def data_dir(tmp_path: Path) -> Path:
+    """Build a DATA_DIR holding one room's state.db plus its turn envelopes.
+
+    Args:
+        tmp_path: pytest's per-test temp directory.
+
+    Returns:
+        The DATA_DIR path, with data/<room>/state.db and
+        data/_conversations/<room>.jsonl populated.
+    """
+    root = tmp_path / "data"
+    _build_state_db(root / _ROOM / "state.db")
+    # Deployment-level directories, and a room whose container never booted:
+    # neither may show up as a room.
+    (root / "_google").mkdir(parents=True, exist_ok=True)
+    (root / "line_no_db").mkdir(parents=True, exist_ok=True)
+
+    envelopes = [
+        TurnEnvelope(
+            ts="1970-01-01T00:16:46Z",
+            channel="line",
+            room_key=_ROOM,
+            session_id=_SESSION,
+            outcome="replied",
+            agent_duration_ms=5000.0,
+            delivered=True,
+        ),
+        TurnEnvelope(
+            ts="1970-01-01T00:20:00Z",
+            channel="line",
+            room_key=_ROOM,
+            outcome="blocked",
+            inbound_text="沒授權的訊息",
+            gate_status="blocked",
+            delivered=True,
+        ),
+        TurnEnvelope(
+            ts="1970-01-01T00:18:25Z",
+            channel="line",
+            room_key=_ROOM,
+            session_id=_SESSION,
+            outcome="agent_failed",
+            inbound_text="幫我改到四點",
+            agent_duration_ms=120_000.0,
+            error="agent: timeout",
+        ),
+    ]
+    conversations_dir = root / "_conversations"
+    conversations_dir.mkdir(parents=True, exist_ok=True)
+    (conversations_dir / f"{_ROOM}.jsonl").write_text(
+        "\n".join(envelope.model_dump_json() for envelope in envelopes) + "\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def _run(data_dir: Path, argv: list[str], capsys: pytest.CaptureFixture[str]) -> str:
+    """Run the CLI against a temp DATA_DIR and return its stdout."""
+    assert conversations.main(["--data-dir", str(data_dir), *argv]) == 0
+    return capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Store — room discovery and schema guard
+# ---------------------------------------------------------------------------
+
+
+def test_list_room_ids_skips_underscore_dirs_and_rooms_without_a_db(data_dir: Path) -> None:
+    """Only directories with a state.db, and never deployment-level `_` dirs."""
+    assert list_room_ids(data_dir) == [_ROOM]
+
+
+def test_schema_version_in_range_produces_no_warning(data_dir: Path) -> None:
+    """The tested range (20-23) reads clean."""
+    connection = connect_state_db(data_dir / _ROOM / "state.db")
+    try:
+        assert check_schema_version(connection) == (20, None)
+    finally:
+        connection.close()
+
+
+def test_schema_version_above_tested_range_warns(data_dir: Path) -> None:
+    """An untested upstream schema warns instead of silently misreading."""
+    path = data_dir / _ROOM / "state.db"
+    writable = sqlite3.connect(path)
+    with writable:
+        writable.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION_MAX + 5,))
+    writable.close()
+
+    connection = connect_state_db(path)
+    try:
+        version, warning = check_schema_version(connection)
+    finally:
+        connection.close()
+
+    assert version == SCHEMA_VERSION_MAX + 5
+    assert warning is not None and "outside the tested range" in warning
+
+
+# ---------------------------------------------------------------------------
+# Store — reads
+# ---------------------------------------------------------------------------
+
+
+def test_read_messages_returns_transcript_order(data_dir: Path) -> None:
+    """Messages come back oldest first, tool rows included (the caller filters)."""
+    connection = connect_state_db(data_dir / _ROOM / "state.db")
+    try:
+        messages = read_messages(connection)
+        sessions = read_sessions(connection)
+    finally:
+        connection.close()
+
+    assert [message.role for message in messages] == [row[0] for row in _ROWS]
+    assert messages[0].timestamp == 1_000.0
+    assert sessions[0].id == _SESSION
+    assert sessions[0].input_tokens == 5000
+
+
+def test_read_messages_filters_by_session_and_since(data_dir: Path) -> None:
+    """--session and --since narrow the read at the SQL level."""
+    connection = connect_state_db(data_dir / _ROOM / "state.db")
+    try:
+        assert read_messages(connection, session_id="nope") == []
+        recent = read_messages(connection, since=1_100.0)
+    finally:
+        connection.close()
+
+    assert [message.content for message in recent] == ["幫我改到四點", "已經改到四點了。"]
+
+
+def test_search_finds_a_cjk_term_through_the_trigram_index(data_dir: Path) -> None:
+    """A 3+ character Chinese term matches through messages_fts_trigram."""
+    connection = connect_state_db(data_dir / _ROOM / "state.db")
+    try:
+        hits = search_messages(connection, "有什麼")
+        short = search_messages(connection, "四點")
+    finally:
+        connection.close()
+
+    assert [hit.role for hit in hits] == ["user"]
+    assert "行事曆" in hits[0].content
+    # Shorter than one trigram — the LIKE fallback still finds it.
+    assert len(short) == 2
+
+
+def test_room_summary_rolls_up_sessions_and_envelopes(data_dir: Path) -> None:
+    """The `rooms` line combines state.db usage with the router's envelope count."""
+    summary = room_summary(data_dir, data_dir / "_conversations", _ROOM)
+
+    assert summary.session_count == 1
+    assert summary.message_count == len(_ROWS)
+    assert summary.envelope_count == 3
+    assert summary.input_tokens == 5000
+    assert summary.last_activity == 1_104.0
+
+
+def test_envelopes_join_by_session_and_nearest_timestamp(data_dir: Path) -> None:
+    """An envelope binds to the turn it belongs to, and only within the tolerance."""
+    index = read_envelopes(data_dir / "_conversations", _ROOM)
+
+    assert len(index.envelopes) == 3
+    matched = index.nearest(_SESSION, 1_005.0)
+    assert matched is not None and matched.outcome == "replied"
+    # Far outside the tolerance window: better no envelope than a wrong one.
+    assert index.nearest(_SESSION, 99_999.0) is None
+    assert index.nearest("unknown-session", 1_005.0) is None
+
+
+def test_helpers_normalize_their_edge_cases() -> None:
+    """Small pure helpers the CLI leans on."""
+    assert summarize_tool_calls(None) == ""
+    assert summarize_tool_calls(_TOOL_CALLS_JSON) == "drive_list_files"
+    assert summarize_tool_calls("not json") == "not json"
+    assert short_sender(None) is None
+    sender = short_sender("U1")
+    assert sender is not None and len(sender) == 8
+    assert parse_since("2026-09-01") < parse_since("7d")
+
+
+# ---------------------------------------------------------------------------
+# CLI — rooms / show / search / export / stats
+# ---------------------------------------------------------------------------
+
+
+def test_cli_rooms_lists_the_room(data_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`rooms` prints one line per room with its usage roll-up."""
+    out = _run(data_dir, ["rooms"], capsys)
+
+    assert _ROOM in out
+    assert "5000" in out
+
+
+def test_cli_show_prints_user_and_assistant_only_by_default(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Tool results and reasoning stay out unless explicitly asked for."""
+    out = _run(data_dir, ["show", _ROOM], capsys)
+
+    assert "我的行事曆上有什麼會議" in out
+    assert "今天下午三點有一場產品會議。" in out
+    assert "drive_list_files" not in out
+    assert "先查一下行事曆" not in out
+    # The envelope's outcome/latency rides on the turn it belongs to.
+    assert "(replied, 5000ms)" in out
+
+
+def test_cli_show_includes_turns_that_never_reached_the_agent(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A blocked turn exists only in the envelope — and must still appear."""
+    out = _run(data_dir, ["show", _ROOM], capsys)
+
+    assert "沒授權的訊息" in out
+    assert "(blocked)" in out
+    # An agent_failed turn DID reach Hermes, so it is rendered from state.db
+    # once — never twice.
+    assert out.count("幫我改到四點") == 1
+
+
+def test_cli_show_with_tools_and_reasoning_opts_in(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--with-tools adds the calls and (truncated) results; --with-reasoning the reasoning."""
+    out = _run(data_dir, ["show", _ROOM, "--with-tools", "--with-reasoning"], capsys)
+
+    assert "**assistant → tools** drive_list_files" in out
+    assert "**tool** `drive_list_files`" in out
+    assert "先查一下行事曆" in out
+    assert "+400 chars" in out  # the 900-char tool result was truncated to 500
+
+
+def test_cli_search_matches_across_rooms(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`search` finds a CJK term and reports the room it came from."""
+    out = _run(data_dir, ["search", "有什麼"], capsys)
+
+    assert _ROOM in out
+    assert "我的行事曆上有什麼會議" in out
+
+
+def test_cli_export_md_writes_front_matter_and_turns(
+    data_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`export --format md` produces a file Claude Code can read directly."""
+    out_dir = tmp_path / "export"
+    _run(data_dir, ["export", "--room", _ROOM, "--format", "md", "--out", str(out_dir)], capsys)
+
+    body = (out_dir / f"{_ROOM}.md").read_text(encoding="utf-8")
+    assert body.startswith("---\n")
+    assert f"room: {_ROOM}" in body
+    assert "session_count: 1" in body
+    assert "exported_at:" in body
+    assert "— user" in body
+    assert "**assistant**" in body
+    assert "drive_list_files" not in body
+
+
+def test_cli_export_jsonl_is_one_record_per_message(
+    data_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`export --format jsonl` writes parseable records carrying the envelope outcome."""
+    out_dir = tmp_path / "export"
+    _run(data_dir, ["export", "--room", _ROOM, "--format", "jsonl", "--out", str(out_dir)], capsys)
+
+    records = [
+        json.loads(line)
+        for line in (out_dir / f"{_ROOM}.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["role"] for record in records] == [
+        "user",
+        "assistant",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert records[0]["outcome"] == "replied"
+
+
+def test_cli_export_hashes_sender_ids_unless_raw(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A group speaker's native id is pseudonymized by default."""
+    envelope = TurnEnvelope(
+        ts="1970-01-01T00:16:46Z",
+        channel="line",
+        room_key=_ROOM,
+        session_id=_SESSION,
+        outcome="replied",
+        is_group=True,
+        sender_id="U1234",
+        sender_name="王小明",
+    )
+    path = data_dir / "_conversations" / f"{_ROOM}.jsonl"
+    path.write_text(envelope.model_dump_json() + "\n", encoding="utf-8")
+
+    hashed = _run(data_dir, ["show", _ROOM], capsys)
+    raw = _run(data_dir, ["--raw", "show", _ROOM], capsys)
+
+    assert "U1234" not in hashed
+    assert short_sender("U1234") in hashed
+    assert "U1234" in raw
+
+
+def test_cli_stats_reports_outcomes_and_latency(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`stats` summarizes outcomes, the failure rate, and latency percentiles."""
+    out = _run(data_dir, ["stats"], capsys)
+
+    assert "turns: 3" in out
+    assert "agent_failed" in out
+    assert "agent_failed rate: 33.33%" in out
+    assert "p50=" in out
+    assert "rooms that replied after a blocked turn: 0" in out
+
+
+def test_cli_stats_counts_a_room_that_recovered_after_a_block(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A room that was blocked and later replied is the signal operators want."""
+    path = data_dir / "_conversations" / f"{_ROOM}.jsonl"
+    envelopes = [
+        TurnEnvelope(ts="1970-01-01T00:16:40Z", channel="line", room_key=_ROOM, outcome="blocked"),
+        TurnEnvelope(
+            ts="1970-01-01T00:16:50Z",
+            channel="line",
+            room_key=_ROOM,
+            session_id=_SESSION,
+            outcome="replied",
+        ),
+    ]
+    path.write_text(
+        "\n".join(envelope.model_dump_json() for envelope in envelopes) + "\n", encoding="utf-8"
+    )
+
+    out = _run(data_dir, ["stats"], capsys)
+
+    assert "rooms that replied after a blocked turn: 1" in out
+
+
+def test_cli_show_warns_on_an_unknown_room(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A room with no state.db is a warning plus a non-zero exit, not a traceback."""
+    assert conversations.main(["--data-dir", str(data_dir), "show", "line_nope"]) == 1
+    assert "has no state.db" in capsys.readouterr().err

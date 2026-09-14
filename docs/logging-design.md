@@ -1,6 +1,6 @@
 # 集中式 Log 系統設計
 
-> 狀態：**Phase 1／Phase 2 已實作，Phase 1b 起尚未實作**（2026-09-14；同日增補 §5.7 對話紀錄與 §5.8 匯出，
+> 狀態：**Phase 1／Phase 1b／Phase 2 已實作，Phase 3 起尚未實作**（2026-09-14；同日增補 §5.7 對話紀錄與 §5.8 匯出，
 > 因為這套系統除了除錯，還要拿來看使用者問答、餵給 Claude Code 分析；同日再依 Hermes 文件與實測
 > 把對話內容改為以 `state.db` 為唯一來源，router 只記 turn envelope）。實作分五個階段，見 §8；每個階段完成後回來
 > 更新本文的「狀態」與 §8 的勾選框。實作 Alloy／Loki 設定前**先查官方文件**（用
@@ -443,32 +443,57 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
       解析（本機用 TestClient 打一個 404 實測）。容器模式的
       `docker compose logs webhook_router | jq .` 待下次部署時順手確認。
 
-### Phase 1b：turn envelope 與對話 CLI — [ ]
+### Phase 1b：turn envelope 與對話 CLI — [x]（2026-09-14 實作）
 
-- [ ] `Settings` 加 `CONVERSATION_LOG_ENABLED: bool = True`、
+- [x] `Settings` 加 `CONVERSATION_LOG_ENABLED: bool = True`、
       `conversations_dir` property（`DATA_DIR / "_conversations"`）與
       `room_conversation_log(room_id)` method；`.env.example` 與 compose env 清單同步。
-- [ ] 新模組 `src/alice_office_router/conversation_log.py`：`TurnEnvelope` pydantic model
-      （§5.7 欄位）、`record_turn(envelope, config)`；`alice.conversation` logger 的
-      FileHandler 在 `logging_setup.configure_logging` 內掛上（單一 handler 依 `room_key`
-      決定檔案，不要每房間 `getLogger`）。
-- [ ] `core.process_inbound` 拆成 `_route` + 薄包裝，回傳含 `texts` 與 envelope 草稿的
-      dataclass；`_ask_agent` 帶回 `session_id`／`duration_ms`／`prompt_tokens`／`rotated`。
-      各 adapter 送完訊息後填 `delivered` 並呼叫 `record_turn`。
-- [ ] `scripts/conversations.py`（§5.8 五個子命令），唯讀開 `data/*/state.db`
+- [x] 新模組 `src/alice_office_router/conversation_log.py`：`TurnEnvelope` pydantic model
+      （§5.7 欄位）、`record_turn(envelope, config)`。
+      **偏離本文原案**：本文原本寫「`alice.conversation` logger 的 FileHandler 在
+      `logging_setup.configure_logging` 內掛上」，實作改成 `record_turn` 自己
+      `open(..., "a")` 寫那一行，`logging_setup` 完全不動。理由：單一 handler 要依
+      `room_key` 換檔就得在 handler 裡存可變狀態（多房間交錯時會寫錯檔），每房間一個
+      handler 又會累積開啟中的檔案描述子；一次 append 一行不值得這個代價，而且檔案格式
+      因此與 log 設定完全解耦。Loki 那條路仍走 `alice.conversation` logger 發
+      `conversation_turn` 事件，與原案相同。
+- [x] `core.process_inbound` 拆成 `_route` + 薄包裝，回傳含 `texts` 與 envelope 草稿的
+      `InboundResult`；`_ask_agent`／`_ask_group_agent` 改回傳 `AgentTurn` dataclass，
+      帶回 `session_id`／`duration_ms`／`prompt_tokens`／`rotated`／`error`／outcome
+      （`silence` 與 `agent_failed` 因此不再共用「回 None」）。各 adapter 送完訊息後填
+      `delivered` 並呼叫 `record_turn`；LINE 的 `_deliver_reply` 改回傳 bool，
+      `_deliver_texts` 回傳 `bool | None`（沒東西可送＝None）。LINE 背景任務多收一個
+      `event_id` 參數並重新 bind，envelope 才拿得到它。
+- [x] `scripts/conversations.py`（§5.8 五個子命令），唯讀開 `data/*/state.db`
       （`file:...?mode=ro` URI），開頭檢查 `schema_version`；envelope 用 `session_id` 左接。
       預設不含 tools／reasoning，`sender_id` 預設 hash。
-- [ ] 測試：`tests/test_conversation_log.py`——六種 outcome 各一筆，JSONL 行可被
-      `TurnEnvelope.model_validate_json` 讀回；`CONVERSATION_LOG_ENABLED=false` 時不建檔。
-      `tests/test_conversations_script.py`——用一個手工建的迷你 `state.db` fixture
-      （sessions＋messages＋fts 三張表）驗證 `show`／`search`／`export md` 輸出；
-      `tests/test_core.py` 既有測試不因 `_route` 拆分而改變行為。
-- [ ] `docs/troubleshooting.md` 速查表加：`scripts/conversations.py` 三個常用指令、
+      **偏離本文原案**：SQLite 讀取邏輯抽成 `src/alice_office_router/conversation_store.py`
+      （純讀、無 docker、不依賴 Settings），腳本只負責 argparse 與列印，這樣測試可以直接
+      打模組。實作時另外發現兩件事，都寫進該模組的註解：
+      (a) envelope 是「這一輪結束時」蓋章的，最近時間的 join 必須有容忍上限
+      （`NEAREST_TOLERANCE_SECONDS = 300`），否則一個房間只要有一筆 envelope，
+      每則訊息都會被貼上它；
+      (b) Hermes 的 context compaction 會把被壓縮的訊息「再插一次」
+      （`compacted=1, active=0`），同一則訊息因此在 `messages` 裡出現多次——所有查詢都用
+      `MIN(id) GROUP BY (session_id, role, timestamp, tool_name)` 去重；
+      (c) fts5 trigram 對 1-2 字的詞（中文很常見）永遠不會 match，這種長度改走 LIKE。
+      `show`／`export` 另外把 `observed`／`reset`／`blocked` 這三種「state.db 裡沒有」的
+      turn 由 envelope 補上（`agent_failed`／`silence` 有進到 Hermes，不補，否則會重複）。
+- [x] 測試：`tests/test_conversation_log.py`（15 個）——六種 outcome 各一筆，JSONL 行可被
+      `TurnEnvelope.model_validate_json` 讀回；`CONVERSATION_LOG_ENABLED=false` 時不建檔、
+      但仍發 `conversation_turn` log 事件。
+      `tests/test_conversation_store.py`（20 個，取代原案的 `test_conversations_script.py`
+      檔名）——用手工建的迷你 `state.db` fixture（sessions＋messages＋fts5 trigram）驗證
+      `show`／`search`（中文詞）／`export md`／`export jsonl`／`stats`／sender hash；
+      `tests/test_core.py` 既有測試只改回傳型別、行為不變，另加 9 個 envelope 測試涵蓋
+      六種 outcome；adapter 測試加 6 個涵蓋 `delivered` 的 True／False／None。
+- [x] `docs/troubleshooting.md` 速查表加：`scripts/conversations.py` 五個常用指令、
       `hermes sessions export --format html`、`hermes insights`、`hermes logs --session`。
-- [ ] `.gitignore` 確認 `data/` 已排除（已確認：第 37 行）。
-- [ ] 驗收：`scripts/test_webhook.py` 送三則訊息後，`conversations.py show <id>` 列出
-      三輪含 outcome 與耗時；`search` 能用其中一則的關鍵字跨房間找到；
-      `export --format md` 的檔案貼進 Claude Code 可讀。
+- [x] `.gitignore` 確認 `data/` 已排除（已確認：第 37 行）。
+- [x] 驗收：對本機真實的 `data/line_Uc0edf…/state.db`（唯讀）跑過 `rooms`／`show`／
+      `search`／`export md`／`stats` 五個子命令；期間 host 模式的 router 實際收到 LINE
+      訊息並寫出 envelope，`request_id`／`event_id`／`outcome=agent_failed`／
+      `agent_duration_ms` 都正確落檔。
 
 ### Phase 2：容器 label 與 log 輪替 — [x]（2026-09-14 實作）
 

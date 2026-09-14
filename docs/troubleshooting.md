@@ -282,6 +282,14 @@ Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空�
 | 只挑某個房間的 router log 行 | `docker compose logs webhook_router \| jq 'select(.room_key=="<room_id>")'` |
 | 確認容器的 label 與 log 上限有生效 | `docker inspect hermes_<room_id> \| jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'` |
 | 手動起單一 MCP server 測試 | `docker exec -it hermes_<room_id> node /opt/data/mcp/<name>/server.mjs` |
+| 列出所有房間的對話量與用量 | `uv run python scripts/conversations.py rooms` |
+| 看某房間的逐輪對話（含結果狀態與耗時） | `uv run python scripts/conversations.py show <room_id> [--with-tools]` |
+| 跨房間找「誰問過某個關鍵字」 | `uv run python scripts/conversations.py search "<關鍵字>"` |
+| 把某房間匯出成 Claude Code 可 `@file` 的逐字稿 | `uv run python scripts/conversations.py export --room <room_id> --since 7d --format md --out /tmp/x` |
+| outcome 分布／agent_failed 率／p95 耗時 | `uv run python scripts/conversations.py stats --since 30d` |
+| 產一份給人看的單房間 HTML transcript | `docker exec hermes_<room_id> hermes sessions export --session-id <session_id> --format html --yes /tmp/x.html` |
+| 看某房間的 token／成本／工具使用統計 | `docker exec hermes_<room_id> hermes insights --days 7` |
+| 看某個 session 的 Hermes 內部 log | `docker exec hermes_<room_id> hermes logs --session <session_id>` |
 
 ## 4. Production 展望
 
