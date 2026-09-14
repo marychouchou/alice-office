@@ -26,6 +26,8 @@
   是 `_seed_templates()` 讀取樣板來源的那一端。
 - `HOST_DATA_DIR` 用於 `_build_volume_config()`，組成傳給
   `docker.containers.run(volumes=...)` 的宿主機路徑——現在整個函式只剩這一條掛載。
+  另外**選配的 log 堆疊**（`deploy/logging/docker-compose.logging.yml`，見下節）
+  也用同一個變數。
 
 > **這是架構上刻意的簡化**：MCP/plugin 原始碼以前是另外兩個 `HOST_*` 變數
 > （`HOST_PLUGINS_DIR`、`HOST_SECRETARY_MCP_DIR`），一樣講給 Docker daemon 聽、
@@ -33,6 +35,42 @@
 > `container_manager.py` 的 `_ensure_mcp_seed` / `_ensure_plugin_seed`），複製動作是
 > router process 自己做的檔案系統操作，不再假手 Docker daemon，所以它自然就落進
 > `DATA_DIR` 這一類（router 自己看得到的路徑），而不是 `HOST_*` 那一類。
+
+## 第三個看到 `HOST_DATA_DIR` 的人：Alloy 的 `/rooms`（選配）
+
+啟用集中式 log（`docker compose -f docker-compose.yml -f
+deploy/logging/docker-compose.logging.yml up -d`）之後，Alloy 容器也會拿到同一個
+宿主機目錄，**唯讀**掛在 `/rooms`：
+
+```yaml
+# deploy/logging/docker-compose.logging.yml
+- ${HOST_DATA_DIR:-${PWD}/data}:/rooms:ro
+```
+
+它屬於上面分類裡的 **`HOST_*` 那一類**——這條掛載一樣是講給宿主機的 Docker daemon
+聽的。Alloy 在容器內看到的 `/rooms/<room_id>/logs/agent.log`，就是宿主機上的
+`HOST_DATA_DIR/<room_id>/logs/agent.log`，也就是 Hermes 容器在自己的
+`/opt/data/logs/agent.log` 寫出來的那一份——同一個檔案，三個容器三個掛入路徑：
+
+| 誰 | 掛入路徑 | 權限 | 為什麼 |
+|---|---|---|---|
+| router 容器（`ROUTER_IN_DOCKER=true`） | `/app/data` | rw | 自己要 mkdir、寫 `config.yaml`、seed mcp/plugins |
+| `hermes_<room_id>` 容器 | `/opt/data`（＝`HERMES_HOME`） | rw | gateway 自己補齊 sessions/skills/db，並寫 `logs/*.log` |
+| Alloy（選配） | `/rooms` | **ro** | 只 tail `logs/*.log` 送進 Loki，絕不寫回 |
+
+**兩處必須是同一個目錄**：Alloy 的掛載直接讀 `HOST_DATA_DIR`（沒設才 fallback 到
+`${PWD}/data`），跟 `_build_volume_config()` 給 Hermes 容器的是同一個值，所以只要
+`.env` 裡那一個變數填對，就不會對不上。會對不上的情況只有一種——operator 改了
+`HOST_DATA_DIR` 卻是用 `docker compose up` 以外的方式（例如手寫 `docker run`）起
+Alloy。症狀是 Loki 裡查不到任何 `source="file"` 的行、但 `source="docker"` 的正常，
+因為 `/rooms` 掛到了一個空目錄（Docker 會安靜地幫你建一個空的，不會報錯）。
+驗證方式：`docker exec alloy ls /rooms` 應該列出每個 `<room_id>` 目錄。
+
+還有一個對應關係要記得：`local.file_match` 的 glob 是
+`/rooms/*/logs/*.log`（單層 `*`），所以**它假設每個房間目錄都直接坐落在
+`HOST_DATA_DIR` 底下**。`data/_conversations/`、`data/_google/` 這兩個非房間目錄
+因為沒有 `logs/` 子目錄而自然被跳過；以後若在 `data/` 下新增別的東西，要確認它
+不會意外長出 `logs/*.log`。
 
 ## `ROUTER_IN_DOCKER` 是決定 router 自己活在哪個世界的開關
 

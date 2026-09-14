@@ -1,6 +1,6 @@
 # 集中式 Log 系統設計
 
-> 狀態：**Phase 1／Phase 1b／Phase 2 已實作，Phase 3 起尚未實作**（2026-09-14；同日增補 §5.7 對話紀錄與 §5.8 匯出，
+> 狀態：**Phase 1／1b／2／3 已實作；Phase 4（dashboard 與告警）為選配、尚未做**（2026-09-14；同日增補 §5.7 對話紀錄與 §5.8 匯出，
 > 因為這套系統除了除錯，還要拿來看使用者問答、餵給 Claude Code 分析；同日再依 Hermes 文件與實測
 > 把對話內容改為以 `state.db` 為唯一來源，router 只記 turn envelope）。實作分五個階段，見 §8；每個階段完成後回來
 > 更新本文的「狀態」與 §8 的勾選框。實作 Alloy／Loki 設定前**先查官方文件**（用
@@ -256,7 +256,23 @@ loki.write "local" {
 - `local.file_match` 預設每 5 秒重新掃 glob，新房間建立後檔案出現即自動納入。
 - Alloy 需要一個 volume 存 positions（`/var/lib/alloy/data`），否則重啟會重讀整份檔案。
 - Alloy 也會收到它自己、Loki、Grafana 的 stdout 嗎？不會——`filter` 只選帶 `alice.role`
-  label 的容器；若想連堆疊自身也收，給它們 `alice.role=infra` label 即可。
+  label 的容器；若想連堆疊自身也收，給它們 `alice.role=infra` label 即可
+  （Phase 3 選了「收」，見 §8）。
+
+**Phase 3 實作對上面骨架的三處偏離**（實際檔案以 `deploy/logging/alloy/config.alloy`
+與 `deploy/logging/loki/config.yaml` 為準）：
+
+1. 兩條 pipeline 不直接 `forward_to` 給 `loki.write`，中間都經過同一個
+   `loki.process "shape_labels"`。原因是 label 集要收斂到 §5.4 那六個，而收斂動作
+   有兩件，放在同一個元件裡比散在兩條 pipeline 好維護。
+2. 那個 process 的第一個 stage 是 `stage.label_drop { values = ["filename"] }`——
+   `loki.source.file` 會自動貼一個 `filename`（完整路徑）label，跟 `room_id` + `file`
+   完全重複，不丟掉就違反 §5.4 的守則。
+3. Loki 那端要加 `limits_config.discover_service_name: []`。Loki 3.x 預設會照
+   `service`／`app`／`container`… 的順序自己推導出一個 `service_name` label，抄的正是
+   我們 relabel 出來的 `service`，等於白白多一份基數。（`discover_log_levels` 維持
+   預設 `true`：它產的 `detected_level` 是 structured metadata 不是 index label，
+   不影響基數，還讓 hermes 那份純文字檔案 log 也能按等級篩。）
 
 ### 5.4 儲存與查詢：Loki、Grafana
 
@@ -264,8 +280,12 @@ loki.write "local" {
   compactor 開 `retention_enabled: true`、`retention_period: 720h`（30 天）。Loki
   **不對 host 開 port**，只在 compose 內部網路被 Alloy 與 Grafana 存取。
 - Grafana：`ports: "127.0.0.1:3000:3000"`（只綁 localhost，operator 用 SSH tunnel），
-  `GF_SECURITY_ADMIN_PASSWORD` 從 `.env` 讀（新變數 `GRAFANA_ADMIN_PASSWORD`，同步
-  進 `.env.example`），`provisioning/datasources/loki.yaml` 自動接好資料來源。
+  `GF_SECURITY_ADMIN_PASSWORD` 由 compose 從 `.env` 做變數替換（新變數
+  `GRAFANA_ADMIN_PASSWORD`，同步進 `.env.example`）。**這個變數不進 `Settings`**——
+  router 從頭到尾不讀它，加進 `Settings` 只會讓「沒啟用 log 堆疊」的部署被迫填一個
+  用不到的值。compose 用 `${GRAFANA_ADMIN_PASSWORD:?...}` 讓沒設時直接失敗，而不是
+  靜默起一個 `admin/admin` 的 Grafana。`provisioning/datasources/loki.yaml`
+  自動接好資料來源。
 - 資料 volume：`loki-data`、`grafana-data`、`alloy-data` 三個 named volume。
 - **Label cardinality 守則**：Loki label 只放 `service`、`room_id`、`container`、`source`、
   `file`、`level`（若從 JSON 抽出）。`request_id`、`event_id`、`sender_id` 一律留在行內，
@@ -275,7 +295,13 @@ loki.write "local" {
 
 ```logql
 # 一個房間橫跨三種來源的全部紀錄
-{room_id="U1234"} or ({service="router"} | json | room_key="U1234")
+# ⚠️ 實作時發現原案寫的 `{a} or ({b} | json | ...)` 不是合法 LogQL——`or` 只能接在
+# label filter 後面，不能聯集兩個 stream selector（parse error: unexpected type for
+# left leg of binary operation (or)）。正確形狀是先用 =~ 選 service 再過濾：
+{service=~"router|agent"} | json | room_key="U1234" or room_id="U1234"
+
+# 只要該房間 agent 的兩種來源（最快，不解 JSON）
+{room_id="U1234"}
 
 # 某次 webhook 的完整路徑
 {service="router"} | json | request_id="abc123"
@@ -283,8 +309,8 @@ loki.write "local" {
 # 所有房間的 agent error
 {service="agent", file="errors.log"}
 
-# router 的 5xx 與例外
-{service="router"} | json | level="error"
+# router 的 5xx 與例外（level 已經是 label，不必再 | json）
+{service="router", level="error"}
 
 # 某房間每一輪的結果狀態與耗時（對話內容不在 Loki，用 scripts/conversations.py 看，見 §5.8）
 {service="router"} | json | event="conversation_turn" | room_key="U1234"
@@ -510,17 +536,43 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
       ——本機只跑到 mock 層（測試斷言傳給 `containers.run` 的參數），真的 inspect
       要等下次部署重建房間容器後執行。
 
-### Phase 3：Loki 堆疊 — [ ]
+### Phase 3：Loki 堆疊 — [x]（2026-09-14 實作）
 
-- [ ] `deploy/logging/` 四個檔案（§5.5）。Alloy／Loki 版本 pin 到明確 tag。
-- [ ] `Settings`／`.env.example` 加 `GRAFANA_ADMIN_PASSWORD`。
-- [ ] `scripts/deploy_host.sh --with-logging`。
-- [ ] 文件：本文改狀態；`docs/troubleshooting.md` §1 log 地圖加 Grafana 查詢、§4 改寫；
-      `README.md` 部署段加 opt-in 說明；`docs/architecture-c4.md` Container 圖加 logging
-      profile（用 `c4-architecture` skill）；`docs/env-data-paths.md` 加 `/rooms` 掛載。
-- [ ] 驗收（端到端）：`scripts/test_webhook.py --user-id <id> --text "hi"` 後，在 Grafana
-      跑 §5.4 第一條查詢，能同時看到 router 的 JSON 行與 `agent.log` 的行；新建一個
-      從未見過的房間，不重啟 Alloy 也能在一分鐘內查到。
+- [x] `deploy/logging/` 四個檔案（§5.5）。版本全部 pin 死：`grafana/alloy:v1.19.2`、
+      `grafana/loki:3.7.7`、`grafana/grafana:13.2.1`（2026-09-14 當下的 stable）。
+      三個服務都掛 `alice.role=infra` label ＋ `json-file` 10m×3 上限，所以堆疊自己的
+      stdout 也會被 pipeline 1 收進去（`{service="infra"}`），堆疊壞掉時查得到原因。
+- [x] `.env.example` 加 `GRAFANA_ADMIN_PASSWORD`。**偏離本文原案**：原案寫「`Settings`／
+      `.env.example` 都加」，實作只加 `.env.example`——router 不讀這個變數，加進
+      `Settings` 會強迫沒啟用堆疊的部署也填一個用不到的值（理由見 §5.4）。
+- [x] `scripts/deploy_host.sh --with-logging`：只是多疊一個 `-f`（`COMPOSE_FILES`
+      陣列），預設路徑一個字都沒變，所以帶不帶旗標重跑都冪等。旗標會先檢查 `.env`
+      裡 `GRAFANA_ADMIN_PASSWORD` 非空，免得走到 compose 才用一個難讀的錯誤爆掉。
+- [x] 文件：本文改狀態；`docs/troubleshooting.md` §1 加 Grafana 列與「集中式查詢
+      （選配）」小節（含全部 LogQL）、§3 速查表加三列、§4 由「展望」改寫成「什麼時候
+      該打開」；`README.md` 部署段加「選配：集中式 log（Loki）」＋環境變數表一列；
+      `docs/architecture-c4.md` Level 2 加 logging profile 子圖（用 `c4-architecture`
+      skill，四張圖都通過 `validate.sh`）；`docs/env-data-paths.md` 加
+      「第三個看到 `HOST_DATA_DIR` 的人：Alloy 的 `/rooms`」整節。
+- [x] 驗收（本機實測，Docker Desktop / macOS）：三個服務起來後——
+      `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml
+      config` 通過；`docker logs alloy` 零 `level=error`；Loki 的 `/labels` 剛好是
+      設計允許的六個 `container / file / level / room_id / service / source`；
+      `room_id` 值含真實房間 `line_Uc0edf…`；`file` 值＝`agent.log`／`errors.log`／
+      `gateway.log`／`gateway-exit-diag.log`／`container-boot.log`／`mcp-stderr.log`；
+      `{service="agent", file="agent.log"}` 回 373 行、`{room_id="line_Uc0edf…"}`
+      回 529 行（同時含 `source=docker` 與 `source=file` 兩種來源，這正是「一個
+      room_id 串起三種來源」的證明）；Grafana `/api/health` 回 `database: ok`
+      （13.2.1），provisioning 出來的 Loki datasource `readOnly=true, isDefault=true`，
+      §5.4 全部查詢都用 Grafana 的 datasource proxy 跑過。
+      **兩個沒能在本機證明的**（見 §9）：router 這條流在本機是 host 模式
+      （`ROUTER_IN_DOCKER=false`）跑的，沒有容器也就沒有 label，pipeline 1 收不到它
+      ——改用一個帶 `alice.role=router` label 的拋棄式容器印 JSON 行，證明了
+      `service="router"` relabel 與 `loki.process` 的 `level` 抽取都正確
+      （`{service="router", level="error"}` 查得到），但真正的 router stdout 要等
+      容器化部署才算驗完；「新房間不重啟 Alloy 就被收到」只證明了容器那半邊
+      （拋棄式容器在 15 秒內被 `discovery.docker` 撿到），檔案那半邊沒證
+      （不想為了測試在 `data/` 底下造假房間）。
 
 ### Phase 4（可選）：Dashboard 與告警 — [ ]
 
@@ -532,11 +584,14 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
 
 | 項目 | 說明 | 處理 |
 |---|---|---|
-| Hermes 檔案 log 的輪替行為 | 不確定 gateway 是否自行輪替 `agent.log`；若不輪替，30 天保留只管 Loki 這份，原檔仍會長大 | Phase 3 實作時觀察現有房間的檔案大小；必要時在 host 加 `logrotate` 規則（copytruncate），Alloy tail 對 copytruncate 相容 |
+| Hermes 檔案 log 的輪替行為 | 不確定 gateway 是否自行輪替 `agent.log`；若不輪替，30 天保留只管 Loki 這份，原檔仍會長大 | Phase 3 實測：本機唯一房間跑了一天的 `agent.log` 是 60 KB，其餘五個檔案都 ≤ 4 KB，量級上短期不急；仍未觀察到 gateway 自行輪替。真的變大時在 host 加 `logrotate`（copytruncate），Alloy tail 對 copytruncate 相容 |
 | structlog 與 `line-bot-sdk`／`docker` SDK 的 logger 噪音 | 統一導進 JSON 後，第三方 DEBUG log 可能很吵 | `dictConfig` 對 `docker`、`urllib3`、`httpx` 設 `WARNING` |
-| 既有房間容器沒 label | 見 Phase 2 | 文件化重建步驟；不做自動遷移 |
-| `HOST_DATA_DIR` 與 Alloy 掛載路徑不一致 | compose 裡是 `${PWD}/data`，operator 若改路徑要同步兩處 | Phase 3 在 compose 用同一個變數；`docs/env-data-paths.md` 說明 |
-| Loki 磁碟用量 | 數十房間、30 天，估計數百 MB 到數 GB | Phase 3 驗收後量一次，寫進文件 |
+| 既有房間容器沒 label | 見 Phase 2 | 文件化重建步驟；不做自動遷移。（本機這顆房間容器是 Phase 2 之後重建的，已帶 label，pipeline 1 因此實測有收到它的 stdout） |
+| `HOST_DATA_DIR` 與 Alloy 掛載路徑不一致 | compose 裡是 `${PWD}/data`，operator 若改路徑要同步兩處 | 已處理：Alloy 掛載寫成 `${HOST_DATA_DIR:-${PWD}/data}`，跟 router 吃同一個變數；`docs/env-data-paths.md` 專節說明症狀（只有 `source="file"` 查不到）與驗證指令 |
+| Loki 磁碟用量 | 數十房間、30 天，估計數百 MB 到數 GB | Phase 3 量過：單一房間約 530 行、再加三個 infra 容器的 stdout，`/loki` 共 704 KB。維持原估計 |
+| 堆疊的 RAM 成本 | §3 表格原本估「約 2–4 GB RAM」 | 實測遠低於此：`docker stats --no-stream` 顯示 Alloy 65–69 MB、Loki 107–157 MB、Grafana 310–353 MB，**合計約 480–580 MB**。原估計是照 Loki 官方對「有查詢負載的生產叢集」的建議抄的，對單機、單 operator、偶爾查一次的用法過度保守——`docs/troubleshooting.md` §4 用實測值 |
+| Loki 的 ring 在筆電休眠後會短暫不健康 | 本機實測出現過 `at least 1 healthy replica required`（compactor／scheduler），因為 `kvstore: inmemory` 的心跳被主機睡眠打斷 | 會自己恢復，正式部署（不休眠的主機）不會遇到；若在筆電上長開，休眠期間推進去的行有機會查不到，重啟 Loki 即可 |
+| Grafana 自己的 stdout 會被收進 Loki | 三個 infra 容器都有 `alice.role` label，Grafana 開機的 migration log 一次就是一兩千行 | 接受：它有 30 天保留與 label 隔離（`{service="infra"}`），要靜音就把 compose 的 `alice.role: infra` 拿掉，代價是堆疊自己壞掉時查不到 |
 
 ## 來源
 

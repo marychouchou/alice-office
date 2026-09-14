@@ -1,0 +1,105 @@
+# 選配（opt-in）的集中式 log 堆疊 — Alloy 收集、Loki 儲存、Grafana 查詢。
+# 設計與取捨見 docs/logging-design.md（§3 方案比較、§5.3–§5.6 實作細節）。
+#
+# 啟用（一定要從 repo 根目錄執行，相對路徑與 ${PWD} 都以它為基準）：
+#   GRAFANA_ADMIN_PASSWORD=... docker compose \
+#     -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d
+# 或 ./scripts/deploy_host.sh --with-logging
+#
+# 三個服務都掛在 router 已經在用的 external network hermes_global_net 上，
+# 因為 Alloy 要 push 給 Loki、Grafana 要查 Loki，都走容器名稱解析。
+# 它們自己也帶 alice.role label（=infra），所以 Alloy 的 pipeline 1 會連
+# 堆疊自身的 stdout 一起收——堆疊壞掉時查得到原因（docs/logging-design.md §5.3）。
+services:
+  alloy:
+    # Alloy 是 Promtail 的官方繼任者（Promtail 2026-03 EOL）。pin 到明確版本，
+    # 不用 latest：收集器換版會改 component 參數名，漂移會在半夜靜默壞掉。
+    image: grafana/alloy:v1.19.2
+    container_name: alloy
+    command:
+      - run
+      # positions / WAL 都寫在這裡；沒有這個 named volume，重啟會把每個房間的
+      # logs/*.log 從頭重讀一次（重複行）。
+      - --storage.path=/var/lib/alloy/data
+      # Alloy 自己的 UI（元件圖、每個 target 的狀態）。只綁容器內，沒對 host
+      # 開 port；要看就 docker exec 進去 curl，或臨時 docker run 一個 port-forward。
+      - --server.http.listen-addr=0.0.0.0:12345
+      - /etc/alloy/config.alloy
+    volumes:
+      # 唯讀的 docker.sock：discovery.docker 用它列容器、loki.source.docker 用它
+      # 讀 stdout。router 本來就掛了一份 rw 的，所以這不是新的信任邊界（§6）。
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 每個房間的檔案 log（agent.log / errors.log / ...）。HOST_DATA_DIR 必須跟
+      # router 用的那個是同一個目錄，否則這裡會掛到空的資料夾——見 docs/env-data-paths.md。
+      - ${HOST_DATA_DIR:-${PWD}/data}:/rooms:ro
+      - ./deploy/logging/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    networks:
+      - hermes_global_net
+    restart: unless-stopped
+    labels:
+      alice.role: infra
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  loki:
+    image: grafana/loki:3.7.7
+    container_name: loki
+    command: ["-config.file=/etc/loki/config.yaml"]
+    volumes:
+      - ./deploy/logging/loki/config.yaml:/etc/loki/config.yaml:ro
+      - loki-data:/loki
+    # 刻意沒有 ports：Loki 沒有 auth（auth_enabled: false），只能被同一個
+    # network 內的 Alloy 與 Grafana 存取（§6）。
+    networks:
+      - hermes_global_net
+    restart: unless-stopped
+    labels:
+      alice.role: infra
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:13.2.1
+    container_name: grafana
+    environment:
+      # 沒設就直接讓 compose 失敗，不要靜默起一個 admin/admin 的 Grafana。
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?請在 .env 設 GRAFANA_ADMIN_PASSWORD（見 .env.example）}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+    ports:
+      # 只綁 127.0.0.1：operator 從自己的機器用 SSH tunnel 連進來
+      #   ssh -N -L 3000:127.0.0.1:3000 <user>@<host>
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./deploy/logging/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - hermes_global_net
+    restart: unless-stopped
+    depends_on:
+      - loki
+    labels:
+      alice.role: infra
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  hermes_global_net:
+    name: hermes_global_net
+    external: true
+
+volumes:
+  alloy-data:
+  loki-data:
+  grafana-data:

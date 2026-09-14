@@ -1,0 +1,154 @@
+// Grafana Alloy — 兩條 pipeline，一個 loki.write 出口。
+// 設計見 docs/logging-design.md §5.3；參數名對照 Alloy v1.19 官方 component 參考：
+//   https://grafana.com/docs/alloy/latest/reference/components/
+//
+// Label 只允許這六個：service / room_id / container / source / file / level。
+// request_id、event_id、sender_id 一律留在行內（LogQL 用 `| json` 過濾），
+// 不要 relabel 成 label——Loki 的成本模型是 label 基數，不是行數（§5.4）。
+
+// ---------------------------------------------------------------------------
+// Pipeline 1：所有帶 alice.role label 的容器 stdout
+//   alice.role=router → service="router"（router 自己的 JSON log）
+//   alice.role=agent  → service="agent" ＋ room_id（每房間的 hermes 容器）
+//   alice.role=infra  → service="infra"（這個堆疊自己的三個容器）
+// 新房間的容器一冒出來就會被 refresh_interval 掃到，不用重啟 Alloy。
+// ---------------------------------------------------------------------------
+
+discovery.docker "alice" {
+	host             = "unix:///var/run/docker.sock"
+	refresh_interval = "15s"
+
+	// Docker Engine API 的 label filter：只給 key 就是「有這個 label 就算」，
+	// 所以主機上其他專案的容器（renthouse、別人的 compose…）不會被收進來。
+	filter {
+		name   = "label"
+		values = ["alice.role"]
+	}
+}
+
+discovery.relabel "alice_containers" {
+	targets = discovery.docker.alice.targets
+
+	// Docker label 的 `.` 在 __meta_ 名稱裡會變成 `_`。
+	rule {
+		source_labels = ["__meta_docker_container_label_alice_role"]
+		target_label  = "service"
+	}
+
+	// 沒有 alice.room_id 的容器（router、infra）取到空字串，relabel 會直接
+	// 不產生這個 label，不需要額外的分支。
+	rule {
+		source_labels = ["__meta_docker_container_label_alice_room_id"]
+		target_label  = "room_id"
+	}
+
+	// __meta_docker_container_name 帶前導斜線（"/hermes_line_U..."）。
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/?(.*)"
+		replacement   = "$1"
+		target_label  = "container"
+	}
+
+	rule {
+		target_label = "source"
+		replacement  = "docker"
+	}
+}
+
+loki.source.docker "alice" {
+	host             = "unix:///var/run/docker.sock"
+	targets          = discovery.relabel.alice_containers.output
+	forward_to       = [loki.process.shape_labels.receiver]
+	refresh_interval = "15s"
+}
+
+// ---------------------------------------------------------------------------
+// 兩條 pipeline 共用的最後一站：把 label 集修成 §5.4 允許的那六個。
+// ---------------------------------------------------------------------------
+
+loki.process "shape_labels" {
+	forward_to = [loki.write.local.receiver]
+
+	// loki.source.file 會自動貼上 filename（完整路徑）。room_id + file 已經
+	// 表達同一件事，留著只是多一份基數，直接丟掉。
+	stage.label_drop {
+		values = ["filename"]
+	}
+
+	// router 的每一行都是 JSON（LOG_FORMAT=json），把 structlog 寫的 `level`
+	// 提成 label，這樣「只看 error」不用掃全部行。其他 service 的 stdout 不是
+	// JSON（hermes gateway 是純文字），所以用 stage.match 限定只對 router 做。
+	stage.match {
+		selector = "{service=\"router\"}"
+
+		stage.json {
+			expressions = {level = "level"}
+		}
+
+		// 值是空字串＝沿用同名的 extracted key。缺 level 的行（例如 uvicorn
+		// 啟動前的非 JSON 行）不會被貼上 label，不會變成空值基數。
+		stage.labels {
+			values = {level = ""}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline 2：每房間的檔案 log
+//   HOST_DATA_DIR 以 ro 掛在 /rooms，所以 /rooms/<room_id>/logs/<name>.log
+//   就是 host 上的 data/<room_id>/logs/<name>.log（docs/env-data-paths.md）。
+// 這條是 Hermes gateway 自己寫的那份（agent / errors / mcp-stderr / gateway /
+// container-boot），內容比容器 stdout 細，是「agent 這次用了什麼工具」的來源。
+// ---------------------------------------------------------------------------
+
+local.file_match "room_logs" {
+	// 單層 `*`：只收房間目錄自己的 logs/*.log，不遞迴進 logs/gateways/、
+	// logs/curator/ 這些 Hermes 自己分出去的子目錄。data/_conversations 與
+	// data/_google 沒有 logs/ 子目錄，自然不會 match。
+	path_targets = [{"__path__" = "/rooms/*/logs/*.log"}]
+	sync_period  = "30s"
+}
+
+discovery.relabel "room_logs" {
+	targets = local.file_match.room_logs.targets
+
+	rule {
+		source_labels = ["__path__"]
+		regex         = "/rooms/([^/]+)/logs/[^/]+\\.log"
+		replacement   = "$1"
+		target_label  = "room_id"
+	}
+
+	// file 帶副檔名（agent.log、errors.log），跟 docs/troubleshooting.md
+	// 的檔名一字不差，查詢時不用記「要不要去掉 .log」。
+	rule {
+		source_labels = ["__path__"]
+		regex         = "/rooms/[^/]+/logs/([^/]+\\.log)"
+		replacement   = "$1"
+		target_label  = "file"
+	}
+
+	rule {
+		target_label = "service"
+		replacement  = "agent"
+	}
+
+	rule {
+		target_label = "source"
+		replacement  = "file"
+	}
+}
+
+loki.source.file "room_logs" {
+	targets    = discovery.relabel.room_logs.output
+	forward_to = [loki.process.shape_labels.receiver]
+}
+
+// ---------------------------------------------------------------------------
+
+loki.write "local" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

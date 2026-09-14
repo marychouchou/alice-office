@@ -27,6 +27,7 @@ Google Calendar／Drive／Gmail 工具）之後確認的，不是憑 Hermes 官�
 | 容器為什麼起不來 / health check timeout | `container-boot.log`、`gateway-exit-diag.log`、`docker logs` | 見 2.4 節 |
 | Google OAuth 卡在哪一步 | 房間的 `google/` 目錄、router log 的 oauth 錯誤行 | 見 2.5 節 |
 | router 自己有沒有丟例外（容器編排／呼叫 agent／回推 LINE 失敗） | router 自己的 log | 見下方「Router 自己會記錄的行為」 |
+| **以上三種來源用同一個 `room_id` 串起來一次看**（選配，要先啟用 log 堆疊） | Grafana → Explore → Loki | 見下方「集中式查詢（選配）」 |
 
 ### Router 自己會記錄的行為
 
@@ -59,6 +60,63 @@ JSON 物件（`docker compose logs webhook_router | jq .`），每行自帶 `req
 「收到 webhook」——訊號是每個 request 一行的 `"event":"http_request"`（帶
 `method`／`path`／`status`／`duration_ms`），由 `logging_setup` 的 middleware 印，
 不是 uvicorn 的 access log（那份已關閉，避免兩種格式混在同一個 stdout）。
+
+### 集中式查詢（選配：Grafana + Loki）
+
+上面那張表是「一次看一個地方」的原始路徑，永遠可用、不依賴任何額外服務。房間一多，
+或是要跨 router／容器 stdout／檔案 log 三種來源追同一則訊息時，可以另外啟用
+`deploy/logging/` 的堆疊（Alloy 收集 → Loki 儲存 → Grafana 查詢，預設不開）：
+
+```bash
+# .env 先設好 GRAFANA_ADMIN_PASSWORD，然後在 repo 根目錄
+docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d
+# 或 ./scripts/deploy_host.sh --with-logging
+#
+# Grafana 只綁 127.0.0.1:3000，從自己的機器開 tunnel 再用瀏覽器連：
+ssh -N -L 3000:127.0.0.1:3000 <user>@<host>   # → http://localhost:3000（帳號 admin）
+```
+
+Loki 資料來源已經由 provisioning 自動接好，進 Grafana 直接按 **Explore**。
+Label 只有六個——`service`（`router`／`agent`／`infra`）、`room_id`、`container`、
+`source`（`docker`／`file`）、`file`（`agent.log`／`errors.log`…）、`level`（只有
+router 的 JSON 行有）；`request_id`、`event_id`、`sender_id` 一律留在行內，
+用 `| json` 過濾（設計理由見 `docs/logging-design.md` §5.4）。常用查詢：
+
+```logql
+# 一個房間橫跨三種來源（router JSON 行 + 容器 stdout + logs/*.log）的全部紀錄
+{service=~"router|agent"} | json | room_key="<room_id>" or room_id="<room_id>"
+
+# 只要該房間 agent 那兩種來源（最快，不做 JSON 解析）
+{room_id="<room_id>"}
+
+# 某次 webhook 的完整路徑
+{service="router"} | json | request_id="<request_id>"
+
+# 所有房間的 agent error
+{service="agent", file="errors.log"}
+
+# router 的例外與 5xx
+{service="router", level="error"}
+
+# 某房間每一輪的結果狀態與耗時（對話內容不在 Loki，用 scripts/conversations.py 看）
+{service="router"} | json | event="conversation_turn" | room_key="<room_id>"
+
+# 全部房間裡 agent 失敗的那一輪（envelope 含 session_id，可對回 state.db）
+{service="router"} | json | event="conversation_turn" | outcome="agent_failed"
+
+# log 堆疊自己壞掉時（Alloy／Loki／Grafana 的 stdout 也有收）
+{service="infra"}
+```
+
+兩個會浪費時間的點：
+
+- **`{a} or {b}` 不是合法的 LogQL**——`or` 只能接在 label filter 後面，不能把兩個
+  stream selector 聯集起來（`parse error: unexpected type for left leg of binary
+  operation (or)`）。所以跨來源要寫成上面第一條那種「先用 `=~` 把 service 選起來，
+  再用 `| json | A or B` 過濾」的形狀。
+- **host 模式（`ROUTER_IN_DOCKER=false`）的 router 不會進 Loki**：Alloy 靠 Docker
+  label 找容器，host process 的 stdout 它看不到。開發時看 terminal 就好
+  （`LOG_FORMAT=console`）；`{service="router"}` 只有容器化部署才有東西。
 
 ## 2. 症狀 → 排查流程
 
@@ -265,6 +323,34 @@ Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空�
 已 build、`.env` 已設成 host 模式。失敗時 router 的完整輸出會落在腳本印出的
 `router log →` 路徑，可據此排查。
 
+### 2.9 Agent 說「無法讀取 PDF」／`pymupdf 未安裝`／`OCR 服務連線失敗`
+
+pymupdf 只裝在 `/opt/tools/.venv`（`tools-python`），Hermes 自己的 venv 沒有。症狀來源
+（2026-09-14 Oregon 實例）：agent 照內建 `ocr-and-documents` skill 寫的
+`python scripts/extract_pymupdf.py` 跑，用到 Hermes venv → `ModuleNotFoundError`；接著
+想 `pip install` 又被安全掃描卡成 `pending_approval`（api_server 模式沒有人能核准）。
+
+image 現在烤了三層提示（`Dockerfile.hermes`「Tell the agent about the environment」段）：
+`/opt/hermes/skills/alice/runtime-env`、build 時把內建 `ocr-and-documents/SKILL.md`
+的 `python` 改成 `tools-python` + 絕對路徑、`/opt/hermes/.hermes.md` 進 system prompt。
+排查：
+
+```bash
+# 1. 房間用的 image 有沒有這三樣（舊 image 都沒有）
+docker exec hermes_<room_id> sh -c 'test -f /opt/hermes/.hermes.md && ls /opt/hermes/skills/alice/runtime-env && grep -c tools-python /opt/hermes/skills/productivity/ocr-and-documents/SKILL.md'
+# 2. 房間副本有沒有 sync 到（Hermes 開機 manifest sync；房間手改過的 skill 會被跳過，屬預期）
+docker exec hermes_<room_id> sh -c 'ls /opt/data/skills/alice/runtime-env; grep -c tools-python /opt/data/skills/productivity/ocr-and-documents/SKILL.md'
+# 3. 直接驗證抽文字這條路本身是通的
+docker exec hermes_<room_id> tools-python /opt/data/skills/productivity/ocr-and-documents/scripts/extract_pymupdf.py "/opt/data/incoming/<檔名>.pdf" --pages 0
+```
+
+沒有 1 → bump `HERMES_IMAGE` 到含這段的 image，`docker rm -f hermes_<room_id>` 讓房間用新
+image 重建（`data/<room_id>/` 不動）。有 1 沒 2 → `docker restart` 觸發一次 sync。
+
+`local-tools` plugin 的 `image_ocr` 工具是另一條路，目前指向不存在的
+`auxiliary.vision.base_url`（預設 127.0.0.1:8001），所以「OCR 服務連線失敗」是預期的、可忽略；
+主模型本身看得懂圖片，圖片走 Hermes 內建 `vision_analyze` 即可。
+
 ## 3. 指令速查表
 
 | 想做什麼 | 指令 |
@@ -281,6 +367,9 @@ Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空�
 | 列出所有正在跑的 hermes 容器 | `docker ps --filter name=hermes_` |
 | 只挑某個房間的 router log 行 | `docker compose logs webhook_router \| jq 'select(.room_key=="<room_id>")'` |
 | 確認容器的 label 與 log 上限有生效 | `docker inspect hermes_<room_id> \| jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'` |
+| 啟用集中式 log（Alloy+Loki+Grafana，選配） | `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d` |
+| 關掉集中式 log（router 不受影響） | `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml stop alloy loki grafana` |
+| 確認 Alloy 有在收（列出目前所有 label 值） | `docker exec grafana curl -s http://loki:3100/loki/api/v1/label/room_id/values` |
 | 手動起單一 MCP server 測試 | `docker exec -it hermes_<room_id> node /opt/data/mcp/<name>/server.mjs` |
 | 列出所有房間的對話量與用量 | `uv run python scripts/conversations.py rooms` |
 | 看某房間的逐輪對話（含結果狀態與耗時） | `uv run python scripts/conversations.py show <room_id> [--with-tools]` |
@@ -291,16 +380,33 @@ Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空�
 | 看某房間的 token／成本／工具使用統計 | `docker exec hermes_<room_id> hermes insights --days 7` |
 | 看某個 session 的 Hermes 內部 log | `docker exec hermes_<room_id> hermes logs --session <session_id>` |
 
-## 4. Production 展望
+## 4. Production：什麼時候該打開集中式 log
 
 每房間的檔案 log（`agent.log`／`gateway.log`／`errors.log`／`mcp-stderr.log`／
 `state.db` 等）已經因為 `HOST_DATA_DIR` 的 bind mount 集中在 host 檔案系統上
 了——production 只要把 `HOST_DATA_DIR` 放到一個有備份、有容量的位置（例如掛載
-的資料碟），這部分**不需要**額外的集中化基礎建設，本來就不會散落。
+的資料碟），這部分本來就不會散落。每個容器的 **stdout** 也已經有
+`json-file` driver 的 10 MB × 3 上限（router 在 `docker-compose.yml`、每個
+`hermes_<room_id>` 在 `container_manager.py`），不會無限長大。
 
-真正「散落在多個容器」的只剩下每個容器的**stdout**（`docker logs` 看的那份）。
-現階段（單機部署、房間數量有限）用 docker 內建的 `json-file` log driver
-＋ `docker logs`／`docker compose logs` 已經夠用，不需要為了假設中的規模先建
-Loki/Promtail 或雲端 log 服務（CloudWatch、Datadog 等）這類基礎設施——等到真的
-上到多主機或單機已經多到肉眼查不過來時，再依實際痛點加一層集中收集，現在加只
-是提早付維運成本。
+**預設維持現況**：`docker logs` / `docker compose logs` / `tail` 三條路徑，零額外
+基礎設施，客戶部署不用多跑三個容器。
+
+**`deploy/logging/` 的堆疊已經做好，但預設關閉**（`docker-compose.yml` 完全沒提到
+它，只在多帶一個 `-f` 時才存在）。出現下面任一個訊號再打開，不要預先開：
+
+| 訊號 | 為什麼集中式會解掉它 |
+|---|---|
+| 房間數多到「先看哪個容器」本身就要猜 | `{room_id="…"}` 一條查詢就把三種來源按時間排好 |
+| 要追的問題橫跨 router 與 agent（訊息進去了但沒回） | `request_id` 一路從 webhook 帶到 agent 呼叫，`\| json \| request_id="…"` 直接拉出整條路徑 |
+| 要看「上週三那次」——但 `json-file` 已經輪替掉了 | Loki 保留 30 天（`retention_period: 720h`），跟容器生命週期脫鉤：容器被 `docker rm` 重建，之前的 log 還在 |
+| 要問「所有房間的 MCP 失敗率」這種跨房間問題 | LogQL 的 `sum by (room_id) (rate(...))`，`grep` 做不到 |
+
+**代價**（本機實測，`docker stats --no-stream`）：Alloy 65 MB、Loki 107 MB、
+Grafana 310 MB，合計約 480 MB RAM；Loki 磁碟在單一房間、約 500 行的情況下是
+704 KB，數十房間、30 天估計數百 MB 到數 GB。三個容器都 `restart: unless-stopped`，
+壞掉不影響 router（Alloy 只是讀 `docker.sock` 與 `/rooms` 的旁觀者）。
+
+更早期的判斷是「先不建集中式 log」，那個判斷的前提（單機、小規模）沒有變，
+變的是成本：收集端做成 opt-in 之後，不開就是零成本，所以不再需要「等到很痛才
+開始建」——痛的時候多打一個 `-f` 就好。設計與方案比較見 `docs/logging-design.md`。

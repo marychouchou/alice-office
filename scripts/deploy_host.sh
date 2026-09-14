@@ -16,6 +16,9 @@
 #                   local-tools 的 math/OCR/webdriver 與 secretary-mcp 會不能用，
 #                   細節見 README「3. 建立 Docker 網路、準備 Hermes image」。
 #   --no-verify     部署完不跑 ping 驗證（預設會跑，需要 uv）。
+#   --with-logging  一併起集中式 log 堆疊（Alloy + Loki + Grafana，約 400 MB RAM），
+#                   見 deploy/logging/ 與 docs/logging-design.md。需要 .env 有
+#                   GRAFANA_ADMIN_PASSWORD。預設不開，客戶部署維持最小化。
 
 set -euo pipefail
 
@@ -24,12 +27,16 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NETWORK_NAME="hermes_global_net"
 HERMES_IMAGE_TAG="alice-hermes-agent:v1"
 
+LOGGING_COMPOSE_FILE="deploy/logging/docker-compose.logging.yml"
+
 PULL_HERMES=false
 RUN_VERIFY=true
+WITH_LOGGING=false
 for arg in "$@"; do
   case "${arg}" in
     --pull-hermes) PULL_HERMES=true ;;
     --no-verify) RUN_VERIFY=false ;;
+    --with-logging) WITH_LOGGING=true ;;
     *)
       echo "[deploy] 不認得的參數: ${arg}" >&2
       exit 1
@@ -48,6 +55,18 @@ fi
 
 if ! grep -qE '^ROUTER_IN_DOCKER=true' .env; then
   log "警告：.env 的 ROUTER_IN_DOCKER 不是 true，container 化部署模式需要它，請確認"
+fi
+
+# compose 檔清單：--with-logging 只是多疊一份 override（-f 疊加），主檔的行為
+# 完全不變，所以帶不帶旗標重跑都是冪等的。
+COMPOSE_FILES=(-f docker-compose.yml)
+if ${WITH_LOGGING}; then
+  if ! grep -qE '^GRAFANA_ADMIN_PASSWORD=.+' .env; then
+    log "--with-logging 需要 .env 設定非空的 GRAFANA_ADMIN_PASSWORD（見 .env.example）"
+    exit 1
+  fi
+  COMPOSE_FILES+=(-f "${LOGGING_COMPOSE_FILE}")
+  log "已啟用集中式 log 堆疊：${LOGGING_COMPOSE_FILE}"
 fi
 
 # ---------------------------------------------------------------------------
@@ -106,10 +125,14 @@ fi
 # ---------------------------------------------------------------------------
 
 log "docker compose up -d --build"
-${DOCKER} compose up -d --build
+${DOCKER} compose "${COMPOSE_FILES[@]}" up -d --build
 
 log "容器狀態："
-${DOCKER} ps --filter "name=alice-office-router" --filter "name=hermes_"
+if ${WITH_LOGGING}; then
+  ${DOCKER} ps --filter "label=alice.role"
+else
+  ${DOCKER} ps --filter "name=alice-office-router" --filter "name=hermes_"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. 驗證（簽章 ping，不建容器不打 LLM，見 scripts/test_webhook.py）
@@ -136,3 +159,8 @@ fi
 
 log "部署完成。接下來：把真實 LINE OA 的 Webhook URL 設成 https://<你的 ngrok/domain>/webhook"
 log "看 log：${DOCKER} compose logs -f webhook_router"
+if ${WITH_LOGGING}; then
+  log "Grafana：只綁 127.0.0.1:3000，從自己的機器開 tunnel 後用瀏覽器連"
+  log "  ssh -N -L 3000:127.0.0.1:3000 $(whoami)@<這台主機>   → http://localhost:3000（帳號 admin）"
+  log "常用 LogQL 查詢見 docs/troubleshooting.md 第 1 節"
+fi

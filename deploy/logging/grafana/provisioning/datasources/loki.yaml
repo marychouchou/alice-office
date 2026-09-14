@@ -1,0 +1,17 @@
+# Grafana 開機時自動掛好 Loki 資料來源，operator 不用手動點設定。
+# 見 docs/logging-design.md §5.4；常用 LogQL 查詢在 docs/troubleshooting.md §1。
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    uid: alice-loki
+    # proxy：查詢由 Grafana server 端發出，所以瀏覽器不需要連得到 loki:3100
+    # （Loki 根本沒對 host 開 port）。
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    # 設定由這個檔案管理，不要讓人在 UI 改完之後跟 repo 不一致。
+    editable: false
+    jsonData:
+      maxLines: 1000
