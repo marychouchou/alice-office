@@ -57,6 +57,8 @@ flowchart TB
   addresser --- uc2
   addresser --- uc4
   addresser --- uc5
+  addresser --- uc6
+  addresser --- uc7
   bystander --- uc3
 
   uc7 -.->|"&lt;&lt;include&gt;&gt;<br/>需先通過授權 gate"| uc6
@@ -85,6 +87,20 @@ flowchart TB
 | UC6 | 授權 Google 服務 | `google_oauth.py::oauth_start`／`oauth_callback`／`_store_token` | README「Google Workspace 整合」、`docs/google-workspace-integration-summary.md` |
 | UC7 | 使用 Google Calendar／Gmail／Drive 工具 | `google_oauth.py::check_google_authorization`（gate）、`src/hermes/mcp/{gmail,drive,google-calendar}/` | README「訊息授權判斷流程」 |
 | UC8 | 上傳媒體檔案給助理處理 | `channels/line/events.py::_download_and_note_media`／`resolve_inbound_text` | `docs/line-hermes-message-flow.md` §3 |
+
+> **UC2 的部署前提（呼叫詞）**：`addresser` 能點名 bot 只有兩種管道——
+> @提及（需成員用 LINE 行動版 14.17.0+，且 LINE 桌面版／舊版完全無法 @ 官方
+> 帳號）、或以部署維運者設定的 `GROUP_TRIGGER_PREFIXES` 呼叫詞開頭
+> （`channels/line/adapter.py::_is_addressed`）。呼叫詞預設為空字串（只靠
+> @提及），因此**部署時必須至少設定一個呼叫詞**，群組裡的桌面版使用者才叫得動
+> bot，否則群組服務只對行動版使用者可用（見 `docs/group-chat-design.md`
+> §14「部署前提」）。
+
+> **UC6／UC7 也適用於群組**：`check_google_authorization` 是以 `room_key` 為
+> 單位判斷（`core.py::process_inbound`），不分 1:1／群組——一則被點名的群組訊息
+> 一樣會先過 Google OAuth gate，該房間（群組）尚未授權時，點名者會收到與 1:1
+> 相同的授權連結；因此 `addresser` 也關聯到 UC6、UC7（整個群組共用房間層級的
+> 一份 Google 授權，不是每個成員各自授權）。
 
 > **UC8 的群組限制**：`_is_addressed` 對非 text 訊息一律回 `False`（見
 > `channels/line/adapter.py`），所以群組裡的媒體檔案雖然照樣會被下載落地，

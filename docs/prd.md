@@ -4,8 +4,8 @@
 
 - **狀態**：反映現有實作（非提案）。這份 PRD 是把已經做出來的行為用 PRD 格式記錄下來，
   給後續要加新 feature 的人一個比對基準——不是待審核的規劃文件。
-- **對應版本**：commit `93a7df9`（feat: keep per-room Hermes context clean via
-  session-epoch rotation）附近，2026-08-28。
+- **對應版本**：commit `dc4019f`（docs: document group call-word settings for
+  deployers）附近，2026-09-14。
 - **範圍**：`src/alice_office_router/` 整個 router 服務；不含 `src/hermes/` 底下
   MCP／plugin 工具本身的功能規格（那些是 Hermes agent 的能力，見 AGENTS.md 路由表）。
 - 行為異動時（尤其是群組判斷邏輯、session 輪替門檻、gate 三態）請同步更新本文件，
@@ -116,7 +116,11 @@ flowchart TB
 
 - 群組訊息只有在 **@提及 bot**（LINE `mention.mentionees[].isSelf == true`；
   `type == "all"` 的 @All 不算）或以設定的 **呼叫詞**（`GROUP_TRIGGER_PREFIXES`，
-  逗號分隔，空＝只靠 @mention）開頭時，才視為「點名」（addressed）。
+  逗號分隔，空＝只靠 @mention）開頭時，才視為「點名」（addressed）。比對是單純的
+  大小寫敏感前綴比對、不看字詞邊界（例如呼叫詞「小幫手」會讓「小幫手們早」也被當
+  成點名），部署時須挑成員平常聊天不會用到的詞（見 `docs/group-chat-design.md`／
+  `.env.example`）。至少要設一個呼叫詞才能服務 LINE 桌面版使用者，因為桌面版無法
+  @ 官方帳號。
 - 群組裡任何**非文字訊息**（貼圖／媒體／位置）一律視為未點名，只會被 observe，
   不會觸發 addressed 路徑。
 - 未點名的群組訊息不會呼叫 agent、不回覆，只記入該房間的 observed buffer
@@ -124,7 +128,9 @@ flowchart TB
   `GROUP_OBSERVED_MAX_MESSAGES`，預設 50，超過丟最舊）。
 - 被點名時，會把 buffer 折入帶 `[名稱|ID]` 標籤的背景脈絡，連同這次點名訊息一起
   組成 prompt，附加一段 ephemeral system message（`GROUP_SYSTEM_PROMPT`）說明多人
-  身份規則後問 agent。
+  身份規則後問 agent。發話者名稱與訊息文字中的 `[`／`]`／`|`／換行會先被轉成全形
+  或空白（`group_context._sanitize`），避免有人用訊息內容偽造 `[名稱|ID]` 標籤來
+  冒充其他發話者身份（identity spoofing／prompt injection）。
 - agent 判斷這則點名其實不需要回應時，可輸出 silence token
   （`[SILENT]`／`SILENT`／`NO_REPLY`／`NO REPLY`，大小寫不敏感），router 會過濾掉、
   不送出任何訊息。
@@ -215,8 +221,10 @@ flowchart TD
 反覆打斷。
 
 - 只有部署方設定 `GOOGLE_OAUTH_PUBLIC_URL` 且放好 Web application 憑證時才啟用
-  （`Settings.google_oauth_enabled`）。
-- 啟用時，每則訊息進 agent 前先跑 `check_google_authorization`，三態：
+  （`Settings.google_oauth_enabled`）；`GOOGLE_OAUTH_GATE`（預設 `true`）可在已啟用
+  的部署上單獨關閉「擋訊息」這一步——設 `false` 時 `/oauth/start`、`/oauth/callback`
+  照常可用，但 inbound 訊息一律不因未授權被擋（等同 gate 永遠回 `ok`）。
+- Gate 啟用時，每則訊息進 agent 前先跑 `check_google_authorization`，三態：
   - **blocked**：沒有 token，或 access token 過期且無 refresh token → 只回授權
     連結，不呼叫 agent；
   - **notice**：有 token 但缺 Drive scope → 照常呼叫 agent，並多推播一則重新授權

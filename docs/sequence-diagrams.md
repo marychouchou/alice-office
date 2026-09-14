@@ -32,7 +32,7 @@ sequenceDiagram
     R->>C: process_inbound(InboundMessage)
     C->>C: check_google_authorization → ok
     C->>C: get_or_create_container(room_key)
-    C->>H: POST /v1/chat/completions<br/>X-Hermes-Session-Id: room_key(#35;epoch)
+    C->>H: POST /v1/chat/completions<br/>X-Hermes-Session-Id: session_id_for(room_key, epoch)
     H-->>C: 回覆文字 + usage.prompt_tokens
     C-->>R: [reply]
     R->>R: 去 Markdown + split_for_line
@@ -68,8 +68,8 @@ sequenceDiagram
     LP->>R: POST /webhooks/line
     R->>R: verify + dedup
     R->>R: resolve_inbound_text（text 直傳）
-    R->>R: _is_addressed(event, text) → False
     R->>R: resolve_sender_name（LINE member profile API，TTL cache）
+    R->>R: _is_addressed(event, text) → False
     R->>R: background_tasks.add_task(..., is_group=True, addressed=False)
     R-->>LP: 200 {"status":"ok"}
     Note over R,GC: 背景任務
@@ -104,8 +104,8 @@ sequenceDiagram
     U->>LP: 「@Alice 幫我排下週的會議」
     LP->>R: POST /webhooks/line
     R->>R: verify + dedup + 剝除自我 @mention
-    R->>R: _is_addressed → True（mention_is_self）
     R->>R: resolve_sender_name
+    R->>R: _is_addressed → True（mention_is_self）
     R->>R: background_tasks.add_task(..., addressed=True)
     R-->>LP: 200 {"status":"ok"}
     Note over R,H: 背景任務
@@ -115,11 +115,11 @@ sequenceDiagram
     C->>C: build_group_prompt(observed, msg)<br/>[name|id] 標籤 + 背景區塊
     C->>H: POST /v1/chat/completions<br/>system=GROUP_SYSTEM_PROMPT
     H-->>C: 回覆文字
+    C->>GC: clear_observed(peeked)（依 timestamp cutoff，非位置；<br/>agent 成功回覆就清，不論是否 silence）
     alt 回覆是 silence token（NO_REPLY 等）
         C->>C: is_silence → True
-        Note over C: 回傳 None，不送任何訊息（但仍已清空 buffer）
+        Note over C: 回傳 None，不送任何訊息
     else 正常回覆
-        C->>GC: clear_observed(peeked)（依 timestamp cutoff，非位置）
         C-->>R: [reply]
         R->>LP: reply / push
         LP->>U: 顯示回覆
@@ -263,7 +263,7 @@ sequenceDiagram
 
     R->>D: containers.get("hermes_" + room_key)
     D-->>R: NotFound
-    R->>R: _ensure_data_dir / _ensure_mcp_seed /<br/>_ensure_plugin_seed / _ensure_config_yaml（write-once seed）
+    R->>R: _ensure_data_dir / _ensure_mcp_seed / _ensure_plugin_seed /<br/>_ensure_config_yaml / ensure_google_seed（write-once seed；<br/>google 部分視部署是否啟用 Google OAuth，未啟用則 no-op）
     R->>D: docker run（image、volume /opt/data、network、<br/>env: API_SERVER_KEY 等，command: gateway run）
     D->>H: 建立並啟動容器
     loop 每秒一次，最多 60 秒
@@ -295,8 +295,8 @@ sequenceDiagram
     participant H as Hermes 容器
 
     Dev->>R: POST /webhooks/api/messages<br/>Authorization: Bearer API_CHANNEL_TOKEN<br/>{room_key, text}
+    R->>R: pydantic 驗證 request body（room_key 需 line_* 或 api_*、text 非空，<br/>否則 422；FastAPI 在進入 handler 前就驗證，早於下一步的 bearer 驗證）
     R->>R: _verify_bearer（常數時間比對）
-    R->>R: room_key 格式驗證（line_* 或 api_*，否則 422）
     R->>C: await process_inbound(InboundMessage)
     C->>H: gate → 容器 → agent（與 1:1 路徑完全相同）
     H-->>C: 回覆

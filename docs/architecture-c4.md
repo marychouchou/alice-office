@@ -1,7 +1,8 @@
 # C4 架構圖 — Alice Office Router
 
-依 2026-08-28 的程式碼現況（channel adapter 重構、第一方 API channel、群組聊天
-addressed/observe 判斷、session-epoch 輪替皆已落地）繪製，
+依 2026-09-14 的程式碼現況（channel adapter 重構、第一方 API channel、群組聊天
+addressed/observe 判斷、session-epoch 輪替皆已落地；本次稽核補上遺漏的
+google-calendar MCP、LineAdapter 的 profiles 子模組）繪製，
 並依 [c4model.com](https://c4model.com) 的官方定義核對過（見文末「與官方定義的對照」）。
 三個層級：System Context → Container → Component；Code（class）層級暫不畫。
 
@@ -38,7 +39,7 @@ flowchart TB
   dev["<b>開發者 / 自家 client 使用者</b><br/>[Person]<br/><i>用 TUI、mobile app 或指令列工具<br/>直接與助理對話、除錯</i>"]:::person
   alice["<b>Alice Office</b><br/>[Software System]<br/><i>讓每個 LINE 聊天室擁有一個<br/>隔離的 AI 企業助理</i>"]:::system
   line["<b>LINE Platform</b><br/>[Software System：外部]<br/><i>台灣常用的通訊軟體平台</i>"]:::ext
-  google["<b>Google</b><br/>[Software System：外部]<br/><i>帳號授權與 Gmail / Drive 服務</i>"]:::ext
+  google["<b>Google</b><br/>[Software System：外部]<br/><i>帳號授權與 Calendar / Gmail / Drive 服務</i>"]:::ext
   llm["<b>LLM Provider</b><br/>[Software System：外部]<br/><i>大型語言模型推理服務</i>"]:::ext
 
   employee -- "用 LINE 傳訊息給自己的助理" --> line
@@ -72,7 +73,7 @@ flowchart TB
   employee["<b>企業使用者</b><br/>[Person]<br/><i>LINE 聊天室</i>"]:::person
   dev["<b>開發者 / 自家 client</b><br/>[Person]<br/><i>TUI / mobile / curl</i>"]:::person
   line["<b>LINE Platform</b><br/>[Software System：外部]<br/><i>Messaging API</i>"]:::ext
-  google["<b>Google</b><br/>[Software System：外部]<br/><i>OAuth 2.0 + Gmail / Drive API</i>"]:::ext
+  google["<b>Google</b><br/>[Software System：外部]<br/><i>OAuth 2.0 + Calendar / Gmail / Drive API</i>"]:::ext
   llm["<b>LLM Provider</b><br/>[Software System：外部]<br/><i>OpenAI 相容端點</i>"]:::ext
   docker["<b>Docker Engine</b><br/>[Software System：外部]<br/><i>同主機；hermes_global_net 網路</i>"]:::ext
 
@@ -93,7 +94,7 @@ flowchart TB
   router -- "write-once seed（config.yaml、mcp/、plugins/）<br/>tokens.json／observed.jsonl／session.json 讀寫（檔案系統）" --> roomdata
   hermes -- "HERMES_HOME 讀寫（bind mount）；<br/>每次開機自行補齊 sessions / skills / db" --> roomdata
   hermes -- "chat completions（HTTPS）" --> llm
-  hermes -- "Gmail / Drive MCP 以房間 token 呼叫（HTTPS）" --> google
+  hermes -- "Calendar / Gmail / Drive MCP 以房間 token 呼叫（HTTPS）" --> google
 ```
 
 責任分界（誰寫 `data/<room_key>/` 的哪部分）：
@@ -142,7 +143,7 @@ flowchart TB
   subgraph router["Alice Office Router（FastAPI process）"]
     main["<b>main</b><br/>[Component: FastAPI app]<br/><i>組裝：enabled_adapters 掛到 /webhooks/&lt;name&gt;<br/>（LINE 另掛舊 /webhook）＋ oauth_router</i>"]:::comp
     registry["<b>channels.enabled_adapters</b><br/>[Component: Python 函式]<br/><i>靜態 registry：LINE 恆啟用；<br/>API channel 依 API_CHANNEL_TOKEN 決定</i>"]:::comp
-    line_adapter["<b>channels.line — LineAdapter</b><br/>[Component: FastAPI router + linebot SDK]<br/><i>verify（HMAC 驗簽）｜events（wire format 解析＋<br/>媒體/貼圖/位置→佔位文字、群組 mention/呼叫詞→addressed）｜<br/>dedup（事件去重）｜client（Reply → Push fallback）｜<br/>format（長度/則數切分）</i>"]:::comp
+    line_adapter["<b>channels.line — LineAdapter</b><br/>[Component: FastAPI router + linebot SDK]<br/><i>verify（HMAC 驗簽）｜events（wire format 解析＋<br/>媒體/貼圖/位置→佔位文字、mention_is_self 判斷）｜<br/>profiles（群組成員顯示名稱查詢，15 分鐘 TTL cache）｜<br/>dedup（事件去重）｜client（Reply → Push fallback）｜<br/>format（長度/則數切分）；addressed＝mention∨呼叫詞，<br/>判斷邏輯在 adapter 本身（_is_addressed）</i>"]:::comp
     api_adapter["<b>channels.api — ApiChannelAdapter</b><br/>[Component: FastAPI router]<br/><i>Bearer 驗證；room_key 形狀白名單<br/>（line_* / api_*）；同步回傳原始 markdown</i>"]:::comp
     core["<b>core.process_inbound</b><br/>[Component: async Python 函式]<br/><i>channel-free：群組 unaddressed 短路 →<br/>reset 指令 → gate → 容器 → agent → list[str]<br/>不碰任何 channel 的送訊 API</i>"]:::comp
     group_ctx["<b>group_context</b><br/>[Component: Python 模組]<br/><i>observed buffer 讀寫／裁剪、組 tagged<br/>［名稱|ID］prompt、silence token 判斷（NO_REPLY 等）</i>"]:::comp
@@ -203,12 +204,13 @@ flowchart TB
 
   router["<b>Alice Office Router</b><br/>[Container: Python / FastAPI]"]:::container
   llm["<b>LLM Provider</b><br/>[Software System：外部]<br/><i>OpenAI 相容端點</i>"]:::ext
-  google["<b>Google</b><br/>[Software System：外部]<br/><i>Gmail / Drive API</i>"]:::ext
+  google["<b>Google</b><br/>[Software System：外部]<br/><i>Calendar / Gmail / Drive API</i>"]:::ext
   roomdata[("<b>data/&lt;room_key&gt;/ → /opt/data</b><br/>[Container: 檔案系統]<br/><i>HERMES_HOME</i>")]:::container
 
   subgraph hermes["hermes_&lt;room_key&gt;（Docker 容器 = 部署邊界）"]
     gateway["<b>hermes-agent gateway</b><br/>[Container: Python，上游框架，port 8642]<br/><i>session 管理、skills 的 manifest-based sync、<br/>每次開機補齊 HERMES_HOME；<br/>依 config.yaml 啟動 MCP 與 plugins</i>"]:::container
-    secretary["<b>secretary MCP</b><br/>[Container: Node ESM 行程]<br/><i>共用依賴烤在 /opt/node_modules；<br/>todo / attendance / expense / meeting /<br/>reminder / translate / maps / line</i>"]:::container
+    secretary["<b>secretary MCP</b><br/>[Container: Node ESM 行程]<br/><i>共用依賴烤在 /opt/node_modules；<br/>todo / attendance / expense / meeting /<br/>translate / maps（line、reminder 由<br/>config.yaml exclude 全數停用）</i>"]:::container
+    gcal["<b>google-calendar MCP</b><br/>[Container: Node 行程，官方套件<br/>@cocal/google-calendar-mcp，版本 pin 2.6.2<br/>（無本地原始碼，隨 /opt/node_modules 烤進 image）]<br/><i>以房間 OAuth token 呼叫 Google Calendar API</i>"]:::container
     gmail["<b>gmail MCP</b><br/>[Container: Python 行程]<br/><i>以房間 OAuth token 呼叫 Gmail API</i>"]:::container
     drive["<b>drive MCP</b><br/>[Container: Python 行程]<br/><i>與 gmail 為逐 byte 複本結構；呼叫 Drive API</i>"]:::container
     plugins["<b>local-tools plugin scripts</b><br/>[Container: Python 子行程，/opt/tools/.venv（TOOLS_PYTHON）]<br/><i>台灣法規、薪資引擎、OCR、工程計算、<br/>長期記憶、研究、瀏覽器自動化</i>"]:::container
@@ -217,9 +219,11 @@ flowchart TB
   router -- "POST /v1/chat/completions（HTTP）" --> gateway
   gateway -- "推理（HTTPS）" --> llm
   gateway -- "MCP tool call（stdio）" --> secretary
+  gateway -- "MCP tool call（stdio）" --> gcal
   gateway -- "MCP tool call（stdio）" --> gmail
   gateway -- "MCP tool call（stdio）" --> drive
   gateway -- "plugin command → script argv（子行程）" --> plugins
+  gcal -- "Calendar API（HTTPS）" --> google
   gmail -- "Gmail API（HTTPS）" --> google
   drive -- "Drive API（HTTPS）" --> google
   gateway -- "讀寫 sessions / skills / db（bind mount）" --> roomdata
