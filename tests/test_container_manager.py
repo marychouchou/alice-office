@@ -501,6 +501,51 @@ def test_wait_until_ready_raises_on_timeout() -> None:
         _wait_until_ready("http://hermes_room_AAA:8642", timeout=0.01)
 
 
+def test_container_removed_between_get_and_start_is_recreated() -> None:
+    """`docker rm` racing the restart must fall through to the create path.
+
+    The Phase 2 note tells operators to remove a room's container so the router
+    rebuilds it with labels; if that lands between containers.get() and
+    container.start(), the NotFound has to be handled here, not escape.
+    """
+    stale = _make_running_container()
+    stale.status = "exited"
+    stale.start.side_effect = docker.errors.NotFound("no such container")
+    fresh = _make_running_container()
+    mock_client = _make_mock_client(stale)
+    mock_client.containers.run.return_value = fresh
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready") as mock_wait,
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch("alice_office_router.container_manager._ensure_mcp_seed"),
+        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        url = get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
+
+    assert url == EXPECTED_URL_DOCKER
+    mock_client.containers.run.assert_called_once()
+    mock_wait.assert_called_once_with(EXPECTED_URL_DOCKER)
+
+
+def test_docker_api_error_from_start_is_logged_and_raised() -> None:
+    """A non-NotFound failure while restarting still propagates after logging."""
+    stopped = _make_running_container()
+    stopped.status = "exited"
+    stopped.start.side_effect = docker.errors.APIError("boom")
+    mock_client = _make_mock_client(stopped)
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        pytest.raises(docker.errors.APIError),
+    ):
+        get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
+
+    mock_client.containers.run.assert_not_called()
+
+
 def test_docker_api_error_is_raised() -> None:
     """When Docker API raises APIError, it should propagate after logging."""
     mock_client = MagicMock()

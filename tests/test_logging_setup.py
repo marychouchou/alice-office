@@ -7,11 +7,17 @@ from collections.abc import Iterator
 
 import pytest
 import structlog
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
+from starlette.applications import Starlette
+from starlette.background import BackgroundTask
+from starlette.requests import Request
+from starlette.responses import Response
+from starlette.routing import Route
+from starlette.types import Receive, Scope, Send
 from structlog.contextvars import bound_contextvars
 
 from alice_office_router.config import Settings
-from alice_office_router.logging_setup import configure_logging
+from alice_office_router.logging_setup import RequestContextMiddleware, configure_logging
 
 
 def _settings(**overrides: str) -> Settings:
@@ -172,3 +178,67 @@ async def test_each_request_gets_its_own_request_id(client: AsyncClient) -> None
 
     request_ids = {r["request_id"] for r in _records(stream) if r["event"] == "http_request"}
     assert len(request_ids) == 2
+
+
+async def _call(app: object, method: str, path: str) -> None:
+    """Drive one request through a middleware-wrapped ASGI app."""
+    transport = ASGITransport(app=app)  # type: ignore[arg-type]
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        await ac.request(method, path)
+
+
+async def test_access_line_is_emitted_before_background_tasks_run() -> None:
+    """A LINE webhook answers 200 and *then* runs a 90s agent turn in a BackgroundTask.
+
+    The access line must describe the 200 the caller waited for, so it has to be
+    out before that task starts — not after it in a `finally`.
+    """
+    stream = _capture(_settings())
+
+    def agent_turn() -> None:
+        logging.getLogger("alice_office_router.demo").info("background_turn")
+
+    async def endpoint(request: Request) -> Response:
+        return Response("ok", background=BackgroundTask(agent_turn))
+
+    app = RequestContextMiddleware(
+        Starlette(routes=[Route("/webhooks/fake", endpoint, methods=["POST"])])
+    )
+
+    await _call(app, "POST", "/webhooks/fake")
+
+    assert [r["event"] for r in _records(stream)] == ["http_request", "background_turn"]
+
+
+async def test_access_line_reports_the_response_status_once() -> None:
+    """The send-wrapper path still reports the real status, exactly one line per request."""
+    stream = _capture(_settings())
+
+    async def endpoint(request: Request) -> Response:
+        return Response("nope", status_code=418)
+
+    app = RequestContextMiddleware(Starlette(routes=[Route("/teapot", endpoint)]))
+
+    await _call(app, "GET", "/teapot")
+
+    access = [r for r in _records(stream) if r["event"] == "http_request"]
+    assert len(access) == 1
+    assert access[0]["status"] == 418
+
+
+async def test_access_line_reports_5xx_when_the_app_raises() -> None:
+    """No response ever starts, so the `finally` fallback logs the 500 the caller sees."""
+    stream = _capture(_settings())
+
+    async def broken(scope: Scope, receive: Receive, send: Send) -> None:
+        raise RuntimeError("boom")
+
+    app = RequestContextMiddleware(broken)
+
+    with pytest.raises(RuntimeError):
+        await _call(app, "GET", "/boom")
+
+    access = [r for r in _records(stream) if r["event"] == "http_request"]
+    assert len(access) == 1
+    assert access[0]["status"] == 500
+    assert access[0]["path"] == "/boom"

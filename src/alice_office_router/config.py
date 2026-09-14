@@ -3,13 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Container-only defaults for DATA_DIR/HERMES_TEMPLATES_DIR (see their field
 # docs below). Host-mode dev must override both — see _validate_host_mode_paths.
 _DOCKER_DEFAULT_DATA_DIR = Path("/app/data")
 _DOCKER_DEFAULT_HERMES_TEMPLATES_DIR = Path("/app/hermes-templates")
+
+# The stdlib logging level names, which is exactly what dictConfig accepts.
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Settings(BaseSettings):
@@ -91,10 +94,13 @@ class Settings(BaseSettings):
     # leaves that headroom.
     SESSION_ROTATE_PROMPT_TOKENS: int = 120000
     # Minimum level every logger in the router process emits (see
-    # logging_setup.configure_logging). Standard logging names: DEBUG, INFO,
-    # WARNING, ERROR, CRITICAL. Noisy third-party loggers (docker, httpx, ...)
-    # stay pinned at WARNING regardless, so DEBUG stays readable.
-    LOG_LEVEL: str = "INFO"
+    # logging_setup.configure_logging). Noisy third-party loggers (docker,
+    # httpx, ...) stay pinned at WARNING regardless, so DEBUG stays readable.
+    # Typed as a Literal so a typo fails at startup with a pydantic error
+    # naming the field and the five valid values — rather than reaching
+    # dictConfig, which raises a ValueError about an "unknown level" from deep
+    # inside logging.config with no mention of which setting caused it.
+    LOG_LEVEL: LogLevel = "INFO"
     # Rendering of those log lines: "json" (default — one JSON object per
     # line, what a collector reads) or "console" (colored, human-readable;
     # for host-mode dev in a terminal).
@@ -106,6 +112,20 @@ class Settings(BaseSettings):
     # False for a deployment contractually barred from keeping any per-turn
     # record; the same line still goes to stdout for the log collector.
     CONVERSATION_LOG_ENABLED: bool = True
+
+    @field_validator("LOG_LEVEL", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, value: object) -> object:
+        """Accept `LOG_LEVEL=debug` as well as the canonical upper-case name.
+
+        Args:
+            value: The raw environment value, before the Literal is checked.
+
+        Returns:
+            The string upper-cased; anything that is not a string is passed
+            through untouched, so pydantic reports the type error itself.
+        """
+        return value.upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:

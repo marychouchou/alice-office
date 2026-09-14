@@ -366,15 +366,23 @@ dashboard，無法跨房間看）；Grafana 掛 SQLite datasource（N 個 db 檔
 
 **router 仍要記的「turn envelope」**：Hermes 只看到有進到 agent 的那些訊息，以下只有
 router 知道，仍用 §5.7 原本的機制（一個發出點、Loki＋`data/_conversations/<room_id>.jsonl`）
-記錄，但**不含回覆文字**：
+記錄，但**不含回覆文字**。
+
+**兩個 sink 帶的欄位不一樣**（2026-09-14 code review 後改）：標記為 **JSONL only** 的三個
+欄位只寫進 `data/_conversations/<room_id>.jsonl`，**永遠不進 log stream**。理由是這兩條
+路徑的隱私性質不同：JSONL 留在本機、受 `CONVERSATION_LOG_ENABLED` 控制；log stream 會被
+collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒有對應的開關。這三個欄位正好
+是 envelope 裡唯一的訊息內文與唯一的個人識別資訊。實作在 `conversation_log._JSONL_ONLY_FIELDS`，
+`record_turn` 發 log 前把它們濾掉。
 
 | 欄位 | 說明 |
 |---|---|
 | `schema_version`, `ts`, `request_id`, `event_id`, `channel`, `room_key` | 同前 |
 | `session_id` | 這一輪送給 Hermes 的 session id（含 epoch）——**對回 `state.db.sessions.id` 的 join key** |
 | `outcome` | `replied` / `observed` / `reset` / `blocked` / `agent_failed` / `silence`；後五種在 `state.db` 裡**沒有對應紀錄**，這是 envelope 存在的主因 |
-| `inbound_text` | 只在 `outcome != replied` 時填（進了 agent 的文字 `state.db` 已有；沒進的只有這裡有） |
-| `is_group`, `addressed`, `sender_id`, `sender_name` | 群組脈絡，Hermes 只看到合併後的 prompt |
+| `inbound_text` | **JSONL only**。只在 `outcome != replied` 時填（進了 agent 的文字 `state.db` 已有；沒進的只有這裡有） |
+| `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
+| `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
 | `gate_status`, `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
 | `delivered` | adapter 送回 LINE 是否成功——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
 
@@ -418,7 +426,11 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
 ## 6. 安全與隱私
 
 - **對話內容只存在 Hermes 的 `state.db`**（§5.7），router 不複製；envelope 只在訊息沒進
-  agent 時才含文字。`state.db` 還含 `system_prompt`、`reasoning`、工具回傳（例如 Drive
+  agent 時才含文字，而且那段文字與發言者身分（`inbound_text`／`sender_id`／`sender_name`）
+  **只寫本機的 JSONL、不進 log stream**（§5.7 的 JSONL only）。這條是硬邊界：log stream
+  沒有 opt-out，一旦寫進去就等於送進 Loki 並被任何 operator 查得到，所以新增 envelope
+  欄位時要先問「這個欄位可以被 collector 帶走嗎」，不行就加進
+  `conversation_log._JSONL_ONLY_FIELDS`。`state.db` 還含 `system_prompt`、`reasoning`、工具回傳（例如 Drive
   檔案清單），所以匯出給 Claude Code 時預設**不帶**工具與 reasoning，`sender_id` 預設
   hash（§5.8）。**保留期**、**誰能讀 `data/`**、匯出檔放哪裡，要寫進客戶部署說明。
   客戶合約若禁止保留對話，用 Hermes 自己的 `hermes sessions prune` 與 `config.yaml`
@@ -468,6 +480,35 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
 - [x] 驗收：`LOG_FORMAT=console` 本機可讀、`LOG_FORMAT=json` 每行可被 `json.loads`
       解析（本機用 TestClient 打一個 404 實測）。容器模式的
       `docker compose logs webhook_router | jq .` 待下次部署時順手確認。
+
+### Phase 1／1b 的 review 修正 — [x]（2026-09-14）
+
+Phase 1／1b 上線後的 code review 找到三個行為錯誤，都已修掉並補上回歸測試：
+
+- **envelope 的文字進了 log stream**：`record_turn` 原本把整個 envelope 展開給
+  `alice.conversation` logger，`CONVERSATION_LOG_ENABLED` 只管得到 JSONL 那一半，所以
+  關掉檔案 sink 的部署反而以為自己沒留紀錄，實際上 `inbound_text`／`sender_id`／
+  `sender_name` 照樣被 collector 收走。改成 `_JSONL_ONLY_FIELDS` 白名單過濾（§5.7、§6）。
+- **access log 記得太晚**：`http_request` 原本在 `finally` 裡發，而 Starlette 的
+  BackgroundTasks 是在 `await self.app(...)` 內、回應送出後才跑的——LINE webhook 那個
+  90 秒的 agent turn 因此整段擋在 access log 前面，log 順序變成「背景任務的每一行、
+  然後才是它們所屬請求的 200」，`duration_ms` 也量成了 agent 的時間而不是 caller 等到的
+  時間。改成在 `send` wrapper 看到 `http.response.body`（`more_body` 為假）時就發，
+  `finally` 只留給「app 丟例外、沒有任何回應」的情況當 fallback。
+- **envelope ↔ 訊息接錯輪**：envelope 是這一輪**結束**時蓋章的，所以取「時間上最接近」
+  會把下一輪的 user 訊息貼上上一輪的 envelope（一個 30 秒的 turn，它的 envelope 離自己
+  的 user 訊息 30 秒、離下一則只有幾秒）。`EnvelopeIndex.nearest` 改成只往後找：取
+  `ts >= 訊息時間` 之中最早、且仍在容忍範圍內的那一筆。
+
+同一輪 review 的其他修正：`_DEDUPE` 加上 content 前綴與 `tool_call_id`（原本會把同一
+tick 回來的兩個 tool result、或同一秒的兩則 user 訊息當成重複的同一列合併掉；實測這個
+部署的 `state.db` 發現 `compacted`／`active` 在同一組重複列內就會不同，不能當判別欄位）；
+`show`／`export` 把「沒碰到 Hermes 的 `agent_failed`」也從 envelope 補印（否則容器起不來
+的房間逐字稿是空的，正好把最該看的東西藏起來）；CLI 的跨房間迴圈遇到讀不動的 `state.db`
+改成 warn 後跳過該房間而不是整份中斷；`LOG_LEVEL` 改成 `Literal` 型別（打錯會在
+`Settings` 就失敗，而不是掉進 `dictConfig` 的 traceback）；`container_manager` 的
+`container.start()`／`reload()` 放回 `try` 內（Phase 1 拆函式時搬了出去，導致 get 與
+start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路徑）。
 
 ### Phase 1b：turn envelope 與對話 CLI — [x]（2026-09-14 實作）
 
@@ -587,7 +628,8 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
 | Hermes 檔案 log 的輪替行為 | 不確定 gateway 是否自行輪替 `agent.log`；若不輪替，30 天保留只管 Loki 這份，原檔仍會長大 | Phase 3 實測：本機唯一房間跑了一天的 `agent.log` 是 60 KB，其餘五個檔案都 ≤ 4 KB，量級上短期不急；仍未觀察到 gateway 自行輪替。真的變大時在 host 加 `logrotate`（copytruncate），Alloy tail 對 copytruncate 相容 |
 | structlog 與 `line-bot-sdk`／`docker` SDK 的 logger 噪音 | 統一導進 JSON 後，第三方 DEBUG log 可能很吵 | `dictConfig` 對 `docker`、`urllib3`、`httpx` 設 `WARNING` |
 | 既有房間容器沒 label | 見 Phase 2 | 文件化重建步驟；不做自動遷移。（本機這顆房間容器是 Phase 2 之後重建的，已帶 label，pipeline 1 因此實測有收到它的 stdout） |
-| `HOST_DATA_DIR` 與 Alloy 掛載路徑不一致 | compose 裡是 `${PWD}/data`，operator 若改路徑要同步兩處 | 已處理：Alloy 掛載寫成 `${HOST_DATA_DIR:-${PWD}/data}`，跟 router 吃同一個變數；`docs/env-data-paths.md` 專節說明症狀（只有 `source="file"` 查不到）與驗證指令 |
+| `HOST_DATA_DIR` 與 Alloy 掛載路徑不一致 | compose 裡是 `${PWD}/data`，operator 若改路徑要同步兩處 | 已處理：Alloy 掛載寫成 `${HOST_DATA_DIR:-${PWD}/data}`，跟 router 吃同一個變數；`docs/env-data-paths.md` 專節說明症狀（只有 `source="file"` 查不到）與驗證指令。2026-09-14 補實測：這個巢狀預設值在 **Docker Compose v5.1.3** 展開正確（沒設／設成空字串都會退回 `<repo>/data`，有設就用該值），不需要改成 `${HOST_DATA_DIR:?...}`；巢狀展開沒寫進 Compose 規格文件，換收集器或大幅降版時值得重測 |
+| envelope 檔案的併發寫入 | `record_turn` 用一次 `open(..., "a")` ＋ 一次 `write()` 追加一行 | 目前部署是單一 uvicorn worker，O_APPEND 下這樣是安全的；若 worker 數量增加（或出現第二個寫這些檔案的行程），Python 可能把長的一行拆成兩次 `write()`，兩個行程就會交錯出壞行——屆時這個 sink 要改成加鎖或每個 worker 一個檔案。已寫進 `conversation_log.py` 的註解 |
 | Loki 磁碟用量 | 數十房間、30 天，估計數百 MB 到數 GB | Phase 3 量過：單一房間約 530 行、再加三個 infra 容器的 stdout，`/loki` 共 704 KB。維持原估計 |
 | 堆疊的 RAM 成本 | §3 表格原本估「約 2–4 GB RAM」 | 實測遠低於此：`docker stats --no-stream` 顯示 Alloy 65–69 MB、Loki 107–157 MB、Grafana 310–353 MB，**合計約 480–580 MB**。原估計是照 Loki 官方對「有查詢負載的生產叢集」的建議抄的，對單機、單 operator、偶爾查一次的用法過度保守——`docs/troubleshooting.md` §4 用實測值 |
 | Loki 的 ring 在筆電休眠後會短暫不健康 | 本機實測出現過 `at least 1 healthy replica required`（compactor／scheduler），因為 `kvstore: inmemory` 的心跳被主機睡眠打斷 | 會自己恢復，正式部署（不休眠的主機）不會遇到；若在筆電上長開，休眠期間推進去的行有機會查不到，重啟 Loki 即可 |

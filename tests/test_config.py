@@ -81,3 +81,25 @@ def test_room_group_state_dir_path() -> None:
     settings = Settings(**_REQUIRED, DATA_DIR=Path("/data"))  # type: ignore[arg-type]
 
     assert settings.room_group_state_dir("line_C1") == Path("/data/line_C1/group_state")
+
+
+def test_log_level_rejects_garbage_with_a_pydantic_error() -> None:
+    """A typo'd LOG_LEVEL must fail at Settings construction, naming the field.
+
+    Before this was a Literal, the bad value travelled all the way into
+    logging.config.dictConfig and surfaced as a traceback about an unknown
+    level, with nothing pointing at the setting that caused it.
+    """
+    with pytest.raises(ValidationError) as error_info:
+        Settings(**_REQUIRED, LOG_LEVEL="VERBOSE")  # type: ignore[arg-type]
+
+    message = str(error_info.value)
+    assert "LOG_LEVEL" in message
+    assert "DEBUG" in message and "CRITICAL" in message
+
+
+def test_log_level_accepts_lower_case() -> None:
+    """`LOG_LEVEL=debug` in a shell is the same setting as DEBUG."""
+    settings = Settings(**_REQUIRED, LOG_LEVEL="debug")  # type: ignore[arg-type]
+
+    assert settings.LOG_LEVEL == "DEBUG"

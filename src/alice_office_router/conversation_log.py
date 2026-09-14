@@ -11,11 +11,22 @@ received. One `TurnEnvelope` per inbound message records exactly that, and
 `session_id` joins it back onto `state.db.sessions.id` for the turns that did
 reach the agent.
 
-Two sinks, one call site. `record_turn` (a) emits the envelope through the
+Two sinks, one call site, and **they do not carry the same fields**.
+`record_turn` (a) emits the envelope's *metadata* through the
 `alice.conversation` stdlib/structlog logger as the `conversation_turn` event,
 so it rides the normal stdout → collector path configured in `logging_setup`,
-and (b) appends the same object as one JSON line to
+and (b) appends the *whole* object as one JSON line to
 `DATA_DIR/_conversations/<room_key>.jsonl`.
+
+The difference is `_JSONL_ONLY_FIELDS`: `inbound_text`, `sender_id` and
+`sender_name` never reach the log stream. Those three are the only message
+content and the only personal identifiers an envelope holds, and the stream
+leaves the room's own boundary — stdout is shipped by a collector into Loki,
+where it is retained for 30 days and queryable by any operator, with no
+`CONVERSATION_LOG_ENABLED` switch to turn it off (docs/logging-design.md §6).
+The JSONL file is the deployment's own record, stays on the host, and *is*
+gated by that flag, so it keeps them. Everything else — outcome, gate verdict,
+timings, ids — is metadata and goes to both.
 
 The file write is a direct `open(..., "a")` rather than a logging FileHandler.
 A handler would have to be either one per room (unbounded open file handles,
@@ -50,6 +61,12 @@ _envelope_logger = structlog.stdlib.get_logger("alice.conversation")
 # The structured event name every envelope line carries (docs/logging-design.md §5.4).
 TURN_EVENT = "conversation_turn"
 
+# Fields the JSONL file keeps and the log stream must never carry: the message
+# text plus the group speaker's identity (see the module docstring for why the
+# two sinks differ). Kept as data rather than a hand-written kwargs list so a
+# new privacy-relevant field is one entry here, not an edit to a call site.
+_JSONL_ONLY_FIELDS = frozenset({"inbound_text", "sender_id", "sender_name"})
+
 # How this file's lines are shaped. Bump only when a field changes meaning or
 # disappears; adding an optional field does not need a bump, since readers
 # parse with a model that defaults missing fields.
@@ -71,6 +88,9 @@ def _now_iso() -> str:
 class TurnEnvelope(BaseModel):
     """One inbound message's router-side record (no reply text — see module doc).
 
+    Three attributes below are marked "JSONL only": they are written to the
+    room's envelope file but stripped from the log stream (`_JSONL_ONLY_FIELDS`).
+
     Attributes:
         schema_version: Format version of this record (SCHEMA_VERSION).
         ts: ISO-8601 UTC timestamp of when the turn finished routing.
@@ -84,12 +104,15 @@ class TurnEnvelope(BaseModel):
         outcome: How the turn ended. Only "replied" has a full `state.db`
             counterpart; the other five exist nowhere else, which is the whole
             reason this record exists.
-        inbound_text: The user's text — recorded ONLY when outcome != "replied",
-            because a replied turn's text is already in `state.db`.
+        inbound_text: JSONL only (never logged). The user's text — recorded ONLY
+            when outcome != "replied", because a replied turn's text is already
+            in `state.db`.
         is_group: Whether the room holds multiple people.
         addressed: Whether the message was directed at the bot.
-        sender_id: The group speaker's native id, if the channel resolved one.
-        sender_name: The group speaker's display name, if resolved.
+        sender_id: JSONL only (never logged). The group speaker's native id, if
+            the channel resolved one.
+        sender_name: JSONL only (never logged). The group speaker's display
+            name, if resolved.
         gate_status: The Google OAuth gate's verdict ("ok"/"notice"/"blocked"),
             or None when the gate was short-circuited (observe, reset).
         rotated: Whether this turn rotated the room to a fresh session epoch.
@@ -127,19 +150,25 @@ class TurnEnvelope(BaseModel):
 
 
 def record_turn(envelope: TurnEnvelope, config: Settings) -> None:
-    """Emit one turn envelope to the log stream and (if enabled) to its JSONL file.
+    """Emit a turn's metadata to the log stream and the whole envelope to its file.
 
-    The log line always goes out; the file append is skipped when
-    CONVERSATION_LOG_ENABLED is False. A file error is logged and swallowed —
-    a bookkeeping record must never break the turn that produced it (the reply
-    has already been delivered by the time this runs).
+    The log line always goes out, minus `_JSONL_ONLY_FIELDS` — the stream is
+    shipped off the host and has no disable switch, so message text and speaker
+    identity must not be in it. The file append carries every field and is
+    skipped when CONVERSATION_LOG_ENABLED is False. A file error is logged and
+    swallowed — a bookkeeping record must never break the turn that produced it
+    (the reply has already been delivered by the time this runs).
 
     Args:
         envelope: The completed envelope, `delivered` already filled by the
             adapter.
         config: Application settings (the enable flag and the file path).
     """
-    fields = envelope.model_dump()
+    fields = {
+        name: value
+        for name, value in envelope.model_dump().items()
+        if name not in _JSONL_ONLY_FIELDS
+    }
     # `ts` is re-stamped by logging_setup's TimeStamper on the way out, to the
     # emit time — microseconds later, and consistent with every other log line.
     _envelope_logger.info(TURN_EVENT, **fields)
@@ -150,6 +179,13 @@ def record_turn(envelope: TurnEnvelope, config: Settings) -> None:
     path = config.room_conversation_log(envelope.room_key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        # One open-append-close per turn, and one `write()` of one line. That is
+        # atomic enough for the current deployment only because it runs a SINGLE
+        # uvicorn worker: O_APPEND makes concurrent writers interleave safely at
+        # the syscall level, but Python may still split a long line across two
+        # write() calls, and two processes would then interleave halves. If the
+        # deployment ever grows to multiple workers (or a second process writing
+        # these files), this sink needs a lock or one file per worker.
         with path.open("a", encoding="utf-8") as handle:
             handle.write(f"{envelope.model_dump_json()}\n")
     except OSError as exc:

@@ -77,7 +77,9 @@ def configure_logging(config: Settings) -> None:
         config: Application settings; LOG_LEVEL sets the level of this app's
             and uvicorn's loggers, LOG_FORMAT picks the renderer.
     """
-    level = config.LOG_LEVEL.upper()
+    # Settings already validated this against the stdlib level names (and
+    # upper-cased it), so dictConfig can never see an unknown level here.
+    level = config.LOG_LEVEL
     # Runs for records that did NOT come from structlog (stdlib loggers, and
     # uvicorn's), giving them the same fields a structlog event dict carries.
     foreign_pre_chain: list[Processor] = [
@@ -138,9 +140,17 @@ class RequestContextMiddleware:
 
     Pure ASGI rather than BaseHTTPMiddleware so the request context is bound in
     the same task that later runs FastAPI's background tasks, and so nothing
-    buffers the response body. The access line's `duration_ms` measures up to
-    the response start — not through the background agent turn a LINE webhook
-    schedules after answering 200, which would otherwise dominate it.
+    buffers the response body.
+
+    The line is emitted from the `send` wrapper, the moment the response body
+    is complete — deliberately NOT from a `finally` around `self.app(...)`.
+    Starlette runs a response's BackgroundTasks after the response is sent but
+    still inside that call, so a LINE webhook's 90-second agent turn would land
+    between the request and its own access line: the line would arrive last,
+    and its `duration_ms` would measure the agent turn rather than the 200 the
+    caller actually waited for. The `finally` block is kept only as the
+    fallback for a request that never produced a response at all (the app
+    raised), so every request still logs exactly one line.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -168,28 +178,36 @@ class RequestContextMiddleware:
         structlog.contextvars.bind_contextvars(request_id=uuid4().hex)
         started = time.perf_counter()
         status = 500
-        elapsed_ms: float | None = None
+        logged = False
 
-        async def send_wrapper(message: Message) -> None:
-            nonlocal status, elapsed_ms
-            if message["type"] == "http.response.start":
-                status = int(message["status"])
-                elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-            await send(message)
-
-        try:
-            await self.app(scope, receive, send_wrapper)
-        finally:
-            # elapsed_ms is unset only when no response ever started (the app
-            # raised); the fallback keeps every request to exactly one line.
+        def emit_access_line() -> None:
+            """Log this request's one access line; later calls are no-ops."""
+            nonlocal logged
+            if logged:
+                return
+            logged = True
             _access_logger.info(
                 "http_request",
                 method=str(scope.get("method", "")),
                 path=str(scope.get("path", "")),
                 status=status,
-                duration_ms=(
-                    elapsed_ms
-                    if elapsed_ms is not None
-                    else round((time.perf_counter() - started) * 1000, 2)
-                ),
+                duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = int(message["status"])
+            await send(message)
+            # The final body chunk means the client has the whole response;
+            # anything after this (BackgroundTasks) is no longer this request's
+            # latency, so the line goes out here rather than in the `finally`.
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                emit_access_line()
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            # Only reached without a line when no response completed — the app
+            # raised, and `status` is still the 500 the caller will see.
+            emit_access_line()

@@ -183,6 +183,50 @@ def test_log_event_carries_the_envelope_fields(tmp_path: Path) -> None:
     assert entry["agent_duration_ms"] == 42.0
 
 
+def test_log_event_never_carries_message_text_or_speaker_identity(tmp_path: Path) -> None:
+    """The collector stream is metadata only — text and sender stay in the JSONL file."""
+    settings = _settings(tmp_path)
+    envelope = _envelope(
+        "blocked",
+        inbound_text="我的身分證字號是 A123456789",
+        is_group=True,
+        sender_id="U1234567890",
+        sender_name="王小明",
+        gate_status="blocked",
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        record_turn(envelope, settings)
+
+    entry = captured[0]
+    assert "inbound_text" not in entry
+    assert "sender_id" not in entry
+    assert "sender_name" not in entry
+    assert "A123456789" not in json.dumps(entry, ensure_ascii=False)
+    # Metadata still rides the stream, so the turn is still queryable in Loki.
+    assert entry["outcome"] == "blocked"
+    assert entry["gate_status"] == "blocked"
+    assert entry["is_group"] is True
+    # ...and the file the flag gates keeps the full record.
+    written = json.loads(
+        settings.room_conversation_log("line_room_AAA").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert written["inbound_text"] == "我的身分證字號是 A123456789"
+    assert written["sender_id"] == "U1234567890"
+    assert written["sender_name"] == "王小明"
+
+
+def test_disabled_flag_keeps_text_out_of_both_sinks(tmp_path: Path) -> None:
+    """With the file sink off, nothing anywhere retains the message text."""
+    settings = _settings(tmp_path, CONVERSATION_LOG_ENABLED=False)
+
+    with structlog.testing.capture_logs() as captured:
+        record_turn(_envelope("blocked", inbound_text="秘密", sender_id="U1"), settings)
+
+    assert "秘密" not in json.dumps(captured[0], ensure_ascii=False)
+    assert not settings.conversations_dir.exists()
+
+
 # ---------------------------------------------------------------------------
 # Model rules
 # ---------------------------------------------------------------------------

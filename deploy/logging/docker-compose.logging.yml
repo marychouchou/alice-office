@@ -31,6 +31,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # 每個房間的檔案 log（agent.log / errors.log / ...）。HOST_DATA_DIR 必須跟
       # router 用的那個是同一個目錄，否則這裡會掛到空的資料夾——見 docs/env-data-paths.md。
+      #
+      # 這裡的巢狀預設值（`${VAR:-${PWD}/data}`）在 Docker Compose v5.1.3 實測過
+      # （2026-09-14，`docker compose ... config | grep -A2 rooms` 三種情況）：
+      # HOST_DATA_DIR 沒設（連 .env 都沒有，`--env-file /dev/null`）時展開成
+      # `<repo>/data`、設成空字串時同樣走預設、設成 `/tmp/xyzdata` 時用該值。
+      # 要換收集器或大幅降版 Compose 時值得重測一次，因為巢狀展開沒有寫進
+      # Compose 的規格文件裡。
       - ${HOST_DATA_DIR:-${PWD}/data}:/rooms:ro
       - ./deploy/logging/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - alloy-data:/var/lib/alloy/data

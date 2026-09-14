@@ -643,22 +643,27 @@ def _resolve_container(
     Raises:
         docker.errors.APIError: If a Docker API call fails.
     """
+    # start()/reload() belong INSIDE this try, not after it: a container that
+    # was removed between the get and the start (an operator running
+    # `docker rm`, exactly what the Phase 2 relabelling note tells them to do)
+    # makes start() raise NotFound, which must fall through to the create path
+    # instead of escaping as an unhandled error. The same goes for any other
+    # APIError from those two calls — it gets logged with the container name
+    # before it propagates, like every other Docker failure here.
     try:
         container = client.containers.get(container_name)
+        if container.status != "running":
+            logger.info(f"Container {container_name} is stopped; restarting.")
+            container.start()
+            container.reload()
+            return container, True
+        logger.debug(f"Container {container_name} already running.")
+        return container, False
     except docker.errors.NotFound:
         return _create_container(client, container_name, room_id, config), True
     except docker.errors.APIError as exc:
         logger.error(f"Docker API error for container {container_name}: {exc}")
         raise
-
-    if container.status == "running":
-        logger.debug(f"Container {container_name} already running.")
-        return container, False
-
-    logger.info(f"Container {container_name} is stopped; restarting.")
-    container.start()
-    container.reload()
-    return container, True
 
 
 def get_or_create_container(room_id: str, config: Settings) -> str:
