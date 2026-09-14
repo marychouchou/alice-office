@@ -10,7 +10,8 @@
 // Pipeline 1：所有帶 alice.role label 的容器 stdout
 //   alice.role=router → service="router"（router 自己的 JSON log）
 //   alice.role=agent  → service="agent" ＋ room_id（每房間的 hermes 容器）
-//   alice.role=infra  → service="infra"（這個堆疊自己的三個容器）
+//   alice.role=infra  → service="infra"（loki / grafana；Alloy 自己刻意沒有
+//                      這個 label，見 docker-compose.logging.yml 的說明）
 // 新房間的容器一冒出來就會被 refresh_interval 掃到，不用重啟 Alloy。
 // ---------------------------------------------------------------------------
 
@@ -112,6 +113,17 @@ local.file_match "room_logs" {
 
 discovery.relabel "room_logs" {
 	targets = local.file_match.room_logs.targets
+
+	// 白名單：只收 Hermes 自己會寫的那幾個檔名。房間的 agent 對自己的
+	// /opt/data 有寫入權，所以 `logs/<任意名字>.log` 是它能控制的——沒有這條
+	// 規則，一個房間就能靠亂建檔案把 `file` 這個 label 的基數灌爆，撞到
+	// Loki 的 max_streams_per_user，害所有房間一起開始掉行（§5.4）。
+	// 新增 Hermes 版本帶來的新 log 檔名時，要同時加到這個 regex。
+	rule {
+		source_labels = ["__path__"]
+		regex         = "/rooms/[^/]+/logs/(agent|errors|gateway|gateway-exit-diag|gateway-shutdown-diag|container-boot|mcp-stderr|gui|desktop)\\.log"
+		action        = "keep"
+	}
 
 	rule {
 		source_labels = ["__path__"]

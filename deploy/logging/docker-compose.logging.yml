@@ -6,10 +6,12 @@
 #     -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d
 # 或 ./scripts/deploy_host.sh --with-logging
 #
-# 三個服務都掛在 router 已經在用的 external network hermes_global_net 上，
-# 因為 Alloy 要 push 給 Loki、Grafana 要查 Loki，都走容器名稱解析。
-# 它們自己也帶 alice.role label（=infra），所以 Alloy 的 pipeline 1 會連
-# 堆疊自身的 stdout 一起收——堆疊壞掉時查得到原因（docs/logging-design.md §5.3）。
+# 三個服務只掛在自己的 logging_net 上，**刻意不接 hermes_global_net**：
+# 每個房間的 agent 容器都在 hermes_global_net 上，而 Loki 沒有 auth
+# （auth_enabled: false），同網段就等於任何一個房間的 agent 都能 curl 到
+# Loki、讀到所有房間的 log、灌假的行進去。Alloy 不需要那個網段——它是用
+# docker.sock 的 Docker API 讀容器 stdout，用 ro mount 讀檔案 log，兩條路
+# 都不經過容器網路（docs/logging-design.md §6）。
 services:
   alloy:
     # Alloy 是 Promtail 的官方繼任者（Promtail 2026-03 EOL）。pin 到明確版本，
@@ -21,13 +23,15 @@ services:
       # positions / WAL 都寫在這裡；沒有這個 named volume，重啟會把每個房間的
       # logs/*.log 從頭重讀一次（重複行）。
       - --storage.path=/var/lib/alloy/data
-      # Alloy 自己的 UI（元件圖、每個 target 的狀態）。只綁容器內，沒對 host
-      # 開 port；要看就 docker exec 進去 curl，或臨時 docker run 一個 port-forward。
-      - --server.http.listen-addr=0.0.0.0:12345
+      # Alloy 自己的 UI（元件圖、每個 target 的狀態）綁在容器內的 loopback：
+      # 沒對 host 開 port，也不對 logging_net 上的鄰居開。要看就
+      # `docker exec alloy wget -qO- http://127.0.0.1:12345/`。
+      - --server.http.listen-addr=127.0.0.1:12345
       - /etc/alloy/config.alloy
     volumes:
       # 唯讀的 docker.sock：discovery.docker 用它列容器、loki.source.docker 用它
-      # 讀 stdout。router 本來就掛了一份 rw 的，所以這不是新的信任邊界（§6）。
+      # 讀 stdout。即使唯讀，能讀 docker.sock 就等於能讀主機上每個容器的
+      # 環境變數與 log——這是一個真實的信任邊界（§6）。
       - /var/run/docker.sock:/var/run/docker.sock:ro
       # 每個房間的檔案 log（agent.log / errors.log / ...）。HOST_DATA_DIR 必須跟
       # router 用的那個是同一個目錄，否則這裡會掛到空的資料夾——見 docs/env-data-paths.md。
@@ -42,10 +46,12 @@ services:
       - ./deploy/logging/alloy/config.alloy:/etc/alloy/config.alloy:ro
       - alloy-data:/var/lib/alloy/data
     networks:
-      - hermes_global_net
+      - logging_net
     restart: unless-stopped
-    labels:
-      alice.role: infra
+    # 刻意沒有 alice.role label：Alloy 自己不能是自己的採集對象。Loki 掛掉時
+    # Alloy 每次 push 失敗都會寫一行 error 到 stdout，如果它也被 pipeline 1
+    # 收走，這些行會排隊等著 push 給那個掛掉的 Loki——故障時自我放大。
+    # loki / grafana 留著 label（它們的 stdout 才是查「堆疊為什麼壞了」的來源）。
     logging:
       driver: json-file
       options:
@@ -60,9 +66,9 @@ services:
       - ./deploy/logging/loki/config.yaml:/etc/loki/config.yaml:ro
       - loki-data:/loki
     # 刻意沒有 ports：Loki 沒有 auth（auth_enabled: false），只能被同一個
-    # network 內的 Alloy 與 Grafana 存取（§6）。
+    # logging_net 內的 Alloy 與 Grafana 存取（§6）。
     networks:
-      - hermes_global_net
+      - logging_net
     restart: unless-stopped
     labels:
       alice.role: infra
@@ -84,12 +90,13 @@ services:
     ports:
       # 只綁 127.0.0.1：operator 從自己的機器用 SSH tunnel 連進來
       #   ssh -N -L 3000:127.0.0.1:3000 <user>@<host>
+      # 這個 publish 就是 logging_net 不能設 internal: true 的原因。
       - "127.0.0.1:3000:3000"
     volumes:
       - ./deploy/logging/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
     networks:
-      - hermes_global_net
+      - logging_net
     restart: unless-stopped
     depends_on:
       - loki
@@ -102,9 +109,10 @@ services:
         max-file: "3"
 
 networks:
-  hermes_global_net:
-    name: hermes_global_net
-    external: true
+  # 這個堆疊專用的 bridge，由 compose 建立（實際名稱是 <project>_logging_net）。
+  # 不能設 internal: true，因為 Grafana 要 publish 127.0.0.1:3000。
+  logging_net:
+    driver: bridge
 
 volumes:
   alloy-data:

@@ -369,7 +369,7 @@ image 重建（`data/<room_id>/` 不動）。有 1 沒 2 → `docker restart` �
 | 確認容器的 label 與 log 上限有生效 | `docker inspect hermes_<room_id> \| jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'` |
 | 啟用集中式 log（Alloy+Loki+Grafana，選配） | `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d` |
 | 關掉集中式 log（router 不受影響） | `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml stop alloy loki grafana` |
-| 確認 Alloy 有在收（列出目前所有 label 值） | `docker exec grafana curl -s http://loki:3100/loki/api/v1/label/room_id/values` |
+| 確認 Alloy 有在收（列出目前所有 label 值） | `docker exec grafana curl -s http://loki:3100/loki/api/v1/label/room_id/values`（Loki 只在 `logging_net` 上，房間容器連不到，一定要從 grafana／alloy 裡面打） |
 | 手動起單一 MCP server 測試 | `docker exec -it hermes_<room_id> node /opt/data/mcp/<name>/server.mjs` |
 | 列出所有房間的對話量與用量 | `uv run python scripts/conversations.py rooms` |
 | 看某房間的逐輪對話（含結果狀態與耗時） | `uv run python scripts/conversations.py show <room_id> [--with-tools]` |

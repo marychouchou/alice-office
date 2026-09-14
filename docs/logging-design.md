@@ -89,21 +89,25 @@
 flowchart LR
     subgraph host["單機 host（docker compose）"]
         direction TB
-        router["webhook_router<br/>structlog → JSON stdout<br/>label: alice.role=router"]
-        h1["hermes_&lt;room A&gt;<br/>stdout<br/>label: alice.role=agent, alice.room_id=A"]
-        h2["hermes_&lt;room B&gt;<br/>stdout<br/>label: alice.role=agent, alice.room_id=B"]
+        subgraph roomnet["network: hermes_global_net"]
+            router["webhook_router<br/>structlog → JSON stdout<br/>label: alice.role=router"]
+            h1["hermes_&lt;room A&gt;<br/>stdout<br/>label: alice.role=agent, alice.room_id=A"]
+            h2["hermes_&lt;room B&gt;<br/>stdout<br/>label: alice.role=agent, alice.room_id=B"]
+        end
         files[("HOST_DATA_DIR/&lt;room&gt;/logs/*.log<br/>agent / errors / mcp-stderr / gateway")]
+        sock[/"/var/run/docker.sock"/]
         h1 -. bind mount .-> files
         h2 -. bind mount .-> files
+        router -. stdout .-> sock
+        h1 -. stdout .-> sock
+        h2 -. stdout .-> sock
 
-        subgraph logging["profile: logging（opt-in）"]
+        subgraph logging["profile: logging（opt-in）— network: logging_net"]
             alloy["Alloy<br/>discovery.docker + loki.source.docker<br/>local.file_match + loki.source.file"]
             loki["Loki（單機 filesystem, 30d retention）"]
             grafana["Grafana（127.0.0.1:3000）"]
         end
-        router -- docker.sock --> alloy
-        h1 -- docker.sock --> alloy
-        h2 -- docker.sock --> alloy
+        sock -- Docker API, ro --> alloy
         files -- ro mount --> alloy
         alloy -- push --> loki
         grafana -- LogQL --> loki
@@ -111,13 +115,18 @@ flowchart LR
     op["Operator"] -- SSH tunnel --> grafana
 ```
 
+**兩個 subgraph 之間沒有網路的箭頭，這是刻意的**（§6）：logging 堆疊掛在自己的
+`logging_net` 上，房間的 agent 容器完全連不到 Loki。Alloy 進得去房間的 log 不是靠
+網路，是靠兩條**單向、唯讀**的路——`docker.sock` 的 Docker API（stdout）與
+`HOST_DATA_DIR` 的 ro mount（檔案 log）。
+
 **三條資料流**，全部收斂到同一組 Loki label：
 
 | 來源 | 收集方式 | `service` | `room_id` 來自 | `source` |
 |---|---|---|---|---|
 | Router stdout（JSON） | `loki.source.docker`，Docker label relabel | `router` | log 行內 `room_key` 欄位（不是 label，查詢時 `\| json`） | `docker` |
 | Hermes 容器 stdout | 同上 | `agent` | Docker label `alice.room_id` | `docker` |
-| `data/<room_id>/logs/*.log` | `loki.source.file`，從路徑正規抽取 | `agent` | 路徑 `/rooms/<room_id>/logs/` | `file`，另加 `file=agent\|errors\|mcp-stderr\|gateway\|container-boot` |
+| `data/<room_id>/logs/*.log` | `loki.source.file`，從路徑正規抽取 | `agent` | 路徑 `/rooms/<room_id>/logs/` | `file`，另加 `file=agent\|errors\|mcp-stderr\|gateway\|container-boot`（白名單，見 §5.3） |
 | turn envelope `conversation_turn` | 走 router stdout 那條流（同一行 JSON），**另外**由 router 自己寫 `data/_conversations/<room_id>.jsonl` | `router` | 行內 `room_key` | `docker`；JSONL 檔不經 Alloy（§5.7） |
 | 對話內容 | **不進 Loki**。留在 `data/<room_id>/state.db`，用 `scripts/conversations.py` 讀（§5.8） | — | — | — |
 
@@ -257,9 +266,11 @@ loki.write "local" {
 - Alloy 需要一個 volume 存 positions（`/var/lib/alloy/data`），否則重啟會重讀整份檔案。
 - Alloy 也會收到它自己、Loki、Grafana 的 stdout 嗎？不會——`filter` 只選帶 `alice.role`
   label 的容器；若想連堆疊自身也收，給它們 `alice.role=infra` label 即可
-  （Phase 3 選了「收」，見 §8）。
+  （Phase 3 選了「收 Loki 與 Grafana」，見 §8）。**Alloy 自己不給 label**：Loki 掛掉
+  時它每次 push 失敗都會寫一行 error，那些行若也被收進來，就要排隊等著 push 給同一個
+  掛掉的 Loki——故障時自我放大。Alloy 自己的狀況看 `docker logs alloy`。
 
-**Phase 3 實作對上面骨架的三處偏離**（實際檔案以 `deploy/logging/alloy/config.alloy`
+**Phase 3 實作對上面骨架的四處偏離**（實際檔案以 `deploy/logging/alloy/config.alloy`
 與 `deploy/logging/loki/config.yaml` 為準）：
 
 1. 兩條 pipeline 不直接 `forward_to` 給 `loki.write`，中間都經過同一個
@@ -268,7 +279,11 @@ loki.write "local" {
 2. 那個 process 的第一個 stage 是 `stage.label_drop { values = ["filename"] }`——
    `loki.source.file` 會自動貼一個 `filename`（完整路徑）label，跟 `room_id` + `file`
    完全重複，不丟掉就違反 §5.4 的守則。
-3. Loki 那端要加 `limits_config.discover_service_name: []`。Loki 3.x 預設會照
+3. pipeline 2 的 `discovery.relabel` 第一條規則是白名單 `action = "keep"`，只留
+   Hermes 已知的那幾個 log 檔名。房間的 agent 對自己的 `/opt/data` 有寫入權，
+   `logs/<任意名字>.log` 是它能控制的，而 `file` 是一個 Loki index label——沒有這條
+   規則，一個房間就能把 `max_streams_per_user` 灌爆，害所有房間一起掉行（§6）。
+4. Loki 那端要加 `limits_config.discover_service_name: []`。Loki 3.x 預設會照
    `service`／`app`／`container`… 的順序自己推導出一個 `service_name` label，抄的正是
    我們 relabel 出來的 `service`，等於白白多一份基數。（`discover_log_levels` 維持
    預設 `true`：它產的 `detected_level` 是 structured metadata 不是 index label，
@@ -278,7 +293,11 @@ loki.write "local" {
 
 - Loki 單一 binary（`-target=all`）、`auth_enabled: false`、`tsdb` + filesystem 儲存、
   compactor 開 `retention_enabled: true`、`retention_period: 720h`（30 天）。Loki
-  **不對 host 開 port**，只在 compose 內部網路被 Alloy 與 Grafana 存取。
+  **不對 host 開 port**，而且只掛在 `logging_net` 上——只有 Alloy 與 Grafana 連得到
+  （§6）。另加 `limits_config.deletion_mode: disabled` 關掉 delete API：
+  `retention_enabled: true` 會把 `/loki/api/v1/delete` 註冊起來，配上無 auth 就是
+  「連得到就能刪」。保留期回收不受影響（compactor 走 `retention_period`，跟使用者
+  發起的 delete request 是兩條路）。
 - Grafana：`ports: "127.0.0.1:3000:3000"`（只綁 localhost，operator 用 SSH tunnel），
   `GF_SECURITY_ADMIN_PASSWORD` 由 compose 從 `.env` 做變數替換（新變數
   `GRAFANA_ADMIN_PASSWORD`，同步進 `.env.example`）。**這個變數不進 `Settings`**——
@@ -329,6 +348,16 @@ loki.write "local" {
   符合 delivery model：外部客戶 cloud／on-prem 各自部署）。
 - Alloy 容器掛載：`/var/run/docker.sock:ro`、`${HOST_DATA_DIR}:/rooms:ro`。
   `HOST_DATA_DIR` 在 compose 裡已經是 `${PWD}/data`，兩處要一致。
+- **三個服務只掛 `logging_net`（compose 自建的 bridge），不接 `hermes_global_net`。**
+  Loki 沒有 auth，房間的 agent 容器都在 `hermes_global_net` 上，同網段就等於每個房間
+  都讀得到所有房間的 log（§6）。Alloy 不需要那個網段：stdout 走 docker.sock 的 Docker
+  API、檔案 log 走 ro mount，兩條都不經過容器網路。`logging_net` 不能設
+  `internal: true`，因為 Grafana 要 publish `127.0.0.1:3000`。
+- Alloy 自己的 UI 綁在容器內 loopback（`--server.http.listen-addr=127.0.0.1:12345`），
+  連 `logging_net` 上的鄰居都連不到；要看用 `docker exec`。
+- **既有容器沒有 label**：label 是建立時寫死的，這個版本之前建的 `hermes_<room_id>`
+  容器不帶 `alice.*`，Alloy 收不到它們的 stdout。`docker rm -f hermes_<room_id>` 之後
+  router 會在下一則訊息時重建（`data/<room_id>/` 不受影響）。
 
 ### 5.6 開發模式（`ROUTER_IN_DOCKER=false`）
 
@@ -437,12 +466,28 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
   處理，不是 router 的事；envelope 用 `CONVERSATION_LOG_ENABLED=false` 關掉。
 - **診斷 log** 的 INFO 等級不重複記錄訊息本文（對話紀錄已經有了，不要在幾十萬行 debug
   裡再散一份）；不記錄 LINE access token 與 webhook 原始 body。
-- **存取面**：Loki 無 auth，因此不對 host 開 port；Grafana 只綁 `127.0.0.1`。
-  多人存取時再考慮 reverse proxy + auth。
-- **docker.sock**：Alloy 需要讀 socket（等同 root）。router 本身已經掛 socket，
-  Alloy 用 `:ro` 掛載並限制在同一台主機，不增加新的信任邊界。
+- **存取面**：Loki 無 auth（`auth_enabled: false`），所以「誰連得到 :3100」就是它的
+  唯一存取控制。因此：不對 host 開 port，**而且三個服務只掛自己的 `logging_net`，不接
+  `hermes_global_net`**。這一條是必須的而不是加分項——房間的 agent 容器全都在
+  `hermes_global_net` 上，只要同網段，任何一個房間的 agent（它跑的是 LLM 決定的工具
+  呼叫）就能 `curl loki:3100` 讀走**所有**房間的 log、推假的行進去。Grafana 只綁
+  `127.0.0.1`，多人存取時再考慮 reverse proxy + auth。
+- **delete API 關掉**：`compactor.retention_enabled: true` 會把 `/loki/api/v1/delete`
+  註冊起來，配上無 auth 就是「連得到就能刪」。`limits_config.deletion_mode: disabled`
+  讓它一律回 403（實測：`POST /loki/api/v1/delete` → 403）。保留期回收不受影響，那是
+  compactor 依 `retention_period` 自己跑的另一條路。
+- **`file` label 白名單**：房間的 agent 對自己的 `/opt/data` 有寫入權，`logs/<任意>.log`
+  是它能控制的檔名，等於能控制一個 Loki label 的值。Alloy 的 pipeline 2 因此只 keep
+  已知的 Hermes 檔名（`config.alloy` 的 `keep` 規則），否則一個房間就能把
+  `max_streams_per_user` 灌爆，害所有房間一起掉行。
+- **docker.sock = host root**：Alloy 讀得到 socket 就等於讀得到這台主機上每個容器的
+  環境變數與 log（`:ro` 擋的是「建容器」，不是「讀祕密」）。這**是**一個真實的信任
+  邊界，不要寫成「反正 router 也掛了所以不算」。降低風險的是三件事：唯讀掛載、
+  獨立的 `logging_net`（Alloy 連不到房間，房間也連不到它）、Alloy UI 綁容器內
+  loopback。要再降就只能上 socket proxy（只放行 list/logs 兩個 endpoint），目前規模
+  不做。
 - 房間隔離：Loki 是單 tenant，operator 能看所有房間——這符合「operator 是部署者」的
-  角色；房間間彼此看不到，因為使用者從不接觸 Grafana。
+  角色；房間間彼此看不到，因為使用者從不接觸 Grafana，而且網路上也到不了 Loki。
 
 ## 7. 非目標與未來延伸
 
@@ -615,6 +660,25 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
       （拋棄式容器在 15 秒內被 `discovery.docker` 撿到），檔案那半邊沒證
       （不想為了測試在 `data/` 底下造假房間）。
 
+### Phase 3 的 adversarial review 修正（deploy 面）— [x]（2026-09-14）
+
+- [x] **log 堆疊自己一個 network**。原本三個服務掛在 `hermes_global_net`——房間的 agent
+      容器也在上面，而 Loki 沒有 auth。任何房間的 agent 都能 `curl loki:3100` 讀走所有
+      房間的 log、推假的行、呼叫 delete API。改成 compose 自建的 `logging_net`，
+      `hermes_global_net` 從這份 compose 完全移除；Alloy 的 UI 改綁容器內
+      `127.0.0.1:12345`；Alloy 自己不再帶 `alice.role` label。實測：從
+      `hermes_global_net` 起一個 curl 容器打 `http://loki:3100/ready` → 連 DNS 都解析
+      不到（exit 6）；從 `logging_net` 打同一個 URL → `ready`；Grafana
+      `127.0.0.1:3000/api/health` → `database: ok`；`label/file/values` 仍列得出六個
+      房間 log 檔名（Alloy 照收）；`label/container/values` 沒有 alloy。
+- [x] **Loki 關掉 delete API**（`limits_config.deletion_mode: disabled`）。實測
+      `POST /loki/api/v1/delete` → 403；保留期不受影響。
+- [x] **`file` label 白名單**。房間的 agent 能在自己的 `logs/` 造任意檔名，等於能造任意
+      label 值、灌爆 `max_streams_per_user` 害所有房間掉行。`config.alloy` 加
+      `action = "keep"` 只留已知的 Hermes 檔名。
+- [x] README 與 `scripts/deploy_host.sh --with-logging` 補上「舊房間容器沒有 label，
+      要 `docker rm -f` 讓 router 重建才收得到」。
+
 ### Phase 4（可選）：Dashboard 與告警 — [ ]
 
 - [ ] `deploy/logging/grafana/provisioning/dashboards/` 一個 overview：每房間 log 速率、
@@ -633,7 +697,7 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
 | Loki 磁碟用量 | 數十房間、30 天，估計數百 MB 到數 GB | Phase 3 量過：單一房間約 530 行、再加三個 infra 容器的 stdout，`/loki` 共 704 KB。維持原估計 |
 | 堆疊的 RAM 成本 | §3 表格原本估「約 2–4 GB RAM」 | 實測遠低於此：`docker stats --no-stream` 顯示 Alloy 65–69 MB、Loki 107–157 MB、Grafana 310–353 MB，**合計約 480–580 MB**。原估計是照 Loki 官方對「有查詢負載的生產叢集」的建議抄的，對單機、單 operator、偶爾查一次的用法過度保守——`docs/troubleshooting.md` §4 用實測值 |
 | Loki 的 ring 在筆電休眠後會短暫不健康 | 本機實測出現過 `at least 1 healthy replica required`（compactor／scheduler），因為 `kvstore: inmemory` 的心跳被主機睡眠打斷 | 會自己恢復，正式部署（不休眠的主機）不會遇到；若在筆電上長開，休眠期間推進去的行有機會查不到，重啟 Loki 即可 |
-| Grafana 自己的 stdout 會被收進 Loki | 三個 infra 容器都有 `alice.role` label，Grafana 開機的 migration log 一次就是一兩千行 | 接受：它有 30 天保留與 label 隔離（`{service="infra"}`），要靜音就把 compose 的 `alice.role: infra` 拿掉，代價是堆疊自己壞掉時查不到 |
+| Grafana 自己的 stdout 會被收進 Loki | Loki／Grafana 兩個 infra 容器有 `alice.role` label，Grafana 開機的 migration log 一次就是一兩千行 | 接受：它有 30 天保留與 label 隔離（`{service="infra"}`），要靜音就把 compose 的 `alice.role: infra` 拿掉，代價是堆疊自己壞掉時查不到。**Alloy 自己刻意沒有這個 label**：Loki 掛掉時它每次 push 失敗都寫一行 error，如果那些行也要 push 給同一個掛掉的 Loki，故障就會自我放大 |
 
 ## 來源
 

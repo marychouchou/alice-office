@@ -118,7 +118,9 @@ Webhook URL 設為 `https://your-domain.com/webhook`（服務監聽 `http://loca
 
 房間多到要跨 router、容器 stdout、檔案 log 三種來源追同一則訊息時，
 `deploy/logging/` 有一組現成的 Alloy（收集）→ Loki（儲存，30 天）→
-Grafana（查詢）堆疊，跟 router 同一台主機、同一個 `hermes_global_net`：
+Grafana（查詢）堆疊，跟 router 同一台主機，但**掛在自己的 `logging_net` 上、不接
+`hermes_global_net`**（Loki 沒有 auth，同網段就等於每個房間的 agent 都讀得到所有房間
+的 log）。Alloy 讀 log 走的是 docker.sock 與 ro mount，不需要那個網段：
 
 ```bash
 # 1. .env 設定 Grafana 的 admin 密碼（router 不讀這個變數，只給 compose 用）
@@ -133,6 +135,11 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@<host>
 #    → 瀏覽器開 http://localhost:3000，帳號 admin / 上面那組密碼
 #    → Explore（Loki 資料來源已自動接好）→ 例：{room_id="line_U1234..."}
 ```
+
+> **既有房間容器要重建一次**：Alloy 靠 `alice.*` label 發現容器，而 label 是建立時
+> 寫死的。這個版本之前建的 `hermes_<room_id>` 容器沒有 label，Grafana 裡不會出現。
+> `docker rm -f hermes_<room_id>` 之後 router 會在下一則訊息進來時自動重建（`data/`
+> 不受影響，只中斷一次開機時間）。
 
 關掉就是 `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml
 stop alloy loki grafana`——router 不受影響，它從頭到尾不知道這個堆疊存在。

@@ -86,9 +86,9 @@ flowchart TB
     hermes["<b>Hermes Agent 容器（每房間一個）</b><br/>[Container: Docker image nousresearch/hermes-agent]<br/><i>hermes_&lt;room_key&gt;，port 8642；gateway + 該房間自己的<br/>MCP servers / plugins / skills；容器間互不相通<br/>（內部行程結構見下方放大圖）</i>"]:::container
     roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens、<br/>group_state/（observed buffer）、<br/>router_state/（session epoch）、<br/>logs/*.log——每房間各自一份</i>")]:::container
 
-    subgraph logging["選配 profile：集中式 log（deploy/logging/，預設不啟用）"]
+    subgraph logging["選配 profile：集中式 log（deploy/logging/，預設不啟用；自己的 logging_net，不接 hermes_global_net）"]
       alloy["<b>Alloy</b><br/>[Container: grafana/alloy v1.19]<br/><i>discovery.docker 依 alice.role label 動態發現容器並收 stdout；<br/>local.file_match tail 每房間的 logs/*.log；<br/>relabel 成 service / room_id / container / source / file / level</i>"]:::container
-      loki["<b>Loki</b><br/>[Container: grafana/loki 3.7，single binary]<br/><i>只索引 label 不做全文索引；tsdb ＋ filesystem，<br/>compactor 保留 30 天；不對 host 開 port</i>"]:::container
+      loki["<b>Loki</b><br/>[Container: grafana/loki 3.7，single binary]<br/><i>只索引 label 不做全文索引；tsdb ＋ filesystem，<br/>compactor 保留 30 天；不對 host 開 port，<br/>只有 logging_net 上的 Alloy／Grafana 連得到；<br/>delete API 關閉（deletion_mode: disabled）</i>"]:::container
       grafana["<b>Grafana</b><br/>[Container: grafana/grafana 13.2]<br/><i>LogQL 查詢介面；只綁 127.0.0.1:3000，<br/>Loki 資料來源由 provisioning 自動接好</i>"]:::container
     end
   end
@@ -112,12 +112,16 @@ flowchart TB
   operator -- "SSH tunnel → 瀏覽器<br/>（127.0.0.1:3000）" --> grafana
 ```
 
-logging profile 的兩個設計重點（細節見 `docs/logging-design.md`）：
+logging profile 的三個設計重點（細節見 `docs/logging-design.md`）：
 
 - **router 與房間容器都不知道它存在**。兩者唯一提供的東西是建立時掛上的
   `alice.role` / `alice.room_id` Docker label（`docker-compose.yml` 與
   `container_manager.py`），Alloy 走 `docker.sock` 自己去發現——所以新房間的容器
   一冒出來就自動被收，不需要改容器生命週期邏輯，也不需要重啟 Alloy。
+- **上面那三個箭頭都不是容器網路**。Alloy → Docker Engine 是 docker.sock，
+  Alloy → 房間資料是 ro mount；三個 logging 容器只掛自己的 `logging_net`，跟房間
+  容器所在的 `hermes_global_net` 完全不相通。Loki 沒有 auth，同網段就等於每個房間
+  的 agent 都能讀走／竄改所有房間的 log（`docs/logging-design.md` §6）。
 - **三個容器全部關掉，router 行為完全不變**。這是它做成 opt-in（多疊一個 `-f`）
   而不是寫進主 `docker-compose.yml` 的理由：客戶部署預設維持最小化。
 

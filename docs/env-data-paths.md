@@ -70,7 +70,16 @@ Alloy。症狀是 Loki 裡查不到任何 `source="file"` 的行、但 `source="
 `/rooms/*/logs/*.log`（單層 `*`），所以**它假設每個房間目錄都直接坐落在
 `HOST_DATA_DIR` 底下**。`data/_conversations/`、`data/_google/` 這兩個非房間目錄
 因為沒有 `logs/` 子目錄而自然被跳過；以後若在 `data/` 下新增別的東西，要確認它
-不會意外長出 `logs/*.log`。
+不會意外長出 `logs/*.log`。glob 撈到之後還有一道白名單：`config.alloy` 的 `keep`
+規則只留 Hermes 已知的那幾個檔名（`agent` / `errors` / `gateway` / `mcp-stderr` /
+`container-boot` / …），因為房間的 agent 對自己的 `/opt/data` 有寫入權，任意檔名
+等於任意 Loki label 值。Hermes 換版帶來新的 log 檔名時，要同步加進那個 regex，否則
+新檔案會被安靜地丟掉。
+
+**這條 ro mount 是 Alloy 讀檔案 log 的唯一路徑**：三個 logging 容器掛在自己的
+`logging_net` 上，跟房間容器所在的 `hermes_global_net` 完全不相通（見
+`docs/logging-design.md` §6），所以 `/rooms` 掛錯就是真的什麼都收不到，沒有網路那條
+備援。
 
 ## `ROUTER_IN_DOCKER` 是決定 router 自己活在哪個世界的開關
 

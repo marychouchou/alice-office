@@ -16,9 +16,12 @@
 #                   local-tools 的 math/OCR/webdriver 與 secretary-mcp 會不能用，
 #                   細節見 README「3. 建立 Docker 網路、準備 Hermes image」。
 #   --no-verify     部署完不跑 ping 驗證（預設會跑，需要 uv）。
-#   --with-logging  一併起集中式 log 堆疊（Alloy + Loki + Grafana，約 400 MB RAM），
+#   --with-logging  一併起集中式 log 堆疊（Alloy + Loki + Grafana，約 480 MB RAM），
 #                   見 deploy/logging/ 與 docs/logging-design.md。需要 .env 有
 #                   GRAFANA_ADMIN_PASSWORD。預設不開，客戶部署維持最小化。
+#                   堆疊掛在自己的 logging_net 上，不接 hermes_global_net。
+#                   舊的房間容器沒有 alice.* label，要 docker rm -f 讓 router 重建
+#                   才收得到（見下方啟用時印出的提醒）。
 
 set -euo pipefail
 
@@ -67,6 +70,11 @@ if ${WITH_LOGGING}; then
   fi
   COMPOSE_FILES+=(-f "${LOGGING_COMPOSE_FILE}")
   log "已啟用集中式 log 堆疊：${LOGGING_COMPOSE_FILE}"
+  # Alloy 靠 alice.* label 發現容器，而 label 是建立時寫死的：這個版本之前建的
+  # hermes_<room_id> 容器沒有 label，Grafana 裡不會出現，要砍掉讓 router 重建。
+  log "提醒：舊的房間容器沒有 alice.* label，Alloy 收不到它們的 stdout。"
+  log "      docker rm -f hermes_<room_id> 之後，下一則訊息進來 router 會自動重建"
+  log "      （data/<room_id>/ 不受影響）。"
 fi
 
 # ---------------------------------------------------------------------------
