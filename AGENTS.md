@@ -22,6 +22,10 @@ WebFetch），不要憑記憶寫 API 呼叫——這兩個都是會改版的外�
 | 什麼時候讀 | 讀這份 |
 |---|---|
 | 要看全系統架構圖（C4 三層） | `docs/architecture-c4.md` |
+| 要看系統對外能做什麼（actor／use case 總覽） | `docs/use-case-diagram.md` |
+| 要看關鍵流程的時序圖（1:1／群組/observe/session/container 冷啟動…彙整） | `docs/sequence-diagrams.md` |
+| 要查現有功能對應的需求規格（PRD，非提案，反映現況） | `docs/prd.md` |
+| 要給 LINE 使用者看的操作說明 | `docs/user-manual.md` |
 | 要理解一則訊息從 LINE 到 agent 再回來的完整路徑（`channels/` 逐檔導讀） | `docs/channels-walkthrough.md` |
 | 追訊息解析、去重、批次的實作細節 | `docs/line-hermes-message-flow.md` |
 | 改 router ↔ 容器內 agent 的 HTTP 協定前 | `docs/router-hermes-agent-protocol.md` |
