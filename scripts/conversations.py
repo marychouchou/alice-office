@@ -15,12 +15,17 @@ docs/logging-design.md §5.7／§5.8。
     uv run python scripts/conversations.py search "關鍵字" [--room <room_id>]
     uv run python scripts/conversations.py export --room <room_id> --since 7d --format md --out /tmp/x
     uv run python scripts/conversations.py stats [--since 30d]
+    uv run python scripts/conversations.py prune --older-than 90d [--room ID] [--dry-run]
 
 DATA_DIR 解析順序：`--data-dir` > 環境變數 `DATA_DIR` > `.env` 的 `DATA_DIR` >
 `.env` 的 `HOST_DATA_DIR` > repo 的 `./data`。
 
 隱私：`--with-tools`／`--with-reasoning` 預設關閉（工具回傳與 reasoning 可能含
 Drive 檔名等資料）；群組發言者 id 預設輸出成短 hash，要原值加 `--raw`。
+
+保留期：`_conversations/*.jsonl` 是整個部署裡唯一留著「沒進到 agent 的那些訊息」
+原文的地方，預設永遠不刪。`prune` 是唯一的保留期工具——要定期清就自己排
+cron（`prune --older-than 90d`），詳見 docs/logging-design.md §5.7。
 """
 
 from __future__ import annotations
@@ -42,8 +47,9 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from _env import load_env  # noqa: E402
 
-from alice_office_router.conversation_log import TurnEnvelope  # noqa: E402
+from alice_office_router.conversation_log import Outcome, TurnEnvelope  # noqa: E402
 from alice_office_router.conversation_store import (  # noqa: E402
+    ENVELOPE_SCHEMA_VERSION,
     UNRECORDED_OUTCOMES,
     EnvelopeIndex,
     MessageRow,
@@ -72,6 +78,13 @@ TOOL_RESULT_MAX_CHARS = 500
 
 # search 的每房間上限，避免一個熱門詞把輸出洗掉。
 DEFAULT_SEARCH_LIMIT = 20
+
+# outcome 的字面值只在 conversation_log.Outcome 定義一次；這裡綁成有型別的常數，
+# 打錯字就是型別錯誤，而不是一個永遠對不到的比較（見 conversation_log 模組說明
+# 的「新增 outcome」清單）。
+OUTCOME_REPLIED: Outcome = "replied"
+OUTCOME_BLOCKED: Outcome = "blocked"
+OUTCOME_AGENT_FAILED: Outcome = "agent_failed"
 
 
 @dataclass(frozen=True)
@@ -124,6 +137,31 @@ def _since(args: argparse.Namespace) -> float | None:
     except ValueError:
         warn(f"invalid --since {value!r}: use 7d / 36h / 90m or an absolute YYYY-MM-DD")
         raise SystemExit(2) from None
+
+
+def _envelopes(ctx: Context, room_id: str) -> EnvelopeIndex:
+    """讀一個房間的 envelope，並把「讀不動的行」變成警告而不是靜默的缺口。
+
+    一行解析不動代表 schema 漂了（或檔案被截斷），對應的那一輪就會從輸出裡消失。
+    消失得沒聲音最糟，所以這裡把 conversation_store 數到的行數印成 warning。
+    檔案本身讀不動（權限、IO）也只 warn 不中斷——跨房間迴圈不該被一個檔案打斷。
+    """
+    path = ctx.conversations_dir / f"{room_id}.jsonl"
+    try:
+        index = read_envelopes(ctx.conversations_dir, room_id)
+    except OSError as exc:
+        warn(f"room {room_id}: cannot read {path} ({exc}); continuing without envelopes")
+        return EnvelopeIndex()
+    if index.unreadable_lines:
+        warn(
+            f"{index.unreadable_lines} envelope line(s) in {path} could not be parsed (schema drift?)"
+        )
+    if index.future_schema_lines:
+        warn(
+            f"{index.future_schema_lines} envelope line(s) in {path} carry a schema_version "
+            f"newer than {ENVELOPE_SCHEMA_VERSION}; this checkout may be reading them wrong"
+        )
+    return index
 
 
 def _sender_label(envelope: TurnEnvelope, raw: bool) -> str:
@@ -203,17 +241,15 @@ def render_transcript(
     session_id: str | None = None,
 ) -> list[str]:
     """把 state.db 訊息與「沒進 agent」的 envelope 合併成一份時間序逐字稿。"""
+    rows = list(messages)
+    bindings = index.bind_messages(rows)
     entries: list[tuple[float, int, list[str]]] = []
-    bound: set[int] = set()
-    for message in messages:
-        envelope = index.nearest(message.session_id, message.timestamp)
-        if envelope is not None:
-            bound.add(id(envelope))
-        lines = _render_message(message, envelope, ctx, args)
+    for message in rows:
+        lines = _render_message(message, bindings.get(message.id), ctx, args)
         if lines:
             entries.append((message.timestamp, message.id, lines))
-    for envelope in index.envelopes:
-        if not _is_missing_from_state_db(envelope, bound):
+    for position, envelope in enumerate(index.envelopes):
+        if not _is_missing_from_state_db(envelope, position, index.bound):
             continue
         if session_id is not None and envelope.session_id != session_id:
             continue
@@ -225,18 +261,24 @@ def render_transcript(
     return [line for _, _, lines in entries for line in lines]
 
 
-def _is_missing_from_state_db(envelope: TurnEnvelope, bound: set[int]) -> bool:
+def _is_missing_from_state_db(envelope: TurnEnvelope, position: int, bound: set[int]) -> bool:
     """這一輪 state.db 裡有沒有對應紀錄——沒有的話逐字稿要由 envelope 補上。
 
     兩種情況：`observed`／`reset`／`blocked` 依定義就沒送進 agent；以及
     `agent_failed` 裡「連 Hermes 都沒碰到」的那一半——容器起不來、HTTP 連不上，
     Hermes 因此連 user 訊息都沒寫。後者若不補，一個容器壞掉的房間會印出一份空的
-    逐字稿，正好把最需要看的東西藏起來。有碰到 Hermes 的 `agent_failed`（`bound`
-    裡有，代表有訊息接到這個 envelope）已經從 state.db 印過了，不能再印一次。
+    逐字稿，正好把最需要看的東西藏起來。有碰到 Hermes 的 `agent_failed`
+    （`bind_messages` 幫它配到了一則訊息，所以 position 在 `bound` 裡）已經從
+    state.db 印過了，不能再印一次。
+
+    Args:
+        envelope: 要判斷的 envelope。
+        position: 它在 `EnvelopeIndex.envelopes` 裡的位置（就是 `bound` 的元素）。
+        bound: `EnvelopeIndex.bind_messages` 配對成功的 envelope 位置。
     """
     if envelope.outcome in UNRECORDED_OUTCOMES:
         return True
-    return envelope.outcome == "agent_failed" and id(envelope) not in bound
+    return envelope.outcome == OUTCOME_AGENT_FAILED and position not in bound
 
 
 def _read_room[T](ctx: Context, room_id: str, read: Callable[[sqlite3.Connection], T]) -> T | None:
@@ -274,8 +316,10 @@ def cmd_rooms(args: argparse.Namespace, ctx: Context) -> int:
     for room_id in room_ids:
         try:
             summary = room_summary(ctx.data_dir, ctx.conversations_dir, room_id)
-        except sqlite3.Error as exc:
-            warn(f"room {room_id}: unreadable state.db ({exc}); skipping")
+        except (sqlite3.Error, OSError) as exc:
+            # OSError 也要接：room_summary 會去讀 envelope 檔，一個房間的 jsonl
+            # 權限不對不該讓整張表印不出來。
+            warn(f"room {room_id}: unreadable state.db or envelope file ({exc}); skipping")
             continue
         print(
             f"{summary.room_id:<40} {summary.session_count:>5} {summary.message_count:>6} "
@@ -300,7 +344,7 @@ def cmd_show(args: argparse.Namespace, ctx: Context) -> int:
         return 1
     sessions, messages = result
 
-    index = read_envelopes(ctx.conversations_dir, args.room_id)
+    index = _envelopes(ctx, args.room_id)
     print(f"# {args.room_id}")
     print(
         f"sessions: {len(sessions)}  messages: {len(messages)}  envelopes: {len(index.envelopes)}"
@@ -366,7 +410,7 @@ def _load_export(args: argparse.Namespace, ctx: Context) -> RoomExport | None:
         room_id=args.room,
         sessions_count=len(sessions),
         messages=messages,
-        index=read_envelopes(ctx.conversations_dir, args.room),
+        index=_envelopes(ctx, args.room),
     )
 
 
@@ -394,11 +438,15 @@ def _write_markdown(
 def _write_jsonl(data: RoomExport, args: argparse.Namespace, ctx: Context, out_dir: Path) -> Path:
     """一個房間一個 .jsonl：每行一則訊息，附上該輪 envelope 的結果狀態。"""
     path = out_dir / f"{data.room_id}.jsonl"
+    # 一個 envelope 只會配到一則 user 訊息（EnvelopeIndex.bind_messages），所以
+    # 同一輪的 assistant／tool 行的 outcome 欄位是 null——那一輪的結果狀態在它
+    # 的 user 行上，不是每一行都複製一份。
+    bindings = data.index.bind_messages(data.messages)
     with path.open("w", encoding="utf-8") as handle:
         for message in data.messages:
             if message.role == "tool" and not args.with_tools:
                 continue
-            envelope = data.index.nearest(message.session_id, message.timestamp)
+            envelope = bindings.get(message.id)
             record = {
                 "room": data.room_id,
                 "session_id": message.session_id,
@@ -438,16 +486,16 @@ def _stats_rows(ctx: Context, since: float | None) -> tuple[list[TurnEnvelope], 
     selected: list[TurnEnvelope] = []
     recovered: set[str] = set()
     for room_id in sorted({*list_room_ids(ctx.data_dir), *_envelope_room_ids(ctx)}):
-        index = read_envelopes(ctx.conversations_dir, room_id)
+        index = _envelopes(ctx, room_id)
         blocked_at: float | None = None
         for envelope in sorted(index.envelopes, key=lambda item: parse_iso(item.ts)):
             ts = parse_iso(envelope.ts)
             if since is not None and ts < since:
                 continue
             selected.append(envelope)
-            if envelope.outcome == "blocked":
+            if envelope.outcome == OUTCOME_BLOCKED:
                 blocked_at = ts
-            elif envelope.outcome == "replied" and blocked_at is not None:
+            elif envelope.outcome == OUTCOME_REPLIED and blocked_at is not None:
                 recovered.add(room_id)
     return selected, recovered
 
@@ -475,7 +523,7 @@ def cmd_stats(args: argparse.Namespace, ctx: Context) -> int:
     for outcome, count in sorted(counts.items(), key=lambda item: -item[1]):
         print(f"  {outcome:<13} {count:>6}  {count / total:6.1%}")
 
-    failed = counts.get("agent_failed", 0)
+    failed = counts.get(OUTCOME_AGENT_FAILED, 0)
     print(f"\nagent_failed rate: {failed / total:.2%}")
     undelivered = sum(1 for envelope in envelopes if envelope.delivered is False)
     print(f"undelivered replies: {undelivered}")
@@ -495,12 +543,115 @@ def cmd_stats(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
+def _line_timestamp(line: str) -> float | None:
+    """讀一行 envelope 的 `ts`，讀不出來回 None。
+
+    Args:
+        line: JSONL 的一行。
+
+    Returns:
+        unix 秒數；不是 JSON、不是物件、沒有 `ts`、或 `ts` 解不開時回 None ——
+        呼叫端會把這種行當成「不知道多舊」而保留，因為一行讀不懂本身就是要留給
+        人看的證據，不該被保留期悄悄吃掉。
+    """
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("ts")
+    if not isinstance(raw, str):
+        return None
+    ts = parse_iso(raw)
+    return ts or None
+
+
+def _prune_file(path: Path, cutoff: float, *, dry_run: bool) -> tuple[int, int]:
+    """把一個 envelope 檔重寫成「只留 cutoff 之後的行」。
+
+    先寫同目錄的 `.tmp` 再 `os.replace`：同一個檔案系統上 rename 是原子的，所以
+    router 正在 append 的那個檔案不會有「寫到一半」的狀態被讀到。（router 用
+    O_APPEND，被換掉的舊 inode 上的寫入會遺失——這是跟「不停機 prune」之間的取捨，
+    見 docs/logging-design.md §5.7。）
+
+    Args:
+        path: 房間的 <room_id>.jsonl。
+        cutoff: 保留這個 unix 時間之後（含）的行。
+        dry_run: True 就只數，不寫任何東西。
+
+    Returns:
+        (保留行數, 刪除行數)。
+    """
+    kept = 0
+    dropped = 0
+    temp = path.with_name(f"{path.name}.tmp")
+    handle = (
+        None
+        if dry_run
+        else os.fdopen(
+            os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8"
+        )
+    )
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as source:
+            for line in source:
+                if not line.strip():
+                    continue
+                ts = _line_timestamp(line)
+                if ts is not None and ts < cutoff:
+                    dropped += 1
+                    continue
+                kept += 1
+                if handle is not None:
+                    handle.write(line if line.endswith("\n") else f"{line}\n")
+    finally:
+        if handle is not None:
+            handle.close()
+    if dry_run:
+        return kept, dropped
+    temp.replace(path)
+    return kept, dropped
+
+
+def cmd_prune(args: argparse.Namespace, ctx: Context) -> int:
+    """刪掉 envelope 檔裡超過保留期的行。
+
+    `_conversations/*.jsonl` 是整個部署裡唯一保有「沒進到 agent 的訊息」原文的
+    地方，而且預設永遠不刪（state.db 那半邊由 Hermes 自己管）。這個子命令就是
+    它的保留期工具，要定期清請自己排 cron。
+    """
+    try:
+        cutoff = parse_since(args.older_than)
+    except ValueError:
+        warn(f"invalid --older-than {args.older_than!r}: use 90d / 36h / an absolute YYYY-MM-DD")
+        return 2
+    room_ids = [args.room] if args.room else sorted(_envelope_room_ids(ctx))
+    if not room_ids:
+        print(f"no envelope files under {ctx.conversations_dir}")
+        return 0
+    for room_id in room_ids:
+        path = ctx.conversations_dir / f"{room_id}.jsonl"
+        if not path.exists():
+            warn(f"room {room_id} has no envelope file at {path}")
+            continue
+        try:
+            kept, dropped = _prune_file(path, cutoff, dry_run=args.dry_run)
+        except OSError as exc:
+            warn(f"room {room_id}: cannot prune {path} ({exc}); skipping")
+            continue
+        prefix = "would drop" if args.dry_run else "dropped"
+        print(f"{room_id}: {prefix} {dropped}, kept {kept}  ({path})")
+    return 0
+
+
 _COMMANDS: dict[str, Callable[[argparse.Namespace, Context], int]] = {
     "rooms": cmd_rooms,
     "show": cmd_show,
     "search": cmd_search,
     "export": cmd_export,
     "stats": cmd_stats,
+    "prune": cmd_prune,
 }
 
 
@@ -541,6 +692,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats = sub.add_parser("stats", help="outcome 分布與耗時統計")
     stats.add_argument("--since", help="只算這個時間之後（30d／2026-09-01）")
+
+    prune = sub.add_parser("prune", help="刪掉 envelope 檔裡超過保留期的行")
+    prune.add_argument(
+        "--older-than", required=True, help="刪掉比這個還舊的行（90d／36h／2026-09-01）"
+    )
+    prune.add_argument("--room", help="只清這個房間（預設全部）")
+    prune.add_argument("--dry-run", action="store_true", help="只印會刪幾行，不動檔案")
     return parser
 
 

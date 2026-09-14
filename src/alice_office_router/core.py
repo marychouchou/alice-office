@@ -18,10 +18,10 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field, replace
-from typing import Literal
 
 import httpx
 import structlog
+from pydantic import ValidationError
 from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
@@ -51,15 +51,60 @@ from alice_office_router.session_hygiene import (
 
 logger = logging.getLogger(__name__)
 
+# Cap on the free-text half of an error string. `error` rides the log stream off
+# the host into Loki, where message content must never go (conversation_log's
+# module doc), so what an exception's str() happens to contain is not safe to
+# forward whole — a few hundred characters of a stack-free message is all an
+# operator reads anyway.
+_ERROR_DETAIL_MAX_CHARS = 200
+
+# Outcomes whose inbound text Hermes already wrote to the room's state.db, so
+# the envelope must not keep a second copy: "replied", and "silence" — the agent
+# answered, it just answered with the silence token. "agent_failed" is
+# deliberately NOT here: half its cases (container down, connection refused)
+# never reached Hermes, and then this envelope is the only record of what the
+# user said (see scripts/conversations.py `_is_missing_from_state_db`).
+_TEXT_IN_STATE_DB: frozenset[Outcome] = frozenset({"replied", "silence"})
+
+
+def _describe_error(origin: str, exc: Exception) -> str:
+    """Render an exception for the `error` field without leaking message content.
+
+    `str(exc)` is not safe to forward. A pydantic `ValidationError` embeds the
+    value it rejected — for this router that is the agent's reply text, i.e. the
+    exact thing the log stream must not carry — and some httpx timeouts stringify
+    to nothing at all, which would leave `error` empty and useless. The type name
+    is always present and always safe; the message is truncated; a validation
+    error contributes only its shape.
+
+    Args:
+        origin: Which stage failed ("container", "agent").
+        exc: The exception that ended the turn.
+
+    Returns:
+        A short, content-free reason string, e.g. "agent: ReadTimeout" or
+        "agent: ValidationError (1 error at text)".
+    """
+    name = type(exc).__name__
+    if isinstance(exc, ValidationError):
+        fields = ", ".join(
+            ".".join(str(part) for part in error["loc"]) or "<root>" for error in exc.errors()
+        )
+        return f"{origin}: {name} ({exc.error_count()} error(s) at {fields})"
+    detail = str(exc)[:_ERROR_DETAIL_MAX_CHARS].strip()
+    return f"{origin}: {name}: {detail}" if detail else f"{origin}: {name}"
+
 
 @dataclass(frozen=True)
 class AgentTurn:
     """The result of one agent-bound turn, reply text plus what to record.
 
     Attributes:
-        outcome: "replied" when the agent answered and the answer is
-            deliverable; "agent_failed" when the container or the agent call
-            failed; "silence" when a group reply was the silence token.
+        outcome: How the turn ended (conversation_log.Outcome). An agent-bound
+            turn only ever produces three of them: "replied" when the agent
+            answered and the answer is deliverable, "agent_failed" when the
+            container or the agent call failed, "silence" when a group reply was
+            the silence token.
         text: The deliverable reply, or None for the other two outcomes.
         session_id: The exact X-Hermes-Session-Id sent (the join key onto
             state.db), or None when the call never got that far.
@@ -69,7 +114,7 @@ class AgentTurn:
         error: Short reason string when the turn failed; None otherwise.
     """
 
-    outcome: Literal["replied", "agent_failed", "silence"]
+    outcome: Outcome
     text: str | None = None
     session_id: str | None = None
     rotated: bool = False
@@ -207,8 +252,9 @@ async def _ask_agent(
     try:
         target_url = get_or_create_container(room_key, config)
     except Exception as exc:
-        logger.error(f"Failed to get/create container for room {room_key}: {exc}")
-        return AgentTurn(outcome="agent_failed", error=f"container: {exc}")
+        reason = _describe_error("container", exc)
+        logger.error(f"Failed to get/create container for room {room_key}: {reason}")
+        return AgentTurn(outcome="agent_failed", error=reason)
 
     plan = begin_turn(config, room_key)
     # retired_epoch is set exactly when this turn rotated (see TurnPlan).
@@ -229,13 +275,14 @@ async def _ask_agent(
             system=system,
         )
     except (httpx.HTTPError, ValueError) as exc:
-        logger.error(f"Hermes agent request failed for room {room_key}: {exc}")
+        reason = _describe_error("agent", exc)
+        logger.error(f"Hermes agent request failed for room {room_key}: {reason}")
         return AgentTurn(
             outcome="agent_failed",
             session_id=session_id,
             rotated=plan.rotated,
             duration_ms=_elapsed_ms(started),
-            error=f"agent: {exc}",
+            error=reason,
         )
 
     complete_turn(config, room_key, epoch=plan.epoch, prompt_tokens=result.prompt_tokens)
@@ -358,8 +405,9 @@ def _draft_envelope(msg: InboundMessage, result: RouteResult) -> TurnEnvelope:
 
     Returns:
         A TurnEnvelope with `delivered=None` for the adapter to fill in.
-        `inbound_text` is carried only when the turn did NOT reach the agent —
-        a replied turn's text is already in that room's state.db (§5.7).
+        `inbound_text` is carried only for the outcomes Hermes did not record
+        itself (`_TEXT_IN_STATE_DB`) — duplicating a turn that state.db already
+        holds in full would just be a second copy of the content (§5.7).
     """
     return TurnEnvelope(
         request_id=_context_value("request_id"),
@@ -368,7 +416,7 @@ def _draft_envelope(msg: InboundMessage, result: RouteResult) -> TurnEnvelope:
         room_key=msg.room_key,
         session_id=result.session_id,
         outcome=result.outcome,
-        inbound_text=None if result.outcome == "replied" else msg.text,
+        inbound_text=None if result.outcome in _TEXT_IN_STATE_DB else msg.text,
         is_group=msg.is_group,
         addressed=msg.addressed,
         sender_id=msg.sender_id,

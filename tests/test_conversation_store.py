@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from alice_office_router.conversation_log import TurnEnvelope
 from alice_office_router.conversation_store import (
     SCHEMA_VERSION_MAX,
+    MessageRow,
     check_schema_version,
     connect_state_db,
     list_room_ids,
@@ -177,6 +179,30 @@ def data_dir(tmp_path: Path) -> Path:
     return root
 
 
+def _user(message_id: int, ts: float, session_id: str = _SESSION) -> MessageRow:
+    """A minimal `role='user'` MessageRow — all `bind_messages` looks at."""
+    return MessageRow(
+        id=message_id,
+        session_id=session_id,
+        role="user",
+        content=f"m{message_id}",
+        tool_name=None,
+        tool_calls=None,
+        timestamp=ts,
+        token_count=None,
+        finish_reason=None,
+        reasoning=None,
+    )
+
+
+def _write_envelopes(conversations_dir: Path, envelopes: list[TurnEnvelope]) -> None:
+    """Write a room's envelope file from TurnEnvelope objects."""
+    conversations_dir.mkdir(parents=True, exist_ok=True)
+    (conversations_dir / f"{_ROOM}.jsonl").write_text(
+        "\n".join(envelope.model_dump_json() for envelope in envelopes) + "\n", encoding="utf-8"
+    )
+
+
 def _run(data_dir: Path, argv: list[str], capsys: pytest.CaptureFixture[str]) -> str:
     """Run the CLI against a temp DATA_DIR and return its stdout."""
     assert conversations.main(["--data-dir", str(data_dir), *argv]) == 0
@@ -278,16 +304,22 @@ def test_room_summary_rolls_up_sessions_and_envelopes(data_dir: Path) -> None:
     assert summary.last_activity == 1_104.0
 
 
-def test_envelopes_join_by_session_and_nearest_timestamp(data_dir: Path) -> None:
-    """An envelope binds to the turn it belongs to, and only within the tolerance."""
+def test_envelopes_bind_one_to_one_within_the_tolerance(data_dir: Path) -> None:
+    """Each envelope claims exactly one user message, and only a nearby one."""
     index = read_envelopes(data_dir / "_conversations", _ROOM)
 
     assert len(index.envelopes) == 3
-    matched = index.nearest(_SESSION, 1_005.0)
-    assert matched is not None and matched.outcome == "replied"
-    # Far outside the tolerance window: better no envelope than a wrong one.
-    assert index.nearest(_SESSION, 99_999.0) is None
-    assert index.nearest("unknown-session", 1_005.0) is None
+    bindings = index.bind_messages([_user(1, 1_000.0), _user(5, 1_100.0)])
+
+    assert bindings[1].outcome == "replied"
+    assert bindings[5].outcome == "agent_failed"
+    # The "blocked" envelope carries no session_id, so it joins onto nothing.
+    assert len(index.bound) == 2
+
+    # A message far outside the window, and one in a session no envelope names:
+    # better no envelope than a wrong one.
+    assert index.bind_messages([_user(1, -99_999.0)]) == {}
+    assert index.bind_messages([_user(1, 1_000.0, session_id="other")]) == {}
 
 
 def test_helpers_normalize_their_edge_cases() -> None:
@@ -479,61 +511,150 @@ def test_back_to_back_turns_each_get_their_own_envelope(tmp_path: Path) -> None:
     nearest-in-either-direction join would label turn 2 with turn 1's outcome.
     """
     conversations_dir = tmp_path / "_conversations"
-    conversations_dir.mkdir(parents=True)
-    envelopes = [
-        # turn 1: user speaks at t=0, replied 12s later.
-        TurnEnvelope(
-            ts="1970-01-01T00:00:12Z",
-            channel="line",
-            room_key=_ROOM,
-            session_id=_SESSION,
-            outcome="replied",
-            agent_duration_ms=12_000.0,
-        ),
-        # turn 2: user speaks at t=20, the agent call fails 32s later.
-        TurnEnvelope(
-            ts="1970-01-01T00:00:52Z",
-            channel="line",
-            room_key=_ROOM,
-            session_id=_SESSION,
-            outcome="agent_failed",
-            agent_duration_ms=32_000.0,
-            error="agent: timeout",
-        ),
-    ]
-    (conversations_dir / f"{_ROOM}.jsonl").write_text(
-        "\n".join(envelope.model_dump_json() for envelope in envelopes) + "\n", encoding="utf-8"
+    _write_envelopes(
+        conversations_dir,
+        [
+            # turn 1: user speaks at t=0, replied 12s later.
+            TurnEnvelope(
+                ts="1970-01-01T00:00:12Z",
+                channel="line",
+                room_key=_ROOM,
+                session_id=_SESSION,
+                outcome="replied",
+                agent_duration_ms=12_000.0,
+            ),
+            # turn 2: user speaks at t=20, the agent call fails 32s later.
+            TurnEnvelope(
+                ts="1970-01-01T00:00:52Z",
+                channel="line",
+                room_key=_ROOM,
+                session_id=_SESSION,
+                outcome="agent_failed",
+                agent_duration_ms=32_000.0,
+                error="agent: ReadTimeout",
+            ),
+        ],
     )
 
     index = read_envelopes(conversations_dir, _ROOM)
-    first = index.nearest(_SESSION, 0.0)
-    second = index.nearest(_SESSION, 20.0)
+    bindings = index.bind_messages([_user(1, 0.0), _user(2, 20.0)])
 
-    assert first is not None and first.outcome == "replied"
-    assert second is not None and second.outcome == "agent_failed"
-    # The assistant message of turn 1 (t=12) still belongs to turn 1.
-    turn_one_reply = index.nearest(_SESSION, 12.0)
-    assert turn_one_reply is not None and turn_one_reply.outcome == "replied"
+    assert bindings[1].outcome == "replied"
+    assert bindings[2].outcome == "agent_failed"
 
 
-def test_nearest_never_looks_backwards(tmp_path: Path) -> None:
+def test_overlapping_turns_keep_their_own_envelopes(tmp_path: Path) -> None:
+    """A slow turn and a fast turn in flight together must not swap envelopes.
+
+    Two user messages 3s apart; turn 1 takes 120s, turn 2 takes 2s, so the
+    envelopes land in the REVERSE order of the messages (t=5 then t=120). A
+    per-message "first envelope after me" lookup hands the fast envelope to both
+    messages; binding oldest envelope first hands each message its own.
+    """
+    conversations_dir = tmp_path / "_conversations"
+    _write_envelopes(
+        conversations_dir,
+        [
+            TurnEnvelope(
+                ts="1970-01-01T00:00:05Z",
+                channel="line",
+                room_key=_ROOM,
+                session_id=_SESSION,
+                outcome="replied",
+                agent_duration_ms=2_000.0,
+            ),
+            TurnEnvelope(
+                ts="1970-01-01T00:02:00Z",
+                channel="line",
+                room_key=_ROOM,
+                session_id=_SESSION,
+                outcome="agent_failed",
+                agent_duration_ms=120_000.0,
+                error="agent: ReadTimeout",
+            ),
+        ],
+    )
+
+    index = read_envelopes(conversations_dir, _ROOM)
+    bindings = index.bind_messages([_user(1, 0.0), _user(2, 3.0)])
+
+    assert bindings[1].agent_duration_ms == 120_000.0
+    assert bindings[2].agent_duration_ms == 2_000.0
+
+
+def test_one_envelope_never_labels_more_than_one_message(tmp_path: Path) -> None:
+    """The join is one-to-one: four messages, one envelope, one label."""
+    conversations_dir = tmp_path / "_conversations"
+    _write_envelopes(
+        conversations_dir,
+        [
+            TurnEnvelope(
+                ts="1970-01-01T00:00:30Z",
+                channel="line",
+                room_key=_ROOM,
+                session_id=_SESSION,
+                outcome="agent_failed",
+                error="agent: ReadTimeout",
+            )
+        ],
+    )
+
+    index = read_envelopes(conversations_dir, _ROOM)
+    bindings = index.bind_messages([_user(i, float(i)) for i in range(1, 5)])
+
+    assert len(bindings) == 1
+    # The LATEST message at or before the envelope's stamp, not the earliest.
+    assert set(bindings) == {4}
+
+
+def test_binding_never_looks_backwards(tmp_path: Path) -> None:
     """A message after the last envelope has no envelope — not the previous turn's."""
     conversations_dir = tmp_path / "_conversations"
-    conversations_dir.mkdir(parents=True)
-    envelope = TurnEnvelope(
-        ts="1970-01-01T00:00:12Z",
-        channel="line",
-        room_key=_ROOM,
-        session_id=_SESSION,
-        outcome="replied",
-    )
-    (conversations_dir / f"{_ROOM}.jsonl").write_text(
-        envelope.model_dump_json() + "\n", encoding="utf-8"
+    _write_envelopes(
+        conversations_dir,
+        [
+            TurnEnvelope(
+                ts="1970-01-01T00:00:12Z",
+                channel="line",
+                room_key=_ROOM,
+                session_id=_SESSION,
+                outcome="replied",
+            )
+        ],
     )
 
     index = read_envelopes(conversations_dir, _ROOM)
 
-    assert index.nearest(_SESSION, 13.0) is None
+    assert index.bind_messages([_user(1, 13.0)]) == {}
+    assert index.bound == set()
+
+
+def test_unreadable_envelope_lines_are_counted_not_swallowed(tmp_path: Path) -> None:
+    """A line that will not parse, and one from a newer schema, both surface."""
+    conversations_dir = tmp_path / "_conversations"
+    good = TurnEnvelope(ts="1970-01-01T00:00:12Z", channel="line", room_key=_ROOM, outcome="reset")
+    ahead = json.loads(good.model_dump_json())
+    ahead["schema_version"] = 99
+    (conversations_dir / f"{_ROOM}.jsonl").parent.mkdir(parents=True, exist_ok=True)
+    (conversations_dir / f"{_ROOM}.jsonl").write_text(
+        "\n".join(
+            [
+                good.model_dump_json(),
+                "{not json at all",
+                json.dumps({"channel": "line"}),  # valid JSON, invalid envelope
+                json.dumps(ahead),
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    index = read_envelopes(conversations_dir, _ROOM)
+
+    assert len(index.envelopes) == 2
+    assert index.unreadable_lines == 2
+    assert index.future_schema_lines == 1
 
 
 def test_two_distinct_tool_results_at_one_timestamp_are_both_kept(tmp_path: Path) -> None:
@@ -739,3 +860,64 @@ def test_cli_show_does_not_duplicate_an_agent_failed_turn_hermes_recorded(
     out = _run(data_dir, ["show", _ROOM], capsys)
 
     assert out.count("幫我改到四點") == 1
+
+
+# ---------------------------------------------------------------------------
+# CLI — envelope-file warnings and retention (prune)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_warns_about_envelope_lines_it_could_not_parse(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A dropped line must be visible — a silent gap reads as 'that turn never happened'."""
+    path = data_dir / "_conversations" / f"{_ROOM}.jsonl"
+    good = TurnEnvelope(ts="1970-01-01T00:16:46Z", channel="line", room_key=_ROOM, outcome="reset")
+    ahead = json.loads(good.model_dump_json())
+    ahead["schema_version"] = 99
+    path.write_text(
+        "\n".join([good.model_dump_json(), "{broken", json.dumps(ahead)]) + "\n", encoding="utf-8"
+    )
+
+    assert conversations.main(["--data-dir", str(data_dir), "show", _ROOM]) == 0
+    err = capsys.readouterr().err
+
+    assert "1 envelope line(s)" in err
+    assert "could not be parsed" in err
+    assert "schema_version newer than" in err
+
+
+def test_cli_prune_drops_only_the_lines_older_than_the_cutoff(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The JSONL is the only sink holding raw text, so prune is its retention lever."""
+    path = data_dir / "_conversations" / f"{_ROOM}.jsonl"
+    old = TurnEnvelope(ts="1970-01-01T00:00:01Z", channel="line", room_key=_ROOM, outcome="reset")
+    recent = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+    new = TurnEnvelope(ts=recent, channel="line", room_key=_ROOM, outcome="blocked")
+    path.write_text(
+        "\n".join([old.model_dump_json(), "{unreadable", new.model_dump_json()]) + "\n",
+        encoding="utf-8",
+    )
+
+    out = _run(data_dir, ["prune", "--older-than", "1d"], capsys)
+
+    kept = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()[1:]]
+    assert "dropped 1, kept 2" in out
+    # The unreadable line survives: it is evidence, not an expired record.
+    assert path.read_text(encoding="utf-8").splitlines()[0] == "{unreadable"
+    assert [entry["outcome"] for entry in kept] == ["blocked"]
+
+
+def test_cli_prune_dry_run_writes_nothing(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--dry-run reports the same counts and leaves the file (and no .tmp) alone."""
+    path = data_dir / "_conversations" / f"{_ROOM}.jsonl"
+    before = path.read_text(encoding="utf-8")
+
+    out = _run(data_dir, ["prune", "--older-than", "1d", "--room", _ROOM, "--dry-run"], capsys)
+
+    assert "would drop 3, kept 0" in out
+    assert path.read_text(encoding="utf-8") == before
+    assert not path.with_name(f"{path.name}.tmp").exists()

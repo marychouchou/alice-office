@@ -135,11 +135,17 @@ class LineAdapter:
         if event.type not in {"message", "join"}:
             return
 
-        event_id = event.webhookEventId
+        event_id = event.webhookEventId or None
         # Every line logged while this event is handled carries these; the
         # background tasks scheduled below outlive the binding, so they re-bind
-        # their own room context (docs/logging-design.md §5.1).
-        with bound_contextvars(channel=self.name, event_id=event_id):
+        # their own room context (docs/logging-design.md §5.1). event_id is left
+        # unbound rather than bound to None when the event carried none — the
+        # same rule `_process_and_reply` follows, so a `| json | event_id != ""`
+        # filter means one thing across both.
+        context = {"channel": self.name}
+        if event_id:
+            context["event_id"] = event_id
+        with bound_contextvars(**context):
             if event_id and self._dedup.is_duplicate(event_id):
                 logger.info(f"Skipping duplicate LINE webhook event {event_id}")
                 return

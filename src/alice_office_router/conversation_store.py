@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from bisect import bisect_right
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,7 +33,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from alice_office_router.conversation_log import TurnEnvelope
+from alice_office_router.conversation_log import SCHEMA_VERSION as ENVELOPE_SCHEMA_VERSION
+from alice_office_router.conversation_log import Outcome, TurnEnvelope
 
 # The Hermes state.db schema versions this module's queries were written
 # against: 20 is what this deployment runs, 23 what upstream documents. Columns
@@ -50,14 +52,14 @@ _STATE_DB = "state.db"
 # An envelope is stamped when its turn FINISHED, so it always lands after the
 # user message that started it — by the agent call's duration (the client's own
 # timeout caps that at 120s) plus a handoff summary on a rotating turn. 300s
-# covers the worst case with margin; beyond it, the nearest envelope is a
-# different turn and no envelope is the honest answer.
-NEAREST_TOLERANCE_SECONDS = 300.0
+# covers the worst case with margin; beyond it, the candidate message belongs to
+# a different turn and no envelope is the honest answer.
+BIND_TOLERANCE_SECONDS = 300.0
 
 # The outcomes that leave NO row in state.db: the message never reached the
 # agent. Only these are rendered from the envelope alone — "agent_failed" and
 # "silence" did reach Hermes, which recorded the user message itself.
-UNRECORDED_OUTCOMES = frozenset({"observed", "reset", "blocked"})
+UNRECORDED_OUTCOMES: frozenset[Outcome] = frozenset({"observed", "reset", "blocked"})
 
 _MESSAGE_COLUMNS = (
     "id, session_id, role, content, tool_name, tool_calls, "
@@ -81,9 +83,14 @@ _MESSAGE_COLUMNS = (
 # `tool_call_id` separates those while still collapsing the compaction copies.
 # 64 chars is enough to tell real messages apart without indexing whole tool
 # payloads (some are tens of KB).
+# `tool_calls` joins the key for the same reason `content` does: an assistant
+# turn that ONLY makes tool calls has an empty content, so two such turns in the
+# same tick would otherwise collapse into one and lose a whole branch of the
+# transcript.
 _DEDUPE = (
     "id IN (SELECT MIN(id) FROM messages GROUP BY session_id, role, timestamp, tool_name, "
-    "COALESCE(tool_call_id, ''), COALESCE(substr(content, 1, 64), ''))"
+    "COALESCE(tool_call_id, ''), COALESCE(substr(content, 1, 64), ''), "
+    "COALESCE(substr(tool_calls, 1, 64), ''))"
 )
 
 _SESSION_COLUMNS = (
@@ -185,57 +192,92 @@ class RoomSummary:
 
 @dataclass
 class EnvelopeIndex:
-    """A room's turn envelopes, indexed for the nearest-timestamp join.
+    """A room's turn envelopes, indexed for the one-to-one join onto messages.
 
     A turn envelope is stamped when the turn *finished*, so it always lands
-    after the message that started it; `nearest` therefore only ever looks
-    forward in time (see its docstring), which is unambiguous as long as a
-    room's turns don't overlap (single-worker deployment — see group_context).
+    after the user message that started it. Turns CAN overlap: a second message
+    arriving while a turn is still in flight is handled concurrently (see
+    group_context's module header), so an envelope's own stamp is not enough to
+    tell whose turn it was. `bind_messages` therefore assigns envelopes to user
+    messages exhaustively rather than looking each message up on its own — one
+    envelope labels exactly one message, and a message no envelope claims reads
+    as "no envelope", which is the honest answer.
 
     Attributes:
         envelopes: Every envelope read, in file order.
-        by_session: session_id -> its envelopes sorted by timestamp.
+        by_session: session_id -> (timestamp, position in `envelopes`), sorted
+            by timestamp.
+        bound: Positions in `envelopes` that the last `bind_messages` call
+            matched to a message. Callers use it to find the envelopes that
+            have NO message in state.db — the turns that never reached the
+            agent, which only this record remembers.
+        unreadable_lines: Lines the file held that could not be parsed at all
+            (invalid JSON, or JSON that is not a valid envelope). Surfaced so
+            schema drift shows up as a warning instead of missing turns.
+        future_schema_lines: Lines whose `schema_version` is newer than this
+            build understands; they are still parsed (unknown fields are
+            ignored) but may be missing meaning.
     """
 
     envelopes: list[TurnEnvelope] = field(default_factory=list)
-    by_session: dict[str, list[tuple[float, TurnEnvelope]]] = field(default_factory=dict)
+    by_session: dict[str, list[tuple[float, int]]] = field(default_factory=dict)
+    bound: set[int] = field(default_factory=set)
+    unreadable_lines: int = 0
+    future_schema_lines: int = 0
 
-    def nearest(
-        self, session_id: str, ts: float, *, tolerance: float = NEAREST_TOLERANCE_SECONDS
-    ) -> TurnEnvelope | None:
-        """Find the envelope of the turn a message at `ts` belongs to.
+    def bind_messages(
+        self,
+        messages: Iterable[MessageRow],
+        *,
+        tolerance: float = BIND_TOLERANCE_SECONDS,
+    ) -> dict[int, TurnEnvelope]:
+        """Match each envelope to the one user message whose turn it describes.
 
-        The search is forward-only: a turn's envelope is stamped when that turn
-        ENDED, so the envelope belonging to a message is always the first one
-        at or after it. Taking the nearest in either direction gets this wrong
-        for exactly the case that matters — back-to-back turns. A 30-second
-        turn's envelope lands 30s after its own user message but only a few
-        seconds before the NEXT one, so the next message would be labelled with
-        the previous turn's outcome and latency, and the last message of a room
-        would inherit an envelope it has nothing to do with.
+        Envelopes are walked oldest-first per session; each takes the LATEST
+        still-unclaimed `role='user'` message at or before its own stamp, within
+        `tolerance`. That ordering is what makes overlapping turns come out
+        right: when a slow turn and a fast turn are in flight together, the fast
+        turn's envelope lands first and claims the later (second) message, which
+        leaves the earlier message for the slow envelope that follows — the
+        assignment a per-message "first envelope after me" lookup gets backwards.
+
+        The matching is exhaustive rather than per-message because it must be
+        one-to-one: the old lookup handed the same envelope to every message
+        inside its window, so one failed turn could stamp "agent_failed" and its
+        latency onto four unrelated messages.
 
         Args:
-            session_id: The message's session id.
-            ts: The message's unix timestamp.
-            tolerance: Maximum gap to accept, in seconds. Without it the first
-                envelope after a message in a long-lived session could be hours
-                later and describe an entirely different turn — every message in
-                a room that has one envelope would be labelled with it.
+            messages: The room's messages, any order; non-user rows are ignored
+                (an envelope describes a turn, and a turn starts with a user
+                message — the assistant and tool rows of that turn carry no
+                envelope of their own).
+            tolerance: Maximum seconds an envelope may sit after its message.
 
         Returns:
-            The earliest envelope in that session at or after `ts` and within
-            `tolerance`, or None — which is also what a turn from before this
-            feature, a turn whose envelope was never written, or a room whose
-            envelopes were disabled, correctly reads as.
+            message id -> its envelope, for the messages that got one. Also
+            refreshes `bound` with the positions of the envelopes that matched.
         """
-        candidates = self.by_session.get(session_id)
-        if not candidates:
-            return None
-        # by_session is sorted ascending, so the first hit is the earliest.
-        for envelope_ts, envelope in candidates:
-            if envelope_ts >= ts:
-                return envelope if envelope_ts - ts <= tolerance else None
-        return None
+        self.bound.clear()
+        users_by_session: dict[str, list[MessageRow]] = {}
+        for message in messages:
+            if message.role == "user":
+                users_by_session.setdefault(message.session_id, []).append(message)
+
+        bindings: dict[int, TurnEnvelope] = {}
+        for session_id, entries in self.by_session.items():
+            users = sorted(users_by_session.get(session_id, []), key=lambda m: (m.timestamp, m.id))
+            stamps = [message.timestamp for message in users]
+            claimed: set[int] = set()
+            for envelope_ts, position in entries:
+                cursor = bisect_right(stamps, envelope_ts) - 1
+                while cursor >= 0 and envelope_ts - stamps[cursor] <= tolerance:
+                    if cursor not in claimed:
+                        claimed.add(cursor)
+                        bindings[users[cursor].id] = self.envelopes[position]
+                        self.bound.add(position)
+                        break
+                    cursor -= 1
+        return bindings
 
 
 def _as_str(value: object) -> str:
@@ -575,33 +617,57 @@ def search_messages(
 def read_envelopes(conversations_dir: Path, room_id: str) -> EnvelopeIndex:
     """Read and index one room's turn envelopes.
 
-    A missing file, a blank line, or a line written by a future schema is
-    normalized away here (the unreadable line is skipped), so every caller sees
-    the same thing: an index that may simply be empty.
+    A missing file and a blank line are normalized away, so every caller sees
+    the same thing: an index that may simply be empty. A line that cannot be
+    parsed is skipped but COUNTED — dropping it silently is how a schema change
+    turns into "some turns just aren't there any more" with nothing to notice.
+    The same goes for a line stamped with a newer `schema_version` than this
+    build knows: it is still parsed (extra fields are ignored) and counted.
+
+    The file is streamed a line at a time rather than read whole: it is
+    append-only, never pruned unless an operator runs `conversations.py prune`,
+    and one busy room's file grows without bound.
 
     Args:
         conversations_dir: DATA_DIR / "_conversations".
         room_id: The room whose <room_id>.jsonl to read.
 
     Returns:
-        An EnvelopeIndex; empty when the room has no envelope file.
+        An EnvelopeIndex; empty when the room has no envelope file. Its
+        `unreadable_lines` and `future_schema_lines` counters are what a CLI
+        turns into a warning.
+
+    Raises:
+        OSError: If the file exists but cannot be opened or read.
     """
     index = EnvelopeIndex()
     path = conversations_dir / f"{room_id}.jsonl"
     if not path.exists():
         return index
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
-        try:
-            envelope = TurnEnvelope.model_validate_json(line)
-        except ValidationError:
-            continue
-        index.envelopes.append(envelope)
-        if envelope.session_id:
-            index.by_session.setdefault(envelope.session_id, []).append(
-                (parse_iso(envelope.ts), envelope)
-            )
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                index.unreadable_lines += 1
+                continue
+            if isinstance(payload, dict):
+                version = payload.get("schema_version")
+                if isinstance(version, int) and version > ENVELOPE_SCHEMA_VERSION:
+                    index.future_schema_lines += 1
+            try:
+                envelope = TurnEnvelope.model_validate(payload)
+            except ValidationError:
+                index.unreadable_lines += 1
+                continue
+            position = len(index.envelopes)
+            index.envelopes.append(envelope)
+            if envelope.session_id:
+                index.by_session.setdefault(envelope.session_id, []).append(
+                    (parse_iso(envelope.ts), position)
+                )
     for entries in index.by_session.values():
         entries.sort(key=lambda item: item[0])
     return index

@@ -62,18 +62,14 @@ CONTAINER_MCP_DIR = f"{CONTAINER_DATA_DIR}/mcp"
 CONTAINER_GOOGLE_DIR = "/opt/google-workspace"
 
 # Docker labels every room container carries, so a log collector can tell which
-# room (and channel) a stdout line belongs to without parsing it — Alloy's
-# discovery.docker filters and relabels on exactly these (docs/logging-design.md
-# §5.2). Labels are set at creation time only: a container created before this
-# existed must be `docker rm -f`'d for the router to recreate it with them.
+# room a stdout line belongs to without parsing it — Alloy's discovery.docker
+# filters and relabels on exactly these (docs/logging-design.md §5.2). The
+# channel is not a separate label: a room key is `<channel>_<native id>`, so
+# alice.room_id already carries it. Labels are set at creation time only: a
+# container created before this existed must be `docker rm -f`'d for the router
+# to recreate it with them.
 _LABEL_ROLE = "alice.role"
 _LABEL_ROOM_ID = "alice.room_id"
-_LABEL_CHANNEL = "alice.channel"
-
-# Room keys are `<channel>_<native id>` (channels/line/events.py owns the LINE
-# one). Anything without a recognized prefix — rooms created before prefixing,
-# and test ids — is a LINE room, so that is the fallback.
-_KNOWN_CHANNELS = frozenset({"line", "api"})
 
 # Per-container stdout cap. Docker's json-file driver does NOT rotate by
 # default, so an idle-but-long-lived room would grow without bound; 10m x 3
@@ -542,20 +538,6 @@ def _get_container_url(
     return f"http://localhost:{host_port}"
 
 
-def _channel_of(room_id: str) -> str:
-    """Name the channel a room key came from, for the container's label.
-
-    Args:
-        room_id: The room key (`<channel>_<native id>`).
-
-    Returns:
-        The key's channel prefix when it names a channel this router speaks,
-        else "line" — the only channel that had rooms before prefixing.
-    """
-    prefix = room_id.split("_", 1)[0]
-    return prefix if prefix in _KNOWN_CHANNELS else "line"
-
-
 def _create_container(
     client: docker.DockerClient,
     container_name: str,
@@ -607,7 +589,6 @@ def _create_container(
         labels={
             _LABEL_ROLE: "agent",
             _LABEL_ROOM_ID: room_id,
-            _LABEL_CHANNEL: _channel_of(room_id),
         },
         log_config=docker.types.LogConfig(
             type=docker.types.LogConfig.types.JSON,

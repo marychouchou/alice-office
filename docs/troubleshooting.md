@@ -35,7 +35,7 @@ Google Calendar／Drive／Gmail 工具）之後確認的，不是憑 Hermes 官�
 沒有另外設檔案 handler，所以 router 的 log **就是它的 process 標準輸出**：host 模式
 是 terminal，container 模式是 `docker compose logs webhook_router`（`json-file`
 log driver 已經在幫你把它寫進磁碟，見第 4 節）。預設 `LOG_FORMAT=json`，一行一個
-JSON 物件（`docker compose logs webhook_router | jq .`），每行自帶 `request_id`、
+JSON 物件（`docker compose logs --no-log-prefix webhook_router | jq .`），每行自帶 `request_id`、
 `room_key`、`event_id`、`channel`、`container` 等欄位，所以可以直接用
 `jq 'select(.room_key=="line_U1234")'` 把單一房間的行挑出來；本機開發設
 `LOG_FORMAT=console` 會變成彩色好讀的格式。目前 router（`channels/line/adapter.py`、
@@ -220,7 +220,7 @@ sqlite3 data/<room_id>/state.db "
 出來。
 
 **容器的 label 與 log 上限**：router 建立房間容器時會帶上
-`alice.role=agent`／`alice.room_id=<room_id>`／`alice.channel=<channel>`，並把
+`alice.role=agent`／`alice.room_id=<room_id>`（room key 的前綴已經帶著 channel，所以沒有第三個 label），並把
 stdout 限制成 `json-file` 的 10m × 3（見 `docs/logging-design.md` §5.2）。這兩個
 都是**建立時**才決定的屬性：2026-09 之前建立的既有房間容器沒有 label、也沒有大小
 上限，重啟或升級 image 都不會補上——要讓它們生效只能砍掉讓 router 重建：
@@ -365,7 +365,7 @@ image 重建（`data/<room_id>/` 不動）。有 1 沒 2 → `docker restart` �
 | 看 router 自己的 log（容器化部署） | `docker compose logs -f webhook_router` |
 | 手動送一則測試訊息打整條路 | `uv run python scripts/test_webhook.py --user-id <room_id> --text "..."` |
 | 列出所有正在跑的 hermes 容器 | `docker ps --filter name=hermes_` |
-| 只挑某個房間的 router log 行 | `docker compose logs webhook_router \| jq 'select(.room_key=="<room_id>")'` |
+| 只挑某個房間的 router log 行 | `docker compose logs --no-log-prefix webhook_router \| jq 'select(.room_key=="<room_id>")'`（沒有 `--no-log-prefix` 的話每行前面會多一段 `webhook_router  \|`，jq 會直接 parse error） |
 | 確認容器的 label 與 log 上限有生效 | `docker inspect hermes_<room_id> \| jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'` |
 | 啟用集中式 log（Alloy+Loki+Grafana，選配） | `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d` |
 | 關掉集中式 log（router 不受影響） | `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml stop alloy loki grafana` |
@@ -376,6 +376,7 @@ image 重建（`data/<room_id>/` 不動）。有 1 沒 2 → `docker restart` �
 | 跨房間找「誰問過某個關鍵字」 | `uv run python scripts/conversations.py search "<關鍵字>"` |
 | 把某房間匯出成 Claude Code 可 `@file` 的逐字稿 | `uv run python scripts/conversations.py export --room <room_id> --since 7d --format md --out /tmp/x` |
 | outcome 分布／agent_failed 率／p95 耗時 | `uv run python scripts/conversations.py stats --since 30d` |
+| 清掉太舊的 turn envelope（`_conversations/*.jsonl` 預設永不刪，這是唯一的保留期工具；先 `--dry-run`） | `uv run python scripts/conversations.py prune --older-than 90d --dry-run` |
 | 產一份給人看的單房間 HTML transcript | `docker exec hermes_<room_id> hermes sessions export --session-id <session_id> --format html --yes /tmp/x.html` |
 | 看某房間的 token／成本／工具使用統計 | `docker exec hermes_<room_id> hermes insights --days 7` |
 | 看某個 session 的 Hermes 內部 log | `docker exec hermes_<room_id> hermes logs --session <session_id>` |

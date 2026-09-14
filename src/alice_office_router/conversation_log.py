@@ -39,11 +39,27 @@ The envelope is emitted by the *adapter*, not by core: `delivered` is only
 known once the channel has tried to send, so core returns the draft
 (`core.InboundResult.envelope`) and each adapter fills that one field in before
 calling `record_turn`.
+
+Adding a new outcome
+--------------------
+`Outcome` below is the single definition every other module imports; adding a
+value means touching all five of these, in order:
+
+1. `Outcome` here — the Literal itself.
+2. `core._route` — the branch that actually returns the new outcome, and
+   `core._TEXT_IN_STATE_DB` (does Hermes already hold this outcome's message
+   text, or is this envelope the only copy?).
+3. `conversation_store.UNRECORDED_OUTCOMES` — add it only if the message never
+   reached Hermes, i.e. state.db holds no row for the turn.
+4. `scripts/conversations.py` — `_is_missing_from_state_db` if the answer to
+   (3) was conditional, and any rendering that names outcomes.
+5. `docs/logging-design.md` §5.7's outcome table.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -73,6 +89,13 @@ _JSONL_ONLY_FIELDS = frozenset({"inbound_text", "sender_id", "sender_name"})
 SCHEMA_VERSION = 1
 
 Outcome = Literal["replied", "observed", "reset", "blocked", "agent_failed", "silence"]
+
+# The envelope file holds the only copy of a message's text that ever leaves the
+# turn, for the outcomes whose message never reached Hermes. `_conversations/`
+# is therefore owner-only: the rest of DATA_DIR is per-room bind mounts a
+# container writes, but nothing except the router ever needs to read this.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
 
 
 def _now_iso() -> str:
@@ -178,7 +201,9 @@ def record_turn(envelope: TurnEnvelope, config: Settings) -> None:
 
     path = config.room_conversation_log(envelope.room_key)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # `mode` applies only to directories this call creates, and umask can
+        # only take bits away, so there is no "first time?" branch to write.
+        path.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
         # One open-append-close per turn, and one `write()` of one line. That is
         # atomic enough for the current deployment only because it runs a SINGLE
         # uvicorn worker: O_APPEND makes concurrent writers interleave safely at
@@ -186,7 +211,11 @@ def record_turn(envelope: TurnEnvelope, config: Settings) -> None:
         # write() calls, and two processes would then interleave halves. If the
         # deployment ever grows to multiple workers (or a second process writing
         # these files), this sink needs a lock or one file per worker.
-        with path.open("a", encoding="utf-8") as handle:
+        #
+        # os.open rather than Path.open: the 0600 must be on the file from the
+        # moment it exists, and `Path.open("a")` creates it 0666 & ~umask.
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _FILE_MODE)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
             handle.write(f"{envelope.model_dump_json()}\n")
     except OSError as exc:
         logger.error(f"Failed to append conversation envelope for room {envelope.room_key}: {exc}")

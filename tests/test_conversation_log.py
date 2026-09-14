@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,17 @@ def test_file_lives_outside_the_rooms_own_data_dir(tmp_path: Path) -> None:
 
     assert settings.conversations_dir == tmp_path / "_conversations"
     assert not (tmp_path / "line_room_AAA").exists()
+
+
+def test_envelope_file_and_directory_are_owner_only(tmp_path: Path) -> None:
+    """This file holds the only copy of the text of every turn that never ran."""
+    settings = _settings(tmp_path)
+
+    record_turn(_envelope("blocked", inbound_text="沒授權的訊息"), settings)
+
+    path = settings.room_conversation_log("line_room_AAA")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(settings.conversations_dir.stat().st_mode) == 0o700
 
 
 def test_unwritable_directory_is_logged_not_raised(tmp_path: Path) -> None:

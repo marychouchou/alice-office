@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+
+import pytest
+from pydantic import ValidationError
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
@@ -748,6 +752,67 @@ async def test_envelope_outcome_silence(tmp_path: Path) -> None:
     assert result.envelope.outcome == "silence"
     assert result.envelope.error is None
     assert result.envelope.session_id == "line_C1"
+    # The message DID reach Hermes, which recorded it — the envelope must not
+    # keep a second copy of the text (conversation_store.UNRECORDED_OUTCOMES).
+    assert result.envelope.inbound_text is None
+
+
+async def test_timeout_error_names_the_exception_type_not_its_empty_message(
+    tmp_path: Path,
+) -> None:
+    """httpx timeouts stringify to "" — the error field must still say something."""
+    import httpx
+
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(side_effect=httpx.ReadTimeout("")),
+        ),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    assert result.envelope.error == "agent: ReadTimeout"
+
+
+async def test_validation_error_never_carries_the_rejected_input(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """pydantic embeds the value it refused — here, the agent's reply text."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+    # AgentReply.text is a str, so an int fails validation and the reply text
+    # this stands in for would otherwise be quoted into the exception's str().
+    with pytest.raises(ValidationError) as excinfo:
+        AgentReply(text={"leaked": "s3cret-reply-text"})  # type: ignore[arg-type]
+    failure = excinfo.value
+
+    with (
+        caplog.at_level(logging.ERROR),
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock(side_effect=failure)),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    error = result.envelope.error
+    assert error is not None
+    assert error.startswith("agent: ValidationError")
+    assert "text" in error
+    assert "s3cret-reply-text" not in error
+    assert not any("s3cret-reply-text" in record.getMessage() for record in caplog.records)
 
 
 async def test_envelope_records_rotation_and_request_context(tmp_path: Path) -> None:

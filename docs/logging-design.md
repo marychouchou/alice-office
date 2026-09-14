@@ -189,10 +189,14 @@ LINE webhook 的 body 不記錄（見 §6）。
 labels={
     "alice.role": "agent",
     "alice.room_id": room_id,
-    "alice.channel": channel,   # InboundMessage.channel；Phase 1 先固定 "line"
 },
 log_config=LogConfig(type="json-file", config={"max-size": "10m", "max-file": "3"}),
 ```
+
+**只有這兩個 label**。曾經有第三個 `alice.channel`，2026-09-14 拿掉了：room key 的形狀
+就是 `<channel>_<native id>`，`alice.room_id` 已經帶著 channel，多一個 label 只是多一份
+要維護的推導（而且 Alloy 那端從來沒用到它）。要按 channel 過濾就用
+`{service="agent", room_id=~"line_.*"}`。
 
 `docker-compose.yml` 的 `webhook_router` 加：
 
@@ -409,7 +413,7 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 | `schema_version`, `ts`, `request_id`, `event_id`, `channel`, `room_key` | 同前 |
 | `session_id` | 這一輪送給 Hermes 的 session id（含 epoch）——**對回 `state.db.sessions.id` 的 join key** |
 | `outcome` | `replied` / `observed` / `reset` / `blocked` / `agent_failed` / `silence`；後五種在 `state.db` 裡**沒有對應紀錄**，這是 envelope 存在的主因 |
-| `inbound_text` | **JSONL only**。只在 `outcome != replied` 時填（進了 agent 的文字 `state.db` 已有；沒進的只有這裡有） |
+| `inbound_text` | **JSONL only**。只在 Hermes 自己沒記的那些 outcome 才填（`core._TEXT_IN_STATE_DB` = `replied` + `silence`；`silence` 也進了 agent，所以同樣不重複記）。`agent_failed` 刻意保留：它有一半的情況（容器起不來、連不上）根本沒碰到 Hermes，這份 envelope 是唯一記得使用者說了什麼的地方 |
 | `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
 | `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
 | `gate_status`, `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
@@ -417,6 +421,35 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 
 `process_inbound` 拆成 `_route` + 薄包裝的做法不變；只是發出點移到 adapter，讓
 `delivered` 能一次寫進去而不是事後補一行 error log。
+
+**`error` 欄位不能直接塞 `str(exc)`**（2026-09-14 review 後改）：pydantic 的
+`ValidationError.__str__` 會把它拒絕的那個值一起印出來——在這條路徑上那就是 agent 的
+回覆文字，正好是 log stream 不能帶的東西；反過來 `str(httpx.ReadTimeout(""))` 是空字串，
+欄位會變成沒有資訊的 `"agent: "`。`core._describe_error` 因此只組
+`"<origin>: <例外類別名>"`，非 pydantic 的例外再接一段截到 200 字的訊息，pydantic 的則
+只留錯誤數量與欄位路徑（`exc.error_count()` / `loc`），永遠不碰 `input`。
+
+**Envelope 與 `state.db` 訊息是一對一的**：一個 envelope 只會標到一則 `role='user'`
+訊息。`EnvelopeIndex.bind_messages` 依 envelope 由舊到新走，每個 envelope 認領「自己
+時間戳之前、還沒被認領的最後一則 user 訊息」（容忍 300 秒）。這個順序才吃得下重疊的
+turn：一則慢（120s）一則快（2s）同時在飛時，快的 envelope 先落地並認領較晚的那則訊息，
+較早的訊息就留給後面那個慢的 envelope。早期版本是「每則訊息各自找自己之後最近的
+envelope」，同一個 envelope 會被四則訊息共用，一次 `agent_failed` 就把結果狀態與耗時
+蓋到四則不相干的訊息上。
+
+**保留期**：`data/_conversations/<room_id>.jsonl` 是整個部署裡**唯一**保有「沒進到
+agent 的訊息原文」的地方（`state.db` 那半邊由 Hermes 自己管），而且 router 只 append、
+**預設永遠不刪**。保留期的槓桿只有一個：
+
+```bash
+# 先看會刪幾行（不寫任何東西）
+uv run python scripts/conversations.py prune --older-than 90d --dry-run
+# 真的刪（同目錄 .tmp + os.replace，一個房間一個檔）
+uv run python scripts/conversations.py prune --older-than 90d
+```
+
+檔案與目錄權限是 0600／0700。讀不動的行（schema 漂移、檔案被截斷）prune 會保留——
+一行讀不懂本身就是要給人看的證據——而 CLI 會把這種行數印成 warning，不會靜默跳過。
 
 ### 5.8 查看對話與餵給 Claude Code
 
@@ -488,6 +521,10 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
   不做。
 - 房間隔離：Loki 是單 tenant，operator 能看所有房間——這符合「operator 是部署者」的
   角色；房間間彼此看不到，因為使用者從不接觸 Grafana，而且網路上也到不了 Loki。
+- **`data/_conversations/*.jsonl` 是唯一保有原文的 sink**（§5.7）：檔案與目錄都是
+  owner-only（0600／0700），預設**永遠不刪**。要有保留期就自己排
+  `scripts/conversations.py prune --older-than 90d`（先用 `--dry-run` 看會刪幾行）。
+  完全不想要這份紀錄就 `CONVERSATION_LOG_ENABLED=false`。
 
 ## 7. 非目標與未來延伸
 
@@ -524,7 +561,7 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
       `request_id` 與 `room_key`；驗證 `LOG_LEVEL=DEBUG` 生效；驗證 console 模式不炸。
 - [x] 驗收：`LOG_FORMAT=console` 本機可讀、`LOG_FORMAT=json` 每行可被 `json.loads`
       解析（本機用 TestClient 打一個 404 實測）。容器模式的
-      `docker compose logs webhook_router | jq .` 待下次部署時順手確認。
+      `docker compose logs --no-log-prefix webhook_router | jq .` 待下次部署時順手確認。
 
 ### Phase 1／1b 的 review 修正 — [x]（2026-09-14）
 
@@ -610,8 +647,9 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
 ### Phase 2：容器 label 與 log 輪替 — [x]（2026-09-14 實作）
 
 - [x] `container_manager.py` `containers.run` 加 `labels=` 與 `log_config=`
-      （`docker.types.LogConfig`）。`alice.channel` 由 room key 的前綴推導
-      （`_channel_of`，認得的前綴才用，其餘一律 `line`）。
+      （`docker.types.LogConfig`）。原本還有第三個 `alice.channel`（由 room key 前綴
+      推導），2026-09-14 連同 `_channel_of` 一起拿掉：`alice.room_id` 已經帶著 channel
+      前綴，Alloy 那端也從來沒用到它。
 - [x] `docker-compose.yml` 加 `labels` 與 `logging` 區塊。
 - [x] `tests/test_container_manager.py` 補 assert：`labels["alice.room_id"] == room_id`、
       `log_config` 型別與 `max-size`。
@@ -679,6 +717,36 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
 - [x] README 與 `scripts/deploy_host.sh --with-logging` 補上「舊房間容器沒有 label，
       要 `docker rm -f` 讓 router 重建才收得到」。
 
+### Phase 1b 的 adversarial review 修正（conversation 面）— [x]（2026-09-14）
+
+- [x] **envelope ↔ 訊息改成一對一**（`EnvelopeIndex.bind_messages`）。舊的
+      `nearest()` 讓一個 envelope 標到 300 秒窗內的每一則訊息：實測本機唯一房間有
+      2 筆 envelope，卻有 4 則訊息被標成 `agent_failed`。新做法依 envelope 由舊到新
+      認領「自己之前、還沒被認領的最後一則 user 訊息」，重疊的 turn 也對得上；修完
+      同一個房間的 `agent_failed` 剛好 2 則。`NEAREST_TOLERANCE_SECONDS` 更名
+      `BIND_TOLERANCE_SECONDS`；docstring 原本寫「單一 worker 所以 turn 不會重疊」是
+      錯的（`group_context` 的說明就寫著在飛的 turn 期間會收到第二則訊息），已改掉。
+      CLI 也不再用 `id(envelope)` 判斷「這個 envelope 被認領了沒」，改用
+      `EnvelopeIndex.bound` 裡的位置。
+- [x] **`error` 欄位不再夾帶內容**（`core._describe_error`，見 §5.7）。
+- [x] **讀不動的 envelope 行不再靜默丟掉**：`read_envelopes` 改成逐行串流（不再
+      `read_text()` 整檔進記憶體），數出解析失敗的行數與 `schema_version` 超前的行數，
+      CLI 印成 warning。
+- [x] **envelope 檔案的保留期與權限**：目錄 0700、檔案 0600（`os.open` 帶 mode），
+      新增 `scripts/conversations.py prune --older-than <Nd> [--room ID] [--dry-run]`
+      （同目錄 `.tmp` + `os.replace`）。§5.7／§6 與 `docs/troubleshooting.md` §3 補上
+      「這是唯一留著原文的 sink、預設永不刪」。
+- [x] 其餘：拿掉沒人用的 `alice.channel` label 與 `_channel_of`（§5.2）；`Outcome`
+      收斂成 `conversation_log` 一處定義（`core.AgentTurn`、
+      `conversation_store.UNRECORDED_OUTCOMES`、CLI 常數都引用它），並在
+      `conversation_log` 的模組 docstring 寫下「新增 outcome 要改哪五個地方」；
+      `silence` 不再記 `inbound_text`（它有進到 Hermes）；`_DEDUPE` 的 GROUP BY 加上
+      `tool_calls` 前綴（只發 tool call 的 assistant turn 內容是空的，同一 tick 兩筆會
+      被誤併）；`cmd_rooms` 也接 `OSError`（一個壞掉的 jsonl 不該讓整張表印不出來）；
+      LINE adapter 兩處 `event_id` 綁定方式一致（沒有就不綁，不綁成 None）；
+      文件裡的 `docker compose logs webhook_router | jq .` 全部補 `--no-log-prefix`
+      （沒有它每行會多一段服務名前綴，jq 直接 parse error）。
+
 ### Phase 4（可選）：Dashboard 與告警 — [ ]
 
 - [ ] `deploy/logging/grafana/provisioning/dashboards/` 一個 overview：每房間 log 速率、
@@ -698,6 +766,7 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
 | 堆疊的 RAM 成本 | §3 表格原本估「約 2–4 GB RAM」 | 實測遠低於此：`docker stats --no-stream` 顯示 Alloy 65–69 MB、Loki 107–157 MB、Grafana 310–353 MB，**合計約 480–580 MB**。原估計是照 Loki 官方對「有查詢負載的生產叢集」的建議抄的，對單機、單 operator、偶爾查一次的用法過度保守——`docs/troubleshooting.md` §4 用實測值 |
 | Loki 的 ring 在筆電休眠後會短暫不健康 | 本機實測出現過 `at least 1 healthy replica required`（compactor／scheduler），因為 `kvstore: inmemory` 的心跳被主機睡眠打斷 | 會自己恢復，正式部署（不休眠的主機）不會遇到；若在筆電上長開，休眠期間推進去的行有機會查不到，重啟 Loki 即可 |
 | Grafana 自己的 stdout 會被收進 Loki | Loki／Grafana 兩個 infra 容器有 `alice.role` label，Grafana 開機的 migration log 一次就是一兩千行 | 接受：它有 30 天保留與 label 隔離（`{service="infra"}`），要靜音就把 compose 的 `alice.role: infra` 拿掉，代價是堆疊自己壞掉時查不到。**Alloy 自己刻意沒有這個 label**：Loki 掛掉時它每次 push 失敗都寫一行 error，如果那些行也要 push 給同一個掛掉的 Loki，故障就會自我放大 |
+| `conversation_store.py` 已 812 行 | Growth Discipline 的 400 行門檻已過，裡面混了「state.db 查詢」與「envelope 讀取／join」兩種改動理由 | **本輪不拆**（範圍外）。下次動到這個檔案時，按改動理由拆成 `conversation_store.py`（state.db）與 `envelope_store.py`（envelope 讀取、`EnvelopeIndex`、prune），CLI 的 import 跟著改 |
 
 ## 來源
 
