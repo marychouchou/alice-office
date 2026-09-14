@@ -110,6 +110,22 @@ def warn(message: str) -> None:
     print(f"warning: {message}", file=sys.stderr)
 
 
+def _since(args: argparse.Namespace) -> float | None:
+    """把 `--since` 解析成 unix timestamp；沒給是 None，格式錯就以 2 結束。
+
+    打錯 `--since` 是使用者輸入錯誤，不是程式壞掉——印一行看得懂的用法，用
+    exit code 2（argparse 的用法錯誤慣例）結束，不要吐一整段 traceback。
+    """
+    value: str | None = getattr(args, "since", None)
+    if not value:
+        return None
+    try:
+        return parse_since(value)
+    except ValueError:
+        warn(f"invalid --since {value!r}: use 7d / 36h / 90m or an absolute YYYY-MM-DD")
+        raise SystemExit(2) from None
+
+
 def _sender_label(envelope: TurnEnvelope, raw: bool) -> str:
     """組出群組發言者標示（1:1 房間回空字串）。"""
     if not envelope.is_group:
@@ -188,15 +204,16 @@ def render_transcript(
 ) -> list[str]:
     """把 state.db 訊息與「沒進 agent」的 envelope 合併成一份時間序逐字稿。"""
     entries: list[tuple[float, int, list[str]]] = []
+    bound: set[int] = set()
     for message in messages:
         envelope = index.nearest(message.session_id, message.timestamp)
+        if envelope is not None:
+            bound.add(id(envelope))
         lines = _render_message(message, envelope, ctx, args)
         if lines:
             entries.append((message.timestamp, message.id, lines))
     for envelope in index.envelopes:
-        # Only the turns state.db never saw; everything else is already above,
-        # tagged with this same envelope via index.nearest.
-        if envelope.outcome not in UNRECORDED_OUTCOMES:
+        if not _is_missing_from_state_db(envelope, bound):
             continue
         if session_id is not None and envelope.session_id != session_id:
             continue
@@ -208,17 +225,39 @@ def render_transcript(
     return [line for _, _, lines in entries for line in lines]
 
 
-def _open_room(ctx: Context, room_id: str) -> sqlite3.Connection | None:
-    """開一個房間的 state.db（唯讀），順便檢查 schema 版本；開不起來回 None。"""
+def _is_missing_from_state_db(envelope: TurnEnvelope, bound: set[int]) -> bool:
+    """這一輪 state.db 裡有沒有對應紀錄——沒有的話逐字稿要由 envelope 補上。
+
+    兩種情況：`observed`／`reset`／`blocked` 依定義就沒送進 agent；以及
+    `agent_failed` 裡「連 Hermes 都沒碰到」的那一半——容器起不來、HTTP 連不上，
+    Hermes 因此連 user 訊息都沒寫。後者若不補，一個容器壞掉的房間會印出一份空的
+    逐字稿，正好把最需要看的東西藏起來。有碰到 Hermes 的 `agent_failed`（`bound`
+    裡有，代表有訊息接到這個 envelope）已經從 state.db 印過了，不能再印一次。
+    """
+    if envelope.outcome in UNRECORDED_OUTCOMES:
+        return True
+    return envelope.outcome == "agent_failed" and id(envelope) not in bound
+
+
+def _read_room[T](ctx: Context, room_id: str, read: Callable[[sqlite3.Connection], T]) -> T | None:
+    """唯讀開一個房間的 state.db 讀一次，讀不動就 warn 並回 None。
+
+    回 None 而不是讓例外往上炸，是因為每個呼叫端都在跑跨房間迴圈：一個房間的
+    `-shm` 屬於別的 uid、檔案是壞的、或 schema 少了某張表，都不該讓整份輸出中斷。
+    """
     path = state_db_path(ctx.data_dir, room_id)
     if not path.exists():
         warn(f"room {room_id} has no state.db at {path}")
         return None
-    connection = connect_state_db(path)
-    _, message = check_schema_version(connection)
-    if message:
-        warn(f"{room_id}: {message}")
-    return connection
+    try:
+        with closing(connect_state_db(path)) as connection:
+            _, message = check_schema_version(connection)
+            if message:
+                warn(f"{room_id}: {message}")
+            return read(connection)
+    except sqlite3.Error as exc:
+        warn(f"room {room_id}: unreadable state.db at {path} ({exc}); skipping")
+        return None
 
 
 def cmd_rooms(args: argparse.Namespace, ctx: Context) -> int:
@@ -233,7 +272,11 @@ def cmd_rooms(args: argparse.Namespace, ctx: Context) -> int:
     print(header)
     print("-" * len(header))
     for room_id in room_ids:
-        summary = room_summary(ctx.data_dir, ctx.conversations_dir, room_id)
+        try:
+            summary = room_summary(ctx.data_dir, ctx.conversations_dir, room_id)
+        except sqlite3.Error as exc:
+            warn(f"room {room_id}: unreadable state.db ({exc}); skipping")
+            continue
         print(
             f"{summary.room_id:<40} {summary.session_count:>5} {summary.message_count:>6} "
             f"{summary.envelope_count:>5} {summary.input_tokens:>9} {summary.output_tokens:>8} "
@@ -244,13 +287,18 @@ def cmd_rooms(args: argparse.Namespace, ctx: Context) -> int:
 
 def cmd_show(args: argparse.Namespace, ctx: Context) -> int:
     """印出一個房間的逐字稿（預設只有 user／assistant）。"""
-    connection = _open_room(ctx, args.room_id)
-    if connection is None:
+    since = _since(args)
+    result = _read_room(
+        ctx,
+        args.room_id,
+        lambda connection: (
+            read_sessions(connection),
+            read_messages(connection, session_id=args.session, since=since),
+        ),
+    )
+    if result is None:
         return 1
-    since = parse_since(args.since) if args.since else None
-    with closing(connection):
-        sessions = read_sessions(connection)
-        messages = read_messages(connection, session_id=args.session, since=since)
+    sessions, messages = result
 
     index = read_envelopes(ctx.conversations_dir, args.room_id)
     print(f"# {args.room_id}")
@@ -275,11 +323,13 @@ def cmd_search(args: argparse.Namespace, ctx: Context) -> int:
     room_ids = [args.room] if args.room else list_room_ids(ctx.data_dir)
     total = 0
     for room_id in room_ids:
-        connection = _open_room(ctx, room_id)
-        if connection is None:
+        hits = _read_room(
+            ctx,
+            room_id,
+            lambda connection: search_messages(connection, args.term, limit=args.limit),
+        )
+        if hits is None:
             continue
-        with closing(connection):
-            hits = search_messages(connection, args.term, limit=args.limit)
         for hit in hits:
             total += 1
             body = _truncate(hit.content.replace("\n", " "), 160)
@@ -300,13 +350,18 @@ class RoomExport:
 
 def _load_export(args: argparse.Namespace, ctx: Context) -> RoomExport | None:
     """把一個房間要匯出的內容一次讀齊；房間不存在回 None。"""
-    connection = _open_room(ctx, args.room)
-    if connection is None:
+    since = _since(args)
+    result = _read_room(
+        ctx,
+        args.room,
+        lambda connection: (
+            read_sessions(connection, since=since),
+            read_messages(connection, since=since),
+        ),
+    )
+    if result is None:
         return None
-    since = parse_since(args.since) if args.since else None
-    with closing(connection):
-        sessions = read_sessions(connection, since=since)
-        messages = read_messages(connection, since=since)
+    sessions, messages = result
     return RoomExport(
         room_id=args.room,
         sessions_count=len(sessions),
@@ -319,7 +374,7 @@ def _write_markdown(
     data: RoomExport, args: argparse.Namespace, ctx: Context, out_dir: Path
 ) -> Path:
     """一個房間一個 .md：YAML front matter ＋ 逐輪對話，可直接 @file 進 Claude Code。"""
-    since = parse_since(args.since) if args.since else None
+    since = _since(args)
     lines = [
         "---",
         f"room: {data.room_id}",
@@ -406,7 +461,7 @@ def _envelope_room_ids(ctx: Context) -> list[str]:
 
 def cmd_stats(args: argparse.Namespace, ctx: Context) -> int:
     """outcome 分布、agent_failed 率、p50/p95 耗時、blocked 後回流房間數。"""
-    since = parse_since(args.since) if args.since else None
+    since = _since(args)
     envelopes, recovered = _stats_rows(ctx, since)
     if not envelopes:
         print(f"no turn envelopes under {ctx.conversations_dir}")
@@ -430,7 +485,11 @@ def cmd_stats(args: argparse.Namespace, ctx: Context) -> int:
     p95 = percentile(durations, 0.95)
     print(
         "agent latency: "
-        + (f"p50={p50:.0f}ms p95={p95:.0f}ms (n={len(durations)})" if p50 and p95 else "no samples")
+        + (
+            f"p50={p50:.0f}ms p95={p95:.0f}ms (n={len(durations)})"
+            if p50 is not None and p95 is not None
+            else "no samples"
+        )
     )
     print(f"rooms that replied after a blocked turn: {len(recovered)}")
     return 0

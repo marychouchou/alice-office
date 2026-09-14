@@ -469,3 +469,273 @@ def test_cli_show_warns_on_an_unknown_room(
     """A room with no state.db is a warning plus a non-zero exit, not a traceback."""
     assert conversations.main(["--data-dir", str(data_dir), "show", "line_nope"]) == 1
     assert "has no state.db" in capsys.readouterr().err
+
+
+def test_back_to_back_turns_each_get_their_own_envelope(tmp_path: Path) -> None:
+    """An envelope is stamped at turn END, so it belongs to the message BEFORE it.
+
+    Two turns back to back — a 12s one then a 32s one. Turn 1's envelope lands
+    only 8s before turn 2's user message but 12s after its own, so a
+    nearest-in-either-direction join would label turn 2 with turn 1's outcome.
+    """
+    conversations_dir = tmp_path / "_conversations"
+    conversations_dir.mkdir(parents=True)
+    envelopes = [
+        # turn 1: user speaks at t=0, replied 12s later.
+        TurnEnvelope(
+            ts="1970-01-01T00:00:12Z",
+            channel="line",
+            room_key=_ROOM,
+            session_id=_SESSION,
+            outcome="replied",
+            agent_duration_ms=12_000.0,
+        ),
+        # turn 2: user speaks at t=20, the agent call fails 32s later.
+        TurnEnvelope(
+            ts="1970-01-01T00:00:52Z",
+            channel="line",
+            room_key=_ROOM,
+            session_id=_SESSION,
+            outcome="agent_failed",
+            agent_duration_ms=32_000.0,
+            error="agent: timeout",
+        ),
+    ]
+    (conversations_dir / f"{_ROOM}.jsonl").write_text(
+        "\n".join(envelope.model_dump_json() for envelope in envelopes) + "\n", encoding="utf-8"
+    )
+
+    index = read_envelopes(conversations_dir, _ROOM)
+    first = index.nearest(_SESSION, 0.0)
+    second = index.nearest(_SESSION, 20.0)
+
+    assert first is not None and first.outcome == "replied"
+    assert second is not None and second.outcome == "agent_failed"
+    # The assistant message of turn 1 (t=12) still belongs to turn 1.
+    turn_one_reply = index.nearest(_SESSION, 12.0)
+    assert turn_one_reply is not None and turn_one_reply.outcome == "replied"
+
+
+def test_nearest_never_looks_backwards(tmp_path: Path) -> None:
+    """A message after the last envelope has no envelope — not the previous turn's."""
+    conversations_dir = tmp_path / "_conversations"
+    conversations_dir.mkdir(parents=True)
+    envelope = TurnEnvelope(
+        ts="1970-01-01T00:00:12Z",
+        channel="line",
+        room_key=_ROOM,
+        session_id=_SESSION,
+        outcome="replied",
+    )
+    (conversations_dir / f"{_ROOM}.jsonl").write_text(
+        envelope.model_dump_json() + "\n", encoding="utf-8"
+    )
+
+    index = read_envelopes(conversations_dir, _ROOM)
+
+    assert index.nearest(_SESSION, 13.0) is None
+
+
+def test_two_distinct_tool_results_at_one_timestamp_are_both_kept(tmp_path: Path) -> None:
+    """Parallel tool calls return in the same tick — dedupe must not merge them."""
+    path = tmp_path / "data" / _ROOM / "state.db"
+    _build_state_db(path)
+    writable = sqlite3.connect(path)
+    with writable:
+        for tool_call_id, content in (("call_a", '{"ok": 1}'), ("call_b", '{"ok": 2}')):
+            writable.execute(
+                "INSERT INTO messages (session_id, role, content, tool_call_id, tool_name, "
+                "timestamp) VALUES (?,?,?,?,?,?)",
+                (_SESSION, "tool", content, tool_call_id, "math", 2_000.0),
+            )
+        # Two user messages inside the same second are distinct too.
+        for content in ("第一句", "第二句"):
+            writable.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)",
+                (_SESSION, "user", content, 2_001.0),
+            )
+    writable.close()
+
+    connection = connect_state_db(path)
+    try:
+        rows = read_messages(connection, since=2_000.0)
+    finally:
+        connection.close()
+
+    assert [row.content for row in rows] == ['{"ok": 1}', '{"ok": 2}', "第一句", "第二句"]
+
+
+def test_compaction_copies_are_still_collapsed(tmp_path: Path) -> None:
+    """The row compaction re-inserted is byte-identical — it must still show once."""
+    path = tmp_path / "data" / _ROOM / "state.db"
+    _build_state_db(path)
+    writable = sqlite3.connect(path)
+    with writable:
+        for compacted, active in ((1, 0), (1, 0), (0, 1)):
+            writable.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp, compacted, active) "
+                "VALUES (?,?,?,?,?,?)",
+                (_SESSION, "user", "壓縮前後都是同一句", 3_000.0, compacted, active),
+            )
+    writable.close()
+
+    connection = connect_state_db(path)
+    try:
+        rows = read_messages(connection, since=3_000.0)
+    finally:
+        connection.close()
+
+    assert [row.content for row in rows] == ["壓縮前後都是同一句"]
+
+
+# ---------------------------------------------------------------------------
+# CLI — a room that cannot be read must not abort the whole loop
+# ---------------------------------------------------------------------------
+
+
+def _add_broken_room(data_dir: Path, room_id: str = "line_broken") -> Path:
+    """Put a file named state.db that is not a database into a second room dir."""
+    path = data_dir / room_id / "state.db"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("this is not a sqlite database", encoding="utf-8")
+    return path
+
+
+def test_cli_rooms_skips_an_unreadable_room_and_keeps_going(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One corrupt state.db must not cost the operator every other room's line."""
+    _add_broken_room(data_dir)
+
+    out = _run(data_dir, ["rooms"], capsys)
+
+    assert _ROOM in out
+    assert "5000" in out
+
+
+def test_cli_rooms_warns_about_the_room_it_skipped(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Skipping is reported on stderr, never silently."""
+    _add_broken_room(data_dir)
+
+    assert conversations.main(["--data-dir", str(data_dir), "rooms"]) == 0
+    result = capsys.readouterr()
+
+    assert "line_broken" in result.err
+    assert "unreadable state.db" in result.err
+    assert _ROOM in result.out
+
+
+def test_cli_search_skips_an_unreadable_room_and_keeps_going(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A cross-room search still returns the good room's hits."""
+    _add_broken_room(data_dir)
+
+    assert conversations.main(["--data-dir", str(data_dir), "search", "有什麼"]) == 0
+    result = capsys.readouterr()
+
+    assert "我的行事曆上有什麼會議" in result.out
+    assert "line_broken" in result.err
+
+
+def test_cli_show_of_an_unreadable_room_exits_nonzero_without_a_traceback(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`show` on a corrupt db reports it and exits 1."""
+    _add_broken_room(data_dir)
+
+    assert conversations.main(["--data-dir", str(data_dir), "show", "line_broken"]) == 1
+    assert "unreadable state.db" in capsys.readouterr().err
+
+
+def test_search_falls_back_to_like_without_the_trigram_index(tmp_path: Path) -> None:
+    """An older state.db with no messages_fts_trigram still searches, more slowly."""
+    path = tmp_path / "data" / _ROOM / "state.db"
+    _build_state_db(path)
+    writable = sqlite3.connect(path)
+    with writable:
+        writable.execute("DROP TABLE messages_fts_trigram")
+    writable.close()
+
+    connection = connect_state_db(path)
+    try:
+        hits = search_messages(connection, "有什麼")
+    finally:
+        connection.close()
+
+    assert [hit.role for hit in hits] == ["user"]
+
+
+# ---------------------------------------------------------------------------
+# CLI — argument errors and a room whose container never answered
+# ---------------------------------------------------------------------------
+
+
+def test_cli_rejects_a_malformed_since_with_exit_code_2(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A typo'd --since is a usage error, not a traceback."""
+    with pytest.raises(SystemExit) as exit_info:
+        conversations.main(["--data-dir", str(data_dir), "show", _ROOM, "--since", "yesterday"])
+
+    assert exit_info.value.code == 2
+    assert "invalid --since" in capsys.readouterr().err
+
+
+def test_cli_stats_prints_zero_latency_percentiles(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 0.0 ms sample is a real measurement — it must not read as 'no samples'."""
+    envelope = TurnEnvelope(
+        ts="1970-01-01T00:16:46Z",
+        channel="line",
+        room_key=_ROOM,
+        session_id=_SESSION,
+        outcome="replied",
+        agent_duration_ms=0.0,
+    )
+    (data_dir / "_conversations" / f"{_ROOM}.jsonl").write_text(
+        envelope.model_dump_json() + "\n", encoding="utf-8"
+    )
+
+    out = _run(data_dir, ["stats"], capsys)
+
+    assert "p50=0ms p95=0ms (n=1)" in out
+    assert "no samples" not in out
+
+
+def test_cli_show_renders_an_agent_failed_turn_that_never_reached_hermes(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A room whose container won't start has no state.db rows for those turns.
+
+    Without rendering the envelope, the operator sees an empty transcript for
+    exactly the room that is broken.
+    """
+    envelope = TurnEnvelope(
+        ts="1970-01-01T02:00:00Z",
+        channel="line",
+        room_key=_ROOM,
+        outcome="agent_failed",
+        inbound_text="幫我查一下今天的信",
+        error="container: 500 Server Error",
+    )
+    (data_dir / "_conversations" / f"{_ROOM}.jsonl").write_text(
+        envelope.model_dump_json() + "\n", encoding="utf-8"
+    )
+
+    out = _run(data_dir, ["show", _ROOM], capsys)
+
+    assert "幫我查一下今天的信" in out
+    assert "container: 500 Server Error" in out
+
+
+def test_cli_show_does_not_duplicate_an_agent_failed_turn_hermes_recorded(
+    data_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fixture's agent_failed turn DID reach Hermes — still rendered exactly once."""
+    out = _run(data_dir, ["show", _ROOM], capsys)
+
+    assert out.count("幫我改到四點") == 1

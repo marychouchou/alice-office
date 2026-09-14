@@ -64,12 +64,27 @@ _MESSAGE_COLUMNS = (
     "timestamp, token_count, finish_reason, reasoning, reasoning_content"
 )
 
-# Hermes's context compaction re-inserts the messages it compacts (the copies
-# carry compacted=1, active=0), so the same turn can appear several times with
-# an identical timestamp. Keeping the lowest id of each (session, role,
-# timestamp, tool) group gives one row per real message while preserving the
-# pre-compaction history that active=1 alone would drop.
-_DEDUPE = "id IN (SELECT MIN(id) FROM messages GROUP BY session_id, role, timestamp, tool_name)"
+# Hermes's context compaction re-inserts the messages it compacts, so the same
+# turn can appear several times with an identical timestamp. Keeping the lowest
+# id of each group gives one row per real message while preserving the
+# pre-compaction history that `active = 1` alone would drop.
+#
+# The group must be keyed on the message's CONTENT, not just its coordinates.
+# Measured against this deployment's own state.db (2026-09-14, schema 20): every
+# duplicate group holds byte-identical rows, and `compacted`/`active` differ
+# WITHIN a group (e.g. ids 30/42/50 carry compacted=1, id 56 the same row with
+# compacted=0, active=1) — so neither column can discriminate here; grouping by
+# either would un-deduplicate the very rows this clause exists to merge.
+# Meanwhile (session, role, timestamp, tool_name) alone silently merges rows
+# that are genuinely distinct: two parallel tool results returning in the same
+# tick, or two user messages inside the same second. A content prefix plus
+# `tool_call_id` separates those while still collapsing the compaction copies.
+# 64 chars is enough to tell real messages apart without indexing whole tool
+# payloads (some are tens of KB).
+_DEDUPE = (
+    "id IN (SELECT MIN(id) FROM messages GROUP BY session_id, role, timestamp, tool_name, "
+    "COALESCE(tool_call_id, ''), COALESCE(substr(content, 1, 64), ''))"
+)
 
 _SESSION_COLUMNS = (
     "id, model, started_at, ended_at, end_reason, message_count, tool_call_count, "
@@ -172,9 +187,9 @@ class RoomSummary:
 class EnvelopeIndex:
     """A room's turn envelopes, indexed for the nearest-timestamp join.
 
-    A turn envelope is stamped when the turn *finished*, so it never shares an
-    exact timestamp with the user message that started it; `nearest` picks the
-    closest envelope within the same session, which is unambiguous as long as a
+    A turn envelope is stamped when the turn *finished*, so it always lands
+    after the message that started it; `nearest` therefore only ever looks
+    forward in time (see its docstring), which is unambiguous as long as a
     room's turns don't overlap (single-worker deployment — see group_context).
 
     Attributes:
@@ -190,27 +205,37 @@ class EnvelopeIndex:
     ) -> TurnEnvelope | None:
         """Find the envelope of the turn a message at `ts` belongs to.
 
+        The search is forward-only: a turn's envelope is stamped when that turn
+        ENDED, so the envelope belonging to a message is always the first one
+        at or after it. Taking the nearest in either direction gets this wrong
+        for exactly the case that matters — back-to-back turns. A 30-second
+        turn's envelope lands 30s after its own user message but only a few
+        seconds before the NEXT one, so the next message would be labelled with
+        the previous turn's outcome and latency, and the last message of a room
+        would inherit an envelope it has nothing to do with.
+
         Args:
             session_id: The message's session id.
             ts: The message's unix timestamp.
-            tolerance: Maximum gap to accept, in seconds. Without it the
-                "closest" envelope in a long-lived session could be hours away
-                from the message and describe an entirely different turn —
-                every message in a room that has one envelope would be labelled
-                with it.
+            tolerance: Maximum gap to accept, in seconds. Without it the first
+                envelope after a message in a long-lived session could be hours
+                later and describe an entirely different turn — every message in
+                a room that has one envelope would be labelled with it.
 
         Returns:
-            The closest envelope in that session within `tolerance`, or None —
-            which is also what a turn from before this feature, or a room whose
+            The earliest envelope in that session at or after `ts` and within
+            `tolerance`, or None — which is also what a turn from before this
+            feature, a turn whose envelope was never written, or a room whose
             envelopes were disabled, correctly reads as.
         """
         candidates = self.by_session.get(session_id)
         if not candidates:
             return None
-        gap, envelope = min(
-            ((abs(item[0] - ts), item[1]) for item in candidates), key=lambda item: item[0]
-        )
-        return envelope if gap <= tolerance else None
+        # by_session is sorted ascending, so the first hit is the earliest.
+        for envelope_ts, envelope in candidates:
+            if envelope_ts >= ts:
+                return envelope if envelope_ts - ts <= tolerance else None
+        return None
 
 
 def _as_str(value: object) -> str:
@@ -482,15 +507,40 @@ def read_messages(
     return [_to_message(row) for row in connection.execute(sql, params).fetchall()]
 
 
+def _search_like(connection: sqlite3.Connection, term: str, limit: int) -> list[MessageRow]:
+    """Scan `messages` for a literal substring, newest first.
+
+    Args:
+        connection: An open read-only connection.
+        term: The text to look for; its LIKE metacharacters are escaped, so it
+            matches literally.
+        limit: Maximum rows to return.
+
+    Returns:
+        Matching MessageRows, newest first.
+    """
+    sql = (
+        f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE {_DEDUPE} AND content LIKE ? "
+        "ESCAPE '\\' ORDER BY timestamp DESC LIMIT ?"
+    )
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return [_to_message(row) for row in connection.execute(sql, (f"%{escaped}%", limit)).fetchall()]
+
+
 def search_messages(
     connection: sqlite3.Connection, term: str, *, limit: int = 50
 ) -> list[MessageRow]:
     """Full-text search one room's messages, newest first.
 
     Uses the `messages_fts_trigram` index, which is what makes Chinese search
-    work at all (the default tokenizer does not segment CJK). Terms shorter
-    than one trigram fall back to a LIKE scan, because fts5's trigram
-    tokenizer would return nothing for them rather than erroring.
+    work at all (the default tokenizer does not segment CJK). Two cases fall
+    back to a plain LIKE scan, which returns the same rows more slowly: terms
+    shorter than one trigram (fts5's trigram tokenizer silently matches nothing
+    for them), and a database that has no `messages_fts_trigram` table at all
+    (an older or hand-built state.db). Normalizing the second case here is what
+    keeps every caller free of a "does this room have the index?" branch — the
+    only alternative is a search that aborts a whole cross-room loop because one
+    room's schema is older.
 
     Args:
         connection: An open read-only connection.
@@ -500,15 +550,14 @@ def search_messages(
 
     Returns:
         Matching MessageRows, newest first.
+
+    Raises:
+        sqlite3.Error: If the `messages` table itself cannot be read — a
+            database this module has no way to answer from, which the caller
+            reports per room rather than treating as "no matches".
     """
     if len(term) < _TRIGRAM_MIN_CHARS:
-        sql = (
-            f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE {_DEDUPE} AND content LIKE ? "
-            "ESCAPE '\\' ORDER BY timestamp DESC LIMIT ?"
-        )
-        escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        rows = connection.execute(sql, (f"%{escaped}%", limit)).fetchall()
-        return [_to_message(row) for row in rows]
+        return _search_like(connection, term, limit)
 
     sql = (
         f"SELECT {_MESSAGE_COLUMNS} FROM messages WHERE {_DEDUPE} AND id IN "
@@ -516,7 +565,11 @@ def search_messages(
         "ORDER BY timestamp DESC LIMIT ?"
     )
     phrase = '"' + term.replace('"', '""') + '"'
-    return [_to_message(row) for row in connection.execute(sql, (phrase, limit)).fetchall()]
+    try:
+        rows = connection.execute(sql, (phrase, limit)).fetchall()
+    except sqlite3.Error:
+        return _search_like(connection, term, limit)
+    return [_to_message(row) for row in rows]
 
 
 def read_envelopes(conversations_dir: Path, room_id: str) -> EnvelopeIndex:
