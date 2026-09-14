@@ -192,11 +192,15 @@ core 的 observe 短路放在 OAuth gate **之前**：未點名的訊息不問 a
   reply/push 回傳的 `sentMessages[].id` 對 `quotedMessageId`）；自動以
   OA displayName 當呼叫詞（GET /v2/bot/info）；memberJoined 問候；
   群組名稱（group summary）入 prompt。
-- **已知限制**：LINE 桌面版無法 @ OA → 部署時建議設定至少一個呼叫詞；
+- **已知限制**：LINE 桌面版無法 @ OA → 部署時需設定至少一個呼叫詞（見 §14）；
   `source.userId` 理論上可能缺席（極舊 PC-only 帳號）→ 已有 fallback。
 
 ## 14. 部署前提
 
 1. LINE Developers Console → Messaging API → **Allow bot to join group chats** 開啟。
-2. `.env` 建議設 `GROUP_TRIGGER_PREFIXES`（例如 OA 顯示名稱）。
+2. `.env` **需要**設 `GROUP_TRIGGER_PREFIXES`（至少一個呼叫詞；LINE 桌面版無法 @ OA，留空時
+   桌面版使用者在群組裡叫不動 bot）。入群問候裡的自稱「小幫手」寫死在
+   `_GROUP_JOIN_GREETING`，建議保留 `小幫手` 再以逗號追加 OA 名稱（如 `小幫手,<OA名稱>`）；
+   比對是大小寫敏感的純前綴比對，請挑成員平常聊天不會用到的詞。細節見 `.env.example`
+   「群組聊天」段；容器化部署由 `docker-compose.yml` 的 environment 清單傳入 router。
 3. 群組房間的 container／data dir 與 1:1 完全同機制，無需額外部署動作。
