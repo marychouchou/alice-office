@@ -18,7 +18,7 @@ Google Calendar／Drive／Gmail 工具）之後確認的，不是憑 Hermes 官�
 
 | 你想知道什麼 | 去哪裡看 | 指令 |
 |---|---|---|
-| Router 有沒有收到這個 webhook | Router 自己的 log（host 模式＝terminal 直接印；container 模式＝`docker compose logs`） | `docker compose logs -f webhook_router`（或本機開發的 `uv run fastapi dev` terminal），找 uvicorn access log 的 `"POST /webhook HTTP/1.1" 200`／`400` |
+| Router 有沒有收到這個 webhook | Router 自己的 log（host 模式＝terminal 直接印；container 模式＝`docker compose logs`） | `docker compose logs -f webhook_router`（或本機開發的 `uv run fastapi dev` terminal），找 `"event":"http_request"` 且 `"path":"/webhook"` 的那行看 `status` |
 | 房間 container 活著沒、activty 狀態 | `docker ps` | `docker ps -a --filter name=hermes_<room_id>` |
 | Hermes agent（api_server）有沒有收到這次請求 | `docker logs`，或房間自己的 `agent.log` | `docker logs --tail 50 hermes_<room_id>`；或 `tail data/<room_id>/logs/agent.log`，找 `aiohttp.access: ... "POST /v1/chat/completions HTTP/1.1" 200` |
 | agent 這次用了什麼工具、耗時、輸出大小 | `agent.log` 的 `agent.tool_executor` 行 | `grep tool_executor data/<room_id>/logs/agent.log` |
@@ -30,10 +30,14 @@ Google Calendar／Drive／Gmail 工具）之後確認的，不是憑 Hermes 官�
 
 ### Router 自己會記錄的行為
 
-`main.py` 只呼叫 `logging.basicConfig(level=logging.INFO)`，沒有另外設檔案
-handler，所以 router 的 log **就是它的 process 標準輸出**：host 模式是 terminal，
-container 模式是 `docker compose logs webhook_router`（docker 預設的 `json-file`
-log driver 已經在幫你把它寫進磁碟，見第 4 節）。目前 router（`channels/line/adapter.py`、
+`main.py` 呼叫 `logging_setup.configure_logging()`（見 `docs/logging-design.md`），
+沒有另外設檔案 handler，所以 router 的 log **就是它的 process 標準輸出**：host 模式
+是 terminal，container 模式是 `docker compose logs webhook_router`（`json-file`
+log driver 已經在幫你把它寫進磁碟，見第 4 節）。預設 `LOG_FORMAT=json`，一行一個
+JSON 物件（`docker compose logs webhook_router | jq .`），每行自帶 `request_id`、
+`room_key`、`event_id`、`channel`、`container` 等欄位，所以可以直接用
+`jq 'select(.room_key=="line_U1234")'` 把單一房間的行挑出來；本機開發設
+`LOG_FORMAT=console` 會變成彩色好讀的格式。目前 router（`channels/line/adapter.py`、
 `core.py`、`channels/line/events.py`）會記錄的行是：
 
 - `Skipping duplicate LINE webhook event {event_id}`（INFO，去重擋掉）
@@ -52,7 +56,9 @@ log driver 已經在幫你把它寫進磁碟，見第 4 節）。目前 router�
 `Waiting for ... to become ready...`、`Docker API error for container ...`。
 
 注意：`line_webhook` 本身在簽章驗證通過、events 解析完之後**沒有**額外印一行
-「收到 webhook」——訊號是 uvicorn 的 access log 那一行，不是應用層的 log。
+「收到 webhook」——訊號是每個 request 一行的 `"event":"http_request"`（帶
+`method`／`path`／`status`／`duration_ms`），由 `logging_setup` 的 middleware 印，
+不是 uvicorn 的 access log（那份已關閉，避免兩種格式混在同一個 stdout）。
 
 ## 2. 症狀 → 排查流程
 
@@ -154,6 +160,20 @@ sqlite3 data/<room_id>/state.db "
 
 `uv run python scripts/debug_room.py <room_id>` 會把第 2、3、4 步的內容一次印
 出來。
+
+**容器的 label 與 log 上限**：router 建立房間容器時會帶上
+`alice.role=agent`／`alice.room_id=<room_id>`／`alice.channel=<channel>`，並把
+stdout 限制成 `json-file` 的 10m × 3（見 `docs/logging-design.md` §5.2）。這兩個
+都是**建立時**才決定的屬性：2026-09 之前建立的既有房間容器沒有 label、也沒有大小
+上限，重啟或升級 image 都不會補上——要讓它們生效只能砍掉讓 router 重建：
+
+```bash
+docker rm -f hermes_<room_id>        # 下一則訊息進來時 router 會自動重建
+docker inspect hermes_<room_id> | jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'
+```
+
+砍容器不會動到 `data/<room_id>/`（對話、skills、config.yaml 都在 bind mount 上），
+只會中斷一次、下一則訊息要等容器重新開機。
 
 ### 2.5 Google OAuth 卡住
 
@@ -259,6 +279,8 @@ Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空�
 | 看 router 自己的 log（容器化部署） | `docker compose logs -f webhook_router` |
 | 手動送一則測試訊息打整條路 | `uv run python scripts/test_webhook.py --user-id <room_id> --text "..."` |
 | 列出所有正在跑的 hermes 容器 | `docker ps --filter name=hermes_` |
+| 只挑某個房間的 router log 行 | `docker compose logs webhook_router \| jq 'select(.room_key=="<room_id>")'` |
+| 確認容器的 label 與 log 上限有生效 | `docker inspect hermes_<room_id> \| jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'` |
 | 手動起單一 MCP server 測試 | `docker exec -it hermes_<room_id> node /opt/data/mcp/<name>/server.mjs` |
 
 ## 4. Production 展望

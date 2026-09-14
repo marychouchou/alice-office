@@ -201,6 +201,56 @@ def test_missing_container_is_created_with_hermes_env() -> None:
     assert "LINE_CHANNEL_SECRET" not in env
 
 
+def test_created_container_is_labelled_and_its_log_is_capped() -> None:
+    """A new container carries the alice.* labels and a rotating json-file log."""
+    mock_container = _make_running_container()
+    mock_client = MagicMock()
+    mock_client.containers.get.side_effect = docker.errors.NotFound("not found")
+    mock_client.containers.run.return_value = mock_container
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready"),
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch("alice_office_router.container_manager._ensure_mcp_seed"),
+        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        get_or_create_container("line_U1234", SETTINGS_IN_DOCKER)
+
+    call_kwargs = mock_client.containers.run.call_args.kwargs
+    assert call_kwargs["labels"]["alice.room_id"] == "line_U1234"
+    assert call_kwargs["labels"]["alice.role"] == "agent"
+    assert call_kwargs["labels"]["alice.channel"] == "line"
+    log_config = call_kwargs["log_config"]
+    assert log_config.type == "json-file"
+    assert log_config.config == {"max-size": "10m", "max-file": "3"}
+
+
+def test_created_container_label_names_the_room_key_channel() -> None:
+    """The channel label follows the room key's prefix, defaulting to line."""
+    mock_container = _make_running_container()
+    mock_client = MagicMock()
+    mock_client.containers.get.side_effect = docker.errors.NotFound("not found")
+    mock_client.containers.run.return_value = mock_container
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready"),
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch("alice_office_router.container_manager._ensure_mcp_seed"),
+        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        get_or_create_container("api_dev", SETTINGS_IN_DOCKER)
+        api_labels = mock_client.containers.run.call_args.kwargs["labels"]
+        get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
+        unprefixed_labels = mock_client.containers.run.call_args.kwargs["labels"]
+
+    assert api_labels["alice.channel"] == "api"
+    assert unprefixed_labels["alice.channel"] == "line"
+
+
 def test_missing_container_publishes_port_on_host() -> None:
     """When ROUTER_IN_DOCKER=False, new container must publish port to host."""
     mock_container = _make_running_container(host_port="54321")

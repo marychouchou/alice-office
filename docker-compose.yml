@@ -29,6 +29,16 @@ services:
     networks:
       - hermes_global_net
     restart: always
+    # Same label/rotation contract the router puts on every hermes_<room_id>
+    # container it creates (see container_manager); a log collector discovers
+    # both through alice.role (docs/logging-design.md §5.2).
+    labels:
+      alice.role: router
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   hermes_global_net:

@@ -1,6 +1,6 @@
 # 集中式 Log 系統設計
 
-> 狀態：**設計定案，尚未實作**（2026-09-14；同日增補 §5.7 對話紀錄與 §5.8 匯出，
+> 狀態：**Phase 1／Phase 2 已實作，Phase 1b 起尚未實作**（2026-09-14；同日增補 §5.7 對話紀錄與 §5.8 匯出，
 > 因為這套系統除了除錯，還要拿來看使用者問答、餵給 Claude Code 分析；同日再依 Hermes 文件與實測
 > 把對話內容改為以 `state.db` 為唯一來源，router 只記 turn envelope）。實作分五個階段，見 §8；每個階段完成後回來
 > 更新本文的「狀態」與 §8 的勾選框。實作 Alloy／Loki 設定前**先查官方文件**（用
@@ -470,16 +470,20 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
       三輪含 outcome 與耗時；`search` 能用其中一則的關鍵字跨房間找到；
       `export --format md` 的檔案貼進 Claude Code 可讀。
 
-### Phase 2：容器 label 與 log 輪替 — [ ]
+### Phase 2：容器 label 與 log 輪替 — [x]（2026-09-14 實作）
 
-- [ ] `container_manager.py` `containers.run` 加 `labels=` 與 `log_config=`
-      （`docker.types.LogConfig`）。
-- [ ] `docker-compose.yml` 加 `labels` 與 `logging` 區塊。
-- [ ] `tests/test_container_manager.py` 補 assert：`labels["alice.room_id"] == room_id`、
+- [x] `container_manager.py` `containers.run` 加 `labels=` 與 `log_config=`
+      （`docker.types.LogConfig`）。`alice.channel` 由 room key 的前綴推導
+      （`_channel_of`，認得的前綴才用，其餘一律 `line`）。
+- [x] `docker-compose.yml` 加 `labels` 與 `logging` 區塊。
+- [x] `tests/test_container_manager.py` 補 assert：`labels["alice.room_id"] == room_id`、
       `log_config` 型別與 `max-size`。
-- [ ] 註記：既有房間的容器**不會**自動獲得 label（label 是建立時屬性），需要
-      `docker rm hermes_<id>` 讓 router 重建；寫進 `docs/troubleshooting.md` 與 §8 驗收。
-- [ ] 驗收：`docker inspect hermes_<id> | jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'`。
+- [x] 註記：既有房間的容器**不會**自動獲得 label（label 是建立時屬性），需要
+      `docker rm hermes_<id>` 讓 router 重建；寫進 `docs/troubleshooting.md` §2.4
+      與 §3 速查表。
+- [x] 驗收：`docker inspect hermes_<id> | jq '.[0].Config.Labels, .[0].HostConfig.LogConfig'`
+      ——本機只跑到 mock 層（測試斷言傳給 `containers.run` 的參數），真的 inspect
+      要等下次部署重建房間容器後執行。
 
 ### Phase 3：Loki 堆疊 — [ ]
 
