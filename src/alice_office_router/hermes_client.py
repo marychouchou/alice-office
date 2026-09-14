@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import logging
+import time
 
 import httpx
+import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
-logger = logging.getLogger(__name__)
+logger = structlog.stdlib.get_logger(__name__)
 
 _REQUEST_TIMEOUT_SECONDS = 120.0
 
@@ -114,11 +115,22 @@ async def ask_hermes_agent(
     }
     payload = {"messages": _build_messages(text, system)}
 
+    started = time.perf_counter()
     async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
         response = await client.post(
             f"{base_url}/v1/chat/completions", json=payload, headers=headers
         )
         response.raise_for_status()
+
+    # The room's turn latency, the single most useful number when a user says
+    # "it did not answer" (docs/logging-design.md §5.1). A failed call raises
+    # instead, and is logged by core with the room context already bound.
+    logger.info(
+        "hermes_agent_call",
+        session_id=session_id,
+        status=response.status_code,
+        duration_ms=round((time.perf_counter() - started) * 1000, 2),
+    )
 
     completion = _ChatCompletion.model_validate(response.json())
     if not completion.choices:

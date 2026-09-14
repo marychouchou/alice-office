@@ -16,6 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from linebot.v3.messaging.exceptions import ApiException
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.channels.line.client import push_line_message, reply_line_message
@@ -134,15 +135,19 @@ class LineAdapter:
             return
 
         event_id = event.webhookEventId
-        if event_id and self._dedup.is_duplicate(event_id):
-            logger.info(f"Skipping duplicate LINE webhook event {event_id}")
-            return
+        # Every line logged while this event is handled carries these; the
+        # background tasks scheduled below outlive the binding, so they re-bind
+        # their own room context (docs/logging-design.md §5.1).
+        with bound_contextvars(channel=self.name, event_id=event_id):
+            if event_id and self._dedup.is_duplicate(event_id):
+                logger.info(f"Skipping duplicate LINE webhook event {event_id}")
+                return
 
-        if event.type == "join":
-            self._schedule_join_greeting(event, background_tasks, config)
-            return
+            if event.type == "join":
+                self._schedule_join_greeting(event, background_tasks, config)
+                return
 
-        await self._dispatch_message(event, background_tasks, config)
+            await self._dispatch_message(event, background_tasks, config)
 
     async def _dispatch_message(
         self, event: Event, background_tasks: BackgroundTasks, config: Settings
@@ -248,14 +253,32 @@ class LineAdapter:
             background_tasks: FastAPI background task queue.
             config: Application settings.
         """
-        native_id = event.native_id
-        if native_id is None:
+        room_key = event.room_key
+        if room_key is None:
             logger.warning("Skipping LINE join event with unresolvable room id")
             return
         reply_token = event.replyToken or None
         background_tasks.add_task(
-            self._deliver_reply, native_id, _GROUP_JOIN_GREETING, reply_token, config
+            self._greet_group, room_key, _GROUP_JOIN_GREETING, reply_token, config
         )
+
+    async def _greet_group(
+        self, room_key: str, text: str, reply_token: str | None, config: Settings
+    ) -> None:
+        """Deliver the group-join greeting under this room's log context.
+
+        A thin wrapper over _deliver_reply that exists so the background task —
+        which runs after the request (and its bound context) is gone — logs
+        under the room it greets.
+
+        Args:
+            room_key: Channel-prefixed room key of the joined group.
+            text: The greeting to send.
+            reply_token: The join event's reply token, if any.
+            config: Application settings.
+        """
+        with bound_contextvars(channel=self.name, room_key=room_key):
+            await self._deliver_reply(self._native_id(room_key), text, reply_token, config)
 
     def _native_id(self, room_key: str) -> str:
         """Strip the channel prefix back off to recover the bare LINE id.
@@ -312,8 +335,11 @@ class LineAdapter:
             sender_id=sender_id,
             sender_name=sender_name,
         )
-        texts = await process_inbound(msg, config)
-        await self._deliver_texts(self._native_id(room_key), texts, reply_token, config)
+        # Re-bound here, not inherited: this task runs after the webhook request
+        # (and the context _dispatch_event bound) is already done.
+        with bound_contextvars(channel=self.name, room_key=room_key):
+            texts = await process_inbound(msg, config)
+            await self._deliver_texts(self._native_id(room_key), texts, reply_token, config)
 
     async def _deliver_texts(
         self, native_id: str, texts: list[str], reply_token: str | None, config: Settings

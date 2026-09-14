@@ -9,8 +9,12 @@ from fastapi import FastAPI
 from alice_office_router.channels import enabled_adapters
 from alice_office_router.config import get_settings
 from alice_office_router.google_oauth import oauth_router
+from alice_office_router.logging_setup import RequestContextMiddleware, configure_logging
 
-logging.basicConfig(level=logging.INFO)
+# Before anything else logs: every logger in this process (uvicorn's too)
+# renders through one structlog formatter from here on (logging_setup).
+_settings = get_settings()
+configure_logging(_settings)
 logger = logging.getLogger(__name__)
 
 # Deprecated single-channel path kept while the LINE OA console still posts
@@ -41,7 +45,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-for adapter in enabled_adapters(get_settings()):
+# Outermost user middleware: binds request_id for every line logged while
+# serving the request, and emits the one structured access line per request.
+app.add_middleware(RequestContextMiddleware)
+
+for adapter in enabled_adapters(_settings):
     app.include_router(adapter.api_router(), prefix=f"/webhooks/{adapter.name}")
     if adapter.name == "line":
         # Legacy alias: the LINE OA console still posts to /webhook. Same handler

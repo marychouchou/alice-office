@@ -13,6 +13,7 @@ import docker.errors
 import docker.models.containers
 import httpx
 import yaml
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.config import Settings
 
@@ -572,6 +573,49 @@ def _create_container(
     return container
 
 
+def _resolve_container(
+    client: docker.DockerClient,
+    container_name: str,
+    room_id: str,
+    config: Settings,
+) -> tuple[docker.models.containers.Container, bool]:
+    """Get the room's container, starting or creating it when it isn't running.
+
+    Split out of get_or_create_container so that function stays within the
+    nesting budget once it binds the room's log context; the caller holds the
+    module lock around this call.
+
+    Args:
+        client: Docker client instance.
+        container_name: Name of this room's container (hermes_<room_id>).
+        room_id: Unique identifier for the chatroom.
+        config: Application settings.
+
+    Returns:
+        The running Container, and whether it was just started/created (so the
+        caller must wait for its api_server health check).
+
+    Raises:
+        docker.errors.APIError: If a Docker API call fails.
+    """
+    try:
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        return _create_container(client, container_name, room_id, config), True
+    except docker.errors.APIError as exc:
+        logger.error(f"Docker API error for container {container_name}: {exc}")
+        raise
+
+    if container.status == "running":
+        logger.debug(f"Container {container_name} already running.")
+        return container, False
+
+    logger.info(f"Container {container_name} is stopped; restarting.")
+    container.start()
+    container.reload()
+    return container, True
+
+
 def get_or_create_container(room_id: str, config: Settings) -> str:
     """Return the URL for the Hermes agent container for a given room.
 
@@ -595,28 +639,14 @@ def get_or_create_container(room_id: str, config: Settings) -> str:
             does not become ready within the startup timeout.
     """
     container_name = f"hermes_{room_id}"
-    needs_wait = False
 
-    with _lock:
-        client: docker.DockerClient = docker.from_env()
-        try:
-            container = client.containers.get(container_name)
-            if container.status != "running":
-                logger.info(f"Container {container_name} is stopped; restarting.")
-                container.start()
-                container.reload()
-                needs_wait = True
-            else:
-                logger.debug(f"Container {container_name} already running.")
-        except docker.errors.NotFound:
-            container = _create_container(client, container_name, room_id, config)
-            needs_wait = True
-        except docker.errors.APIError as exc:
-            logger.error(f"Docker API error for container {container_name}: {exc}")
-            raise
+    with bound_contextvars(container=container_name):
+        with _lock:
+            client: docker.DockerClient = docker.from_env()
+            container, needs_wait = _resolve_container(client, container_name, room_id, config)
 
-    url = _get_container_url(container, config)
-    if needs_wait:
-        logger.info(f"Waiting for {container_name} to become ready...")
-        _wait_until_ready(url)
-    return url
+        url = _get_container_url(container, config)
+        if needs_wait:
+            logger.info(f"Waiting for {container_name} to become ready...")
+            _wait_until_ready(url)
+        return url

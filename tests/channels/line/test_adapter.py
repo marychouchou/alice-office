@@ -371,8 +371,8 @@ class TestGroupDispatch:
 
         assert len(background_tasks.tasks) == 1
         task = background_tasks.tasks[0]
-        # _deliver_reply(native_id, greeting, reply_token, config)
-        assert task.args[0] == "C1"
+        # _greet_group(room_key, greeting, reply_token, config)
+        assert task.args[0] == "line_C1"
         assert "小幫手" in task.args[1]
         assert task.args[2] == "reply_j"
 

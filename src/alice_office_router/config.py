@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -89,6 +90,15 @@ class Settings(BaseSettings):
     # turn would trip a 60k threshold with a near-empty transcript; 120000
     # leaves that headroom.
     SESSION_ROTATE_PROMPT_TOKENS: int = 120000
+    # Minimum level every logger in the router process emits (see
+    # logging_setup.configure_logging). Standard logging names: DEBUG, INFO,
+    # WARNING, ERROR, CRITICAL. Noisy third-party loggers (docker, httpx, ...)
+    # stay pinned at WARNING regardless, so DEBUG stays readable.
+    LOG_LEVEL: str = "INFO"
+    # Rendering of those log lines: "json" (default — one JSON object per
+    # line, what a collector reads) or "console" (colored, human-readable;
+    # for host-mode dev in a terminal).
+    LOG_FORMAT: Literal["json", "console"] = "json"
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:

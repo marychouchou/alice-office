@@ -17,6 +17,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, field_validator
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings, get_settings
@@ -135,7 +136,10 @@ class ApiChannelAdapter:
         ) -> dict[str, list[str]]:
             _verify_bearer(authorization, settings.API_CHANNEL_TOKEN)
             msg = InboundMessage(channel=self.name, room_key=body.room_key, text=body.text)
-            replies = await process_inbound(msg, settings)
+            # Marks every line of this turn as this channel's; core binds the
+            # room_key itself (docs/logging-design.md §5.1).
+            with bound_contextvars(channel=self.name):
+                replies = await process_inbound(msg, settings)
             return {"replies": replies}
 
         return router

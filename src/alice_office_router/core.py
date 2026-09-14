@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 import httpx
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
@@ -193,30 +194,34 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
         "ok" returns just the agent reply. A container/agent failure (or a
         silence-token group reply) drops the agent reply, keeping any notice.
     """
-    # Observe short-circuit, before the OAuth gate: an unaddressed group
-    # message must neither ask the agent nor trigger an auth prompt; a
-    # blocked room still accumulates background to carry once authorized.
-    if msg.is_group and not msg.addressed:
-        record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
-        return []
+    # Every line logged downstream of here — gate, container, agent, session —
+    # carries this room_key (docs/logging-design.md §5.1); unbound on exit, so a
+    # background task handling another room never inherits it.
+    with bound_contextvars(room_key=msg.room_key):
+        # Observe short-circuit, before the OAuth gate: an unaddressed group
+        # message must neither ask the agent nor trigger an auth prompt; a
+        # blocked room still accumulates background to carry once authorized.
+        if msg.is_group and not msg.addressed:
+            record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
+            return []
 
-    # Manual session reset, before the OAuth gate: rotate to a fresh epoch (no
-    # handoff — a deliberate clean slate), drop any group background so it can't
-    # leak into the new epoch, and confirm without spending an agent turn.
-    if check_reset_command(msg, config):
-        reset_session(config, msg.room_key)
-        clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
-        return [RESET_CONFIRMATION]
+        # Manual session reset, before the OAuth gate: rotate to a fresh epoch
+        # (no handoff — a deliberate clean slate), drop any group background so
+        # it can't leak into the new epoch, and confirm without an agent turn.
+        if check_reset_command(msg, config):
+            reset_session(config, msg.room_key)
+            clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
+            return [RESET_CONFIRMATION]
 
-    status, message = check_google_authorization(msg.room_key, config)
-    if status == "blocked" and message is not None:
-        return [message]
+        status, message = check_google_authorization(msg.room_key, config)
+        if status == "blocked" and message is not None:
+            return [message]
 
-    replies: list[str] = []
-    if status == "notice" and message is not None:
-        replies.append(message)
+        replies: list[str] = []
+        if status == "notice" and message is not None:
+            replies.append(message)
 
-    reply = await _reply_for(msg, config)
-    if reply is not None:
-        replies.append(reply)
-    return replies
+        reply = await _reply_for(msg, config)
+        if reply is not None:
+            replies.append(reply)
+        return replies
