@@ -1,6 +1,7 @@
 # C4 架構圖 — Alice Office Router
 
-依 2026-07-15 的程式碼現況（channel adapter 重構 + 第一方 API channel 已落地）繪製，
+依 2026-08-28 的程式碼現況（channel adapter 重構、第一方 API channel、群組聊天
+addressed/observe 判斷、session-epoch 輪替皆已落地）繪製，
 並依 [c4model.com](https://c4model.com) 的官方定義核對過（見文末「與官方定義的對照」）。
 三個層級：System Context → Container → Component；Code（class）層級暫不畫。
 
@@ -76,9 +77,9 @@ flowchart TB
   docker["<b>Docker Engine</b><br/>[Software System：外部]<br/><i>同主機；hermes_global_net 網路</i>"]:::ext
 
   subgraph alice["Alice Office"]
-    router["<b>Alice Office Router</b><br/>[Container: Python 3.12 / FastAPI]<br/><i>驗簽、解析各 channel wire format、事件 dedup、<br/>Google OAuth gate、依 room_key 分派到房間容器、<br/>把回覆送回房間</i>"]:::container
+    router["<b>Alice Office Router</b><br/>[Container: Python 3.12 / FastAPI]<br/><i>驗簽、解析各 channel wire format、事件 dedup、<br/>Google OAuth gate、群組 addressed/observe 判斷、<br/>session-epoch 輪替、依 room_key 分派到房間容器、<br/>把回覆送回房間</i>"]:::container
     hermes["<b>Hermes Agent 容器（每房間一個）</b><br/>[Container: Docker image nousresearch/hermes-agent]<br/><i>hermes_&lt;room_key&gt;，port 8642；gateway + 該房間自己的<br/>MCP servers / plugins / skills；容器間互不相通<br/>（內部行程結構見下方放大圖）</i>"]:::container
-    roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens——每房間各自一份</i>")]:::container
+    roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens、<br/>group_state/（observed buffer）、<br/>router_state/（session epoch）——每房間各自一份</i>")]:::container
   end
 
   employee -- "傳訊息（LINE app）" --> line
@@ -89,7 +90,7 @@ flowchart TB
   router -- "OAuth 2.0 以 code 換取 token（HTTPS）" --> google
   router -- "建立 / 啟動 / 查詢 hermes_&lt;room_key&gt;<br/>（docker SDK，只在 container_manager.py）" --> docker
   router -- "POST /v1/chat/completions<br/>（HTTP，session id = room_key，HERMES_API_SERVER_KEY）" --> hermes
-  router -- "write-once seed（config.yaml、mcp/、plugins/）<br/>tokens.json 讀寫（檔案系統）" --> roomdata
+  router -- "write-once seed（config.yaml、mcp/、plugins/）<br/>tokens.json／observed.jsonl／session.json 讀寫（檔案系統）" --> roomdata
   hermes -- "HERMES_HOME 讀寫（bind mount）；<br/>每次開機自行補齊 sessions / skills / db" --> roomdata
   hermes -- "chat completions（HTTPS）" --> llm
   hermes -- "Gmail / Drive MCP 以房間 token 呼叫（HTTPS）" --> google
@@ -101,6 +102,8 @@ flowchart TB
 |---|---|---|
 | Router（container_manager） | `config.yaml`、`mcp/`、`plugins/` seed | 房間第一次建立，write-once，之後永不覆蓋 |
 | Router（google_oauth） | Google `tokens.json` | OAuth callback / refresh |
+| Router（group_context） | `group_state/observed.jsonl` | 每則未點名的群組訊息追加；點名回覆成功後裁剪已讀取的部分 |
+| Router（session_hygiene） | `router_state/session.json` | 每則進 agent 的訊息讀寫；手動重置／自動輪替（閒置、token 門檻）時更新 epoch |
 | Hermes gateway | `sessions/`、`skills/`、`kanban.db`、`state.db`、`logs/`、lock 檔 | 每次容器開機自行補齊與執行期寫入 |
 
 > **簡化說明**：嚴格照 C4 定義，一個房間的 Docker 容器內其實跑著多個行程
@@ -139,12 +142,14 @@ flowchart TB
   subgraph router["Alice Office Router（FastAPI process）"]
     main["<b>main</b><br/>[Component: FastAPI app]<br/><i>組裝：enabled_adapters 掛到 /webhooks/&lt;name&gt;<br/>（LINE 另掛舊 /webhook）＋ oauth_router</i>"]:::comp
     registry["<b>channels.enabled_adapters</b><br/>[Component: Python 函式]<br/><i>靜態 registry：LINE 恆啟用；<br/>API channel 依 API_CHANNEL_TOKEN 決定</i>"]:::comp
-    line_adapter["<b>channels.line — LineAdapter</b><br/>[Component: FastAPI router + linebot SDK]<br/><i>verify（HMAC 驗簽）｜events（wire format 解析＋<br/>媒體/貼圖/位置→佔位文字）｜dedup（事件去重）｜<br/>client（Reply → Push fallback）｜format（長度/則數切分）</i>"]:::comp
+    line_adapter["<b>channels.line — LineAdapter</b><br/>[Component: FastAPI router + linebot SDK]<br/><i>verify（HMAC 驗簽）｜events（wire format 解析＋<br/>媒體/貼圖/位置→佔位文字、群組 mention/呼叫詞→addressed）｜<br/>dedup（事件去重）｜client（Reply → Push fallback）｜<br/>format（長度/則數切分）</i>"]:::comp
     api_adapter["<b>channels.api — ApiChannelAdapter</b><br/>[Component: FastAPI router]<br/><i>Bearer 驗證；room_key 形狀白名單<br/>（line_* / api_*）；同步回傳原始 markdown</i>"]:::comp
-    core["<b>core.process_inbound</b><br/>[Component: async Python 函式]<br/><i>channel-free：gate → 容器 → agent → list[str]<br/>不碰任何 channel 的送訊 API</i>"]:::comp
+    core["<b>core.process_inbound</b><br/>[Component: async Python 函式]<br/><i>channel-free：群組 unaddressed 短路 →<br/>reset 指令 → gate → 容器 → agent → list[str]<br/>不碰任何 channel 的送訊 API</i>"]:::comp
+    group_ctx["<b>group_context</b><br/>[Component: Python 模組]<br/><i>observed buffer 讀寫／裁剪、組 tagged<br/>［名稱|ID］prompt、silence token 判斷（NO_REPLY 等）</i>"]:::comp
+    sess_hyg["<b>session_hygiene</b><br/>[Component: Python 模組]<br/><i>check_reset_command／reset_session：手動重置（不帶交接）｜<br/>begin_turn／complete_turn：閒置與 token 門檻判斷、<br/>epoch 輪替、水位 CAS｜HANDOFF_PROMPT／build_turn_text：<br/>交接文字（HTTP 由 core 發）｜衍生 X-Hermes-Session-Id</i>"]:::comp
     oauth["<b>google_oauth</b><br/>[Component: FastAPI router + httpx]<br/><i>check_google_authorization 純函式 gate；<br/>/oauth/start、/oauth/callback；tokens.json 存取</i>"]:::comp
     cm["<b>container_manager</b><br/>[Component: Python 模組 + docker SDK]<br/><i>get_or_create_container：docker 生命週期＋<br/>write-once seed＋config.yaml 渲染</i>"]:::comp
-    hc["<b>hermes_client</b><br/>[Component: httpx client]<br/><i>ask_hermes_agent：POST /v1/chat/completions，<br/>session id = room_key 維持對話連續性</i>"]:::comp
+    hc["<b>hermes_client</b><br/>[Component: httpx client]<br/><i>ask_hermes_agent：POST /v1/chat/completions，<br/>session id 依 epoch 衍生，維持對話連續性</i>"]:::comp
   end
 
   main -- "啟動時取得啟用的 adapters" --> registry
@@ -156,9 +161,13 @@ flowchart TB
   api_adapter -- "InboundMessage" --> core
   core -- "check_google_authorization(room_key)<br/>→ blocked / notice / ok" --> oauth
   core -- "get_or_create_container(room_key)<br/>→ 容器 URL" --> cm
-  core -- "ask_hermes_agent(url, room_key, text)" --> hc
+  core -- "peek/record/clear observed buffer、<br/>組 prompt、判斷 silence" --> group_ctx
+  core -- "check_reset_command／reset_session（手動重置）、<br/>begin_turn／complete_turn（自動輪替、epoch 讀寫）" --> sess_hyg
+  core -- "ask_hermes_agent(url, session_id, text)" --> hc
   cm -- "docker SDK" --> docker
   cm -- "write-once seed" --> roomdata
+  group_ctx -- "讀寫 group_state/observed.jsonl" --> roomdata
+  sess_hyg -- "讀寫 router_state/session.json" --> roomdata
   oauth -- "以 code 換取 token" --> google
   oauth -- "tokens.json 讀寫" --> roomdata
   hc -- "POST /v1/chat/completions" --> hermes
@@ -243,4 +252,6 @@ flowchart TB
 - channel adapter 契約與分層的完整設計：`docs/channel-interface-design.md`
 - Router ↔ Hermes 的 HTTP 協定細節：`docs/router-hermes-agent-protocol.md`
 - 訊息端到端流程：`docs/line-hermes-message-flow.md`
+- 群組聊天 addressed/observe 判斷：`docs/group-chat-design.md`
+- Session-epoch 輪替與交接摘要：`docs/session-hygiene.md`
 - 環境變數與路徑：`docs/env-data-paths.md`、`docs/runtime-env-summary.md`

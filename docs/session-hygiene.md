@@ -8,6 +8,26 @@
 `docs/channels-walkthrough.md` 與 `group_context.py` 模組 docstring（本機制沿用同一套
 single-worker 併發假設）。
 
+## 30 秒版本（第一次看先讀這段）
+
+- 每個聊天室背後是一個 Hermes agent，它的對話記憶存在一條 **session**（完整逐字稿）裡。
+- **問題**：session 從來不換，用幾週後 context 塞爆 → 回覆品質劣化、開始幻覺。
+- **解法**：router 在適當時機幫房間「換一條全新 session」（就像開一個新對話串）。
+  自動輪替時會先向舊對話要一份 ≤300 字的**交接摘要**塞給新對話——使用者幾乎無感；
+  使用者手動下指令則是乾淨重來，不帶交接。
+- **三個換的時機**：使用者手動下指令；房間閒置超過一天；上一輪 context 用量超標。
+
+使用者視角：
+
+| 你做什麼 | 會發生什麼 |
+|---|---|
+| 輸入 `/new`、`/reset` 或 `新對話`（群組要先點名，如 `@bot /new`） | 立刻收到確認，之前的對話不再參考（乾淨重來，**不帶**交接） |
+| 房間閒置超過一天後再傳訊息 | 自動換新對話串，agent 拿到上一段的交接摘要，接得上話 |
+| 對話累積太長（token 超標） | 同上：下一則訊息時自動換新串＋交接 |
+
+「epoch」= 這個房間目前是第幾條 session：0 是出廠值（沿用房間原本的 session id，
+既有房間歷史不動），每換一次 +1。
+
 ## 問題
 
 router 每次都送同一個 `X-Hermes-Session-Id`，Hermes 把完整逐字稿存在
@@ -21,6 +41,25 @@ router 幫每個房間記一個「session epoch」，存在
 `data/<room_id>/router_state/session.json`。換 epoch = 換一個新的
 `X-Hermes-Session-Id`，Hermes 會靜默開一個全新的空 session（idempotent upsert，不用預先
 註冊），舊逐字稿留在舊 id 下可稽核，Hermes 本體完全不動。
+
+一般訊息（沒有觸發任何輪替）的完整路徑——每則要進 agent 的訊息都會經過這兩次狀態檔
+讀寫，輪替判斷就掛在這條路上：
+
+```mermaid
+sequenceDiagram
+    participant U as 使用者
+    participant R as router（core）
+    participant S as session.json
+    participant H as Hermes 容器
+
+    U->>R: 訊息（經 LINE webhook 或 API channel）
+    R->>S: begin_turn：讀狀態、蓋活動時間
+    S-->>R: epoch=N（兩個門檻都未觸發）
+    R->>H: POST /v1/chat/completions<br/>X-Hermes-Session-Id: room_key#35;N
+    H-->>R: 回覆 + usage.prompt_tokens
+    R->>S: complete_turn：記 token 水位（epoch CAS）
+    R-->>U: 回覆
+```
 
 ### 狀態檔格式
 
@@ -69,6 +108,24 @@ router 幫每個房間記一個「session epoch」，存在
 命中後在 `core.process_inbound` 的 **observe short-circuit 之後、OAuth gate 之前**攔截：
 `reset_session`（epoch+1、清 watermark）＋清掉群組 observed buffer（否則舊背景
 會漏進新 epoch）→ 直接回固定繁中確認 `RESET_CONFIRMATION`，**不呼叫 agent、不解析授權**。
+
+```mermaid
+sequenceDiagram
+    participant U as 使用者
+    participant R as router（core）
+    participant S as session.json
+    participant H as Hermes 容器
+
+    U->>R: 「/new」（群組是「@bot /new」，adapter 已剝除 @mention）
+    R->>R: check_reset_command 命中
+    R->>S: reset_session：epoch N → N+1、清水位
+    Note over R: 群組另清 observed buffer
+    R-->>U: 固定確認文案（這一步完全不碰 Hermes）
+    U->>R: （之後的）下一則訊息
+    R->>H: X-Hermes-Session-Id: room_key#35;N+1<br/>Hermes 靜默開全新 session，舊逐字稿留在舊 id
+    H-->>R: 回覆（全新 context）
+    R-->>U: 回覆
+```
 
 ### 2＆3. 自動輪替（懶檢查，無排程器）
 
