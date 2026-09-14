@@ -134,7 +134,7 @@ async def test_ok_status_returns_only_agent_reply(tmp_path: Path) -> None:
             new=AsyncMock(return_value=AgentReply(text="哈囉，我是 Hermes")),
         ) as mock_ask,
     ):
-        texts = await process_inbound(_msg(), settings)
+        texts = (await process_inbound(_msg(), settings)).texts
 
     mock_get_container.assert_called_once_with("line_room_AAA", settings)
     # Epoch 0 (fresh room, no rotation) sends the bare room_key and no handoff,
@@ -171,7 +171,7 @@ async def test_blocked_returns_auth_message_and_never_calls_agent() -> None:
         patch("alice_office_router.core.get_or_create_container") as mock_get_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
-        texts = await process_inbound(_msg(), settings)
+        texts = (await process_inbound(_msg(), settings)).texts
 
     mock_get_container.assert_not_called()
     mock_ask.assert_not_awaited()
@@ -199,7 +199,7 @@ async def test_notice_returns_notice_then_agent_reply(tmp_path: Path) -> None:
             new=AsyncMock(return_value=AgentReply(text="哈囉，我是 Hermes")),
         ),
     ):
-        texts = await process_inbound(_msg(), settings)
+        texts = (await process_inbound(_msg(), settings)).texts
 
     mock_get_container.assert_called_once_with("line_room_AAA", settings)
     assert len(texts) == 2
@@ -229,7 +229,7 @@ async def test_agent_error_returns_no_texts(tmp_path: Path) -> None:
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
-        texts = await process_inbound(_msg(), settings)
+        texts = (await process_inbound(_msg(), settings)).texts
 
     assert texts == []
 
@@ -248,7 +248,7 @@ async def test_container_error_returns_no_texts_and_skips_agent() -> None:
         ),
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
-        texts = await process_inbound(_msg(), settings)
+        texts = (await process_inbound(_msg(), settings)).texts
 
     mock_ask.assert_not_awaited()
     assert texts == []
@@ -274,7 +274,7 @@ async def test_notice_kept_when_agent_fails(tmp_path: Path) -> None:
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
-        texts = await process_inbound(_msg(), settings)
+        texts = (await process_inbound(_msg(), settings)).texts
 
     assert len(texts) == 1
     assert "Drive" in texts[0]
@@ -297,7 +297,9 @@ async def test_unaddressed_group_message_is_observed_and_short_circuits() -> Non
         patch("alice_office_router.core.get_or_create_container") as mock_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
-        texts = await process_inbound(_group_msg("userA 跟 userB 問早", addressed=False), settings)
+        texts = (
+            await process_inbound(_group_msg("userA 跟 userB 問早", addressed=False), settings)
+        ).texts
 
     assert texts == []
     mock_record.assert_called_once_with(settings, "line_C1", "U1", "王小明", "userA 跟 userB 問早")
@@ -328,7 +330,7 @@ async def test_addressed_group_builds_tagged_prompt_under_system_message(tmp_pat
             new=AsyncMock(return_value=AgentReply(text="好的，已安排")),
         ) as mock_ask,
     ):
-        texts = await process_inbound(_group_msg(), settings)
+        texts = (await process_inbound(_group_msg(), settings)).texts
 
     assert texts == ["好的，已安排"]
     # Clears exactly the peeked records, not the whole file, so anything
@@ -360,7 +362,7 @@ async def test_group_agent_failure_keeps_buffer(tmp_path: Path) -> None:
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
-        texts = await process_inbound(_group_msg(), settings)
+        texts = (await process_inbound(_group_msg(), settings)).texts
 
     assert texts == []
     mock_clear.assert_not_called()
@@ -385,7 +387,7 @@ async def test_group_silence_token_is_dropped_but_buffer_cleared(tmp_path: Path)
             new=AsyncMock(return_value=AgentReply(text="NO_REPLY")),
         ),
     ):
-        texts = await process_inbound(_group_msg(), settings)
+        texts = (await process_inbound(_group_msg(), settings)).texts
 
     assert texts == []
     mock_clear.assert_called_once_with(settings, "line_C1", [])
@@ -408,7 +410,7 @@ async def test_reset_command_confirms_rotates_and_skips_agent(tmp_path: Path) ->
         patch("alice_office_router.core.get_or_create_container") as mock_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
-        texts = await process_inbound(_msg("/new"), settings)
+        texts = (await process_inbound(_msg("/new"), settings)).texts
 
     assert texts == [RESET_CONFIRMATION]
     mock_gate.assert_not_called()
@@ -430,7 +432,7 @@ async def test_group_reset_clears_observed_buffer(tmp_path: Path) -> None:
         patch("alice_office_router.core.get_or_create_container") as mock_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
-        texts = await process_inbound(_group_msg("/new"), settings)
+        texts = (await process_inbound(_group_msg("/new"), settings)).texts
 
     assert texts == [RESET_CONFIRMATION]
     assert peek_observed(settings, "line_C1") == []
@@ -471,7 +473,7 @@ async def test_idle_rotation_generates_handoff_then_injects_into_new_epoch(
         ),
         patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
     ):
-        texts = await process_inbound(_msg("今天的進度"), settings)
+        texts = (await process_inbound(_msg("今天的進度"), settings)).texts
 
     assert texts == ["新回覆"]
     # The retired session (#1) received the handoff prompt verbatim (the epoch
@@ -512,7 +514,7 @@ async def test_handoff_failure_still_rotates_clean_slate(tmp_path: Path) -> None
         ),
         patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
     ):
-        texts = await process_inbound(_msg("今天的進度"), settings)
+        texts = (await process_inbound(_msg("今天的進度"), settings)).texts
 
     assert texts == ["新回覆"]
     assert load_state(settings, "line_room_AAA").epoch == 2
@@ -546,7 +548,7 @@ async def test_group_idle_rotation_wraps_tagged_prompt(tmp_path: Path) -> None:
         ),
         patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
     ):
-        texts = await process_inbound(_group_msg(), settings)
+        texts = (await process_inbound(_group_msg(), settings)).texts
 
     assert texts == ["好的，已安排"]
     new_call = next(c for c in calls if c.session_id == "line_C1#2")
@@ -578,3 +580,229 @@ async def test_successful_turn_records_token_watermark(tmp_path: Path) -> None:
     state = load_state(settings, "line_room_AAA")
     assert state.last_prompt_tokens == 4321
     assert state.epoch == 0
+
+
+# ---------------------------------------------------------------------------
+# process_inbound — the turn envelope (docs/logging-design.md §5.7)
+# ---------------------------------------------------------------------------
+
+
+async def test_envelope_outcome_replied_carries_session_and_latency(tmp_path: Path) -> None:
+    """A normal turn records the exact session id sent, the latency and the tokens."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+    _seed_session(settings, "line_room_AAA", SessionState(epoch=3))
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="回覆", prompt_tokens=27000)),
+        ),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    envelope = result.envelope
+    assert envelope.outcome == "replied"
+    assert envelope.session_id == "line_room_AAA#3"
+    assert envelope.gate_status == "ok"
+    assert envelope.prompt_tokens == 27000
+    assert envelope.rotated is False
+    assert envelope.agent_duration_ms is not None
+    # A replied turn's text is already in state.db; never duplicated here.
+    assert envelope.inbound_text is None
+    # delivered belongs to the adapter, which has not run yet.
+    assert envelope.delivered is None
+    assert envelope.channel == "line"
+    assert envelope.room_key == "line_room_AAA"
+
+
+async def test_envelope_outcome_observed_keeps_the_text(tmp_path: Path) -> None:
+    """An unaddressed group message exists nowhere else, so the envelope keeps its text."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    result = await process_inbound(_group_msg("大家早", addressed=False), settings)
+
+    envelope = result.envelope
+    assert envelope.outcome == "observed"
+    assert envelope.inbound_text == "大家早"
+    assert envelope.is_group is True
+    assert envelope.addressed is False
+    assert envelope.sender_id == "U1"
+    assert envelope.sender_name == "王小明"
+    assert envelope.session_id is None
+    assert envelope.gate_status is None
+
+
+async def test_envelope_outcome_reset(tmp_path: Path) -> None:
+    """A manual reset never reaches the agent, so it only exists in the envelope."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with patch("alice_office_router.core.check_google_authorization") as mock_gate:
+        result = await process_inbound(_msg("/new"), settings)
+
+    mock_gate.assert_not_called()
+    assert result.texts == [RESET_CONFIRMATION]
+    assert result.envelope.outcome == "reset"
+    assert result.envelope.inbound_text == "/new"
+    assert result.envelope.gate_status is None
+
+
+async def test_envelope_outcome_blocked_records_the_gate_status() -> None:
+    """A gate block is invisible to Hermes; the envelope is the only record of it."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings()
+
+    with patch(
+        "alice_office_router.core.check_google_authorization",
+        return_value=("blocked", _BLOCKED_MSG),
+    ):
+        result = await process_inbound(_msg("幫我看 Drive"), settings)
+
+    assert result.envelope.outcome == "blocked"
+    assert result.envelope.gate_status == "blocked"
+    assert result.envelope.inbound_text == "幫我看 Drive"
+    assert result.envelope.session_id is None
+
+
+async def test_envelope_outcome_agent_failed_records_the_error(tmp_path: Path) -> None:
+    """A failed agent call records the session it failed under and why."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(side_effect=ValueError("boom")),
+        ),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    envelope = result.envelope
+    assert envelope.outcome == "agent_failed"
+    assert envelope.error is not None and "boom" in envelope.error
+    assert envelope.session_id == "line_room_AAA"
+    assert envelope.agent_duration_ms is not None
+
+
+async def test_envelope_outcome_agent_failed_when_the_container_is_unreachable() -> None:
+    """A container failure never gets a session id — the call never went out."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings()
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            side_effect=RuntimeError("no docker"),
+        ),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    envelope = result.envelope
+    assert envelope.outcome == "agent_failed"
+    assert envelope.error is not None and envelope.error.startswith("container:")
+    assert envelope.session_id is None
+    assert envelope.agent_duration_ms is None
+
+
+async def test_envelope_outcome_silence(tmp_path: Path) -> None:
+    """A deliberate group silence is distinguishable from a failure."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch("alice_office_router.core.peek_observed", return_value=[]),
+        patch("alice_office_router.core.clear_observed"),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_C1:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="NO_REPLY")),
+        ),
+    ):
+        result = await process_inbound(_group_msg(), settings)
+
+    assert result.texts == []
+    assert result.envelope.outcome == "silence"
+    assert result.envelope.error is None
+    assert result.envelope.session_id == "line_C1"
+
+
+async def test_envelope_records_rotation_and_request_context(tmp_path: Path) -> None:
+    """A rotating turn flags it, and the envelope inherits the bound request/event ids."""
+    from structlog.contextvars import bound_contextvars
+
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path, SESSION_IDLE_RESET_MINUTES=1440)
+    _seed_session(
+        settings,
+        "line_room_AAA",
+        SessionState(epoch=1, last_activity_ts=time.time() - 3 * 24 * 60 * 60),
+    )
+    fake_ask, _ = _recording_ask(lambda session_id: AgentReply(text="新回覆"))
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        bound_contextvars(request_id="req-1", event_id="evt-1"),
+    ):
+        result = await process_inbound(_msg("今天的進度"), settings)
+
+    envelope = result.envelope
+    assert envelope.rotated is True
+    assert envelope.session_id == "line_room_AAA#2"
+    assert envelope.request_id == "req-1"
+    assert envelope.event_id == "evt-1"
+
+
+async def test_envelope_has_no_request_context_outside_a_request(tmp_path: Path) -> None:
+    """Outside an HTTP request the ids are simply absent, not an error."""
+    from structlog.contextvars import clear_contextvars
+
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+    clear_contextvars()
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="回覆")),
+        ),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    assert result.envelope.request_id is None
+    assert result.envelope.event_id is None

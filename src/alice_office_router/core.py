@@ -6,18 +6,28 @@ Google OAuth gate, resolves the room's Hermes agent container, asks the agent,
 and *returns* the plain-text messages to send back to the room — it never
 touches any channel's send API or reply tokens, so it stays directly unit
 testable and reusable across adapters (see docs/channel-interface-design.md).
+
+Alongside the texts it returns a `TurnEnvelope` draft describing how the turn
+went (docs/logging-design.md §5.7). Core builds it but does not emit it: only
+the adapter knows whether the reply actually reached the room, so the adapter
+fills `delivered` and calls `conversation_log.record_turn`.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass, field, replace
+from typing import Literal
 
 import httpx
+import structlog
 from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import get_or_create_container
+from alice_office_router.conversation_log import Outcome, TurnEnvelope
 from alice_office_router.google_oauth import check_google_authorization
 from alice_office_router.group_context import (
     GROUP_SYSTEM_PROMPT,
@@ -40,6 +50,98 @@ from alice_office_router.session_hygiene import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AgentTurn:
+    """The result of one agent-bound turn, reply text plus what to record.
+
+    Attributes:
+        outcome: "replied" when the agent answered and the answer is
+            deliverable; "agent_failed" when the container or the agent call
+            failed; "silence" when a group reply was the silence token.
+        text: The deliverable reply, or None for the other two outcomes.
+        session_id: The exact X-Hermes-Session-Id sent (the join key onto
+            state.db), or None when the call never got that far.
+        rotated: Whether this turn rotated the room to a fresh session epoch.
+        duration_ms: Wall time of the agent HTTP call, None if it never ran.
+        prompt_tokens: The reply's reported prompt_tokens, if any.
+        error: Short reason string when the turn failed; None otherwise.
+    """
+
+    outcome: Literal["replied", "agent_failed", "silence"]
+    text: str | None = None
+    session_id: str | None = None
+    rotated: bool = False
+    duration_ms: float | None = None
+    prompt_tokens: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class RouteResult:
+    """What `_route` decided for one inbound message, before delivery.
+
+    Attributes:
+        texts: Texts to send back to the room, in delivery order.
+        outcome: How the turn ended (see conversation_log.Outcome).
+        gate_status: The Google OAuth gate's verdict, or None when the gate
+            was short-circuited (observe, reset).
+        session_id: The session id sent to Hermes, if an agent call was made.
+        rotated: Whether this turn rotated the room's session epoch.
+        agent_duration_ms: Wall time of the agent HTTP call, if it ran.
+        prompt_tokens: The reply's reported prompt_tokens, if any.
+        error: Short reason string when the turn failed; None otherwise.
+    """
+
+    texts: list[str] = field(default_factory=list)
+    outcome: Outcome = "replied"
+    gate_status: str | None = None
+    session_id: str | None = None
+    rotated: bool = False
+    agent_duration_ms: float | None = None
+    prompt_tokens: int | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class InboundResult:
+    """What `process_inbound` hands back to the calling adapter.
+
+    Attributes:
+        texts: Texts to send back to the room, in delivery order.
+        envelope: The turn's record, complete except for `delivered` — the
+            adapter fills that in after sending and calls record_turn.
+    """
+
+    texts: list[str]
+    envelope: TurnEnvelope
+
+
+def _elapsed_ms(started: float) -> float:
+    """Return milliseconds elapsed since a perf_counter reading.
+
+    Args:
+        started: The `time.perf_counter()` value taken before the call.
+
+    Returns:
+        Elapsed wall time in milliseconds, rounded to 2 decimals.
+    """
+    return round((time.perf_counter() - started) * 1000, 2)
+
+
+def _context_value(key: str) -> str | None:
+    """Read one string field out of the bound structlog context.
+
+    Args:
+        key: The contextvar name ("request_id", "event_id").
+
+    Returns:
+        The bound value when it is a string, else None — so a turn running
+        outside any HTTP request simply records None instead of branching.
+    """
+    value = structlog.contextvars.get_contextvars().get(key)
+    return value if isinstance(value, str) else None
 
 
 async def _generate_handoff(
@@ -78,18 +180,18 @@ async def _generate_handoff(
 
 async def _ask_agent(
     room_key: str, text: str, config: Settings, *, system: str | None = None
-) -> str | None:
+) -> AgentTurn:
     """Resolve the room's Hermes container, rotate if due, and ask for a reply.
 
-    Each step is independently guarded: a failure is logged and yields None
-    (the caller then delivers nothing for it), mirroring the original
-    background-task contract where a downstream error must never propagate.
-    Session hygiene is applied here so 1:1 and group turns share it: begin_turn
-    evaluates the triggers and rotates atomically (before any await); a rotated
-    turn then fetches a one-shot handoff summary from the retired epoch's
-    session and folds it into this turn's user text; a successful turn records
-    its token watermark (see session_hygiene, including the accepted trade-offs
-    of the non-persisted handoff).
+    Each step is independently guarded: a failure is logged and yields an
+    "agent_failed" AgentTurn (the caller then delivers nothing for it),
+    mirroring the original background-task contract where a downstream error
+    must never propagate. Session hygiene is applied here so 1:1 and group turns
+    share it: begin_turn evaluates the triggers and rotates atomically (before
+    any await); a rotated turn then fetches a one-shot handoff summary from the
+    retired epoch's session and folds it into this turn's user text; a
+    successful turn records its token watermark (see session_hygiene, including
+    the accepted trade-offs of the non-persisted handoff).
 
     Args:
         room_key: Unique room key used to resolve the container and session.
@@ -99,13 +201,14 @@ async def _ask_agent(
             path passes GROUP_SYSTEM_PROMPT); None keeps the 1:1 request plain.
 
     Returns:
-        The agent's reply text, or None if the container or agent call failed.
+        An AgentTurn carrying the reply (or the failure) plus the session id,
+        rotation flag, latency and token count the envelope records.
     """
     try:
         target_url = get_or_create_container(room_key, config)
     except Exception as exc:
         logger.error(f"Failed to get/create container for room {room_key}: {exc}")
-        return None
+        return AgentTurn(outcome="agent_failed", error=f"container: {exc}")
 
     plan = begin_turn(config, room_key)
     # retired_epoch is set exactly when this turn rotated (see TurnPlan).
@@ -116,6 +219,7 @@ async def _ask_agent(
     )
 
     session_id = session_id_for(room_key, plan.epoch)
+    started = time.perf_counter()
     try:
         result = await ask_hermes_agent(
             target_url,
@@ -126,13 +230,26 @@ async def _ask_agent(
         )
     except (httpx.HTTPError, ValueError) as exc:
         logger.error(f"Hermes agent request failed for room {room_key}: {exc}")
-        return None
+        return AgentTurn(
+            outcome="agent_failed",
+            session_id=session_id,
+            rotated=plan.rotated,
+            duration_ms=_elapsed_ms(started),
+            error=f"agent: {exc}",
+        )
 
     complete_turn(config, room_key, epoch=plan.epoch, prompt_tokens=result.prompt_tokens)
-    return result.text
+    return AgentTurn(
+        outcome="replied",
+        text=result.text,
+        session_id=session_id,
+        rotated=plan.rotated,
+        duration_ms=_elapsed_ms(started),
+        prompt_tokens=result.prompt_tokens,
+    )
 
 
-async def _ask_group_agent(msg: InboundMessage, config: Settings) -> str | None:
+async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     """Ask the agent for an addressed group message, managing buffer and silence.
 
     Folds the room's observed background into a tagged prompt (design §7), asks
@@ -147,18 +264,21 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> str | None:
         config: Application settings.
 
     Returns:
-        The agent's reply, or None when the agent failed or chose to stay silent.
+        The AgentTurn from the underlying call, re-labelled "silence" (with no
+        text) when the agent deliberately chose not to answer.
     """
     observed = peek_observed(config, msg.room_key)
     prompt = build_group_prompt(observed, msg)
-    reply = await _ask_agent(msg.room_key, prompt, config, system=GROUP_SYSTEM_PROMPT)
-    if reply is None:
-        return None
+    turn = await _ask_agent(msg.room_key, prompt, config, system=GROUP_SYSTEM_PROMPT)
+    if turn.text is None:
+        return turn
     clear_observed(config, msg.room_key, observed)
-    return None if is_silence(reply) else reply
+    if is_silence(turn.text):
+        return replace(turn, outcome="silence", text=None)
+    return turn
 
 
-async def _reply_for(msg: InboundMessage, config: Settings) -> str | None:
+async def _reply_for(msg: InboundMessage, config: Settings) -> AgentTurn:
     """Ask the agent for a reply, taking the group path for group messages.
 
     Args:
@@ -167,61 +287,124 @@ async def _reply_for(msg: InboundMessage, config: Settings) -> str | None:
         config: Application settings.
 
     Returns:
-        The agent's reply text, or None if nothing should be delivered.
+        The turn's AgentTurn; its `text` is None when nothing should be
+        delivered.
     """
     if msg.is_group:
         return await _ask_group_agent(msg, config)
     return await _ask_agent(msg.room_key, msg.text, config)
 
 
-async def process_inbound(msg: InboundMessage, config: Settings) -> list[str]:
-    """Run the channel-free pipeline for one inbound message.
+async def _route(msg: InboundMessage, config: Settings) -> RouteResult:
+    """Decide what one inbound message produces, without delivering anything.
 
-    Applies the Google OAuth gate, then (unless blocked) asks the room's Hermes
-    agent for a reply. The reply texts are returned in delivery order for the
-    calling adapter to send back to the room; nothing is sent from here.
+    The whole pipeline in outcome order: an unaddressed group message is only
+    observed; a manual reset command rotates the room's session and confirms
+    without an agent turn; the Google gate can block; otherwise the agent runs
+    (its "notice" message, if any, riding ahead of the reply).
 
     Args:
         msg: The normalized inbound message (identity + plain text).
         config: Application settings.
 
     Returns:
-        Texts to send back to the room, in order. An unaddressed group message
-        is only observed and returns nothing. A manual reset command rotates the
-        room's session and returns only the fixed confirmation (agent not
-        called). Gate "blocked" returns only the authorization message (agent
-        not called); "notice" returns the notice followed by the agent reply;
-        "ok" returns just the agent reply. A container/agent failure (or a
-        silence-token group reply) drops the agent reply, keeping any notice.
+        A RouteResult with the texts to deliver and everything the turn
+        envelope records about how the turn went.
+    """
+    # Observe short-circuit, before the OAuth gate: an unaddressed group
+    # message must neither ask the agent nor trigger an auth prompt; a
+    # blocked room still accumulates background to carry once authorized.
+    if msg.is_group and not msg.addressed:
+        record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
+        return RouteResult(outcome="observed")
+
+    # Manual session reset, before the OAuth gate: rotate to a fresh epoch
+    # (no handoff — a deliberate clean slate), drop any group background so
+    # it can't leak into the new epoch, and confirm without an agent turn.
+    if check_reset_command(msg, config):
+        reset_session(config, msg.room_key)
+        clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
+        return RouteResult(texts=[RESET_CONFIRMATION], outcome="reset")
+
+    status, message = check_google_authorization(msg.room_key, config)
+    if status == "blocked" and message is not None:
+        return RouteResult(texts=[message], outcome="blocked", gate_status=status)
+
+    texts: list[str] = []
+    if status == "notice" and message is not None:
+        texts.append(message)
+
+    turn = await _reply_for(msg, config)
+    if turn.text is not None:
+        texts.append(turn.text)
+    return RouteResult(
+        texts=texts,
+        outcome=turn.outcome,
+        gate_status=status,
+        session_id=turn.session_id,
+        rotated=turn.rotated,
+        agent_duration_ms=turn.duration_ms,
+        prompt_tokens=turn.prompt_tokens,
+        error=turn.error,
+    )
+
+
+def _draft_envelope(msg: InboundMessage, result: RouteResult) -> TurnEnvelope:
+    """Build the turn's envelope draft, everything but `delivered`.
+
+    Args:
+        msg: The inbound message this turn handled.
+        result: What `_route` decided for it.
+
+    Returns:
+        A TurnEnvelope with `delivered=None` for the adapter to fill in.
+        `inbound_text` is carried only when the turn did NOT reach the agent —
+        a replied turn's text is already in that room's state.db (§5.7).
+    """
+    return TurnEnvelope(
+        request_id=_context_value("request_id"),
+        event_id=_context_value("event_id"),
+        channel=msg.channel,
+        room_key=msg.room_key,
+        session_id=result.session_id,
+        outcome=result.outcome,
+        inbound_text=None if result.outcome == "replied" else msg.text,
+        is_group=msg.is_group,
+        addressed=msg.addressed,
+        sender_id=msg.sender_id,
+        sender_name=msg.sender_name,
+        gate_status=result.gate_status,
+        rotated=result.rotated,
+        agent_duration_ms=result.agent_duration_ms,
+        prompt_tokens=result.prompt_tokens,
+        error=result.error,
+    )
+
+
+async def process_inbound(msg: InboundMessage, config: Settings) -> InboundResult:
+    """Run the channel-free pipeline for one inbound message.
+
+    A thin wrapper over `_route` that binds the room's log context and turns
+    the routing decision into the adapter's two deliverables: the texts to
+    send, and the turn envelope to record after sending.
+
+    Args:
+        msg: The normalized inbound message (identity + plain text).
+        config: Application settings.
+
+    Returns:
+        An InboundResult. `texts` are in delivery order: an unaddressed group
+        message is only observed and returns nothing; a manual reset command
+        rotates the room's session and returns only the fixed confirmation
+        (agent not called); gate "blocked" returns only the authorization
+        message (agent not called); "notice" returns the notice followed by the
+        agent reply; "ok" returns just the agent reply. A container/agent
+        failure (or a silence-token group reply) drops the agent reply, keeping
+        any notice. `envelope` records which of those happened.
     """
     # Every line logged downstream of here — gate, container, agent, session —
     # carries this room_key (docs/logging-design.md §5.1); unbound on exit, so a
     # background task handling another room never inherits it.
     with bound_contextvars(room_key=msg.room_key):
-        # Observe short-circuit, before the OAuth gate: an unaddressed group
-        # message must neither ask the agent nor trigger an auth prompt; a
-        # blocked room still accumulates background to carry once authorized.
-        if msg.is_group and not msg.addressed:
-            record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
-            return []
-
-        # Manual session reset, before the OAuth gate: rotate to a fresh epoch
-        # (no handoff — a deliberate clean slate), drop any group background so
-        # it can't leak into the new epoch, and confirm without an agent turn.
-        if check_reset_command(msg, config):
-            reset_session(config, msg.room_key)
-            clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
-            return [RESET_CONFIRMATION]
-
-        status, message = check_google_authorization(msg.room_key, config)
-        if status == "blocked" and message is not None:
-            return [message]
-
-        replies: list[str] = []
-        if status == "notice" and message is not None:
-            replies.append(message)
-
-        reply = await _reply_for(msg, config)
-        if reply is not None:
-            replies.append(reply)
-        return replies
+        result = await _route(msg, config)
+        return InboundResult(texts=result.texts, envelope=_draft_envelope(msg, result))

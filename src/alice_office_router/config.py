@@ -99,6 +99,13 @@ class Settings(BaseSettings):
     # line, what a collector reads) or "console" (colored, human-readable;
     # for host-mode dev in a terminal).
     LOG_FORMAT: Literal["json", "console"] = "json"
+    # Whether each inbound turn also appends one JSON envelope line to
+    # DATA_DIR/_conversations/<room_key>.jsonl (see conversation_log.py). The
+    # envelope never carries the agent's reply text — conversation content lives
+    # only in each room's Hermes state.db (docs/logging-design.md §5.7). Set
+    # False for a deployment contractually barred from keeping any per-turn
+    # record; the same line still goes to stdout for the log collector.
+    CONVERSATION_LOG_ENABLED: bool = True
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
@@ -169,6 +176,35 @@ class Settings(BaseSettings):
             (google_dir), used by ensure_google_seed as the copy source.
         """
         return self.google_dir / "gcp-oauth.keys.installed.json"
+
+    @property
+    def conversations_dir(self) -> Path:
+        """Router-local path to the cross-room turn-envelope directory.
+
+        Returns:
+            DATA_DIR / "_conversations" — one <room_key>.jsonl per room, each
+            line a TurnEnvelope (conversation_log.py). Underscore-prefixed like
+            google_dir so it never collides with a room directory, and so the
+            conversations CLI can skip it when enumerating rooms.
+        """
+        return self.DATA_DIR / "_conversations"
+
+    def room_conversation_log(self, room_id: str) -> Path:
+        """Router-local path to one room's turn-envelope JSONL file.
+
+        Args:
+            room_id: Unique identifier for the chatroom, same raw (original
+                case) value used for DATA_DIR / room_id elsewhere — must not
+                be lowercased, or the CLI's join back onto the room's
+                data/<room_id>/state.db would miss.
+
+        Returns:
+            DATA_DIR / "_conversations" / f"{room_id}.jsonl" — deliberately
+            OUTSIDE data/<room_id>/ (which is bind-mounted into the room's
+            container as /opt/data), so a room's own agent can never read or
+            rewrite the router's record of that room.
+        """
+        return self.conversations_dir / f"{room_id}.jsonl"
 
     def room_google_dir(self, room_id: str) -> Path:
         """Router-local path to one room's own Google OAuth data directory.

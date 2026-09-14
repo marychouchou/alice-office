@@ -15,6 +15,8 @@ from alice_office_router.channels.base import InboundMessage
 from alice_office_router.channels.line.adapter import LineAdapter
 from alice_office_router.channels.line.events import Event
 from alice_office_router.config import Settings
+from alice_office_router.conversation_log import TurnEnvelope
+from alice_office_router.core import InboundResult
 
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"
@@ -49,9 +51,30 @@ def _settings(**overrides: object) -> Settings:
         "LINE_CHANNEL_SECRET": TEST_SECRET,
         "LINE_CHANNEL_ACCESS_TOKEN": TEST_TOKEN,
         "HERMES_API_SERVER_KEY": "test_api_server_key",
+        # The turn envelope's file sink is exercised in test_conversation_log;
+        # off here so these tests never touch a real DATA_DIR.
+        "CONVERSATION_LOG_ENABLED": False,
     }
     defaults.update(overrides)
     return Settings(**defaults)  # type: ignore[arg-type]
+
+
+def _core_result(
+    texts: list[str], room_key: str = "line_room_AAA", outcome: str = "replied"
+) -> InboundResult:
+    """Build the InboundResult core now returns, standing in for a real turn.
+
+    Args:
+        texts: The reply texts the fake core hands back.
+        room_key: The room key the envelope is tagged with.
+        outcome: The envelope's outcome label.
+
+    Returns:
+        An InboundResult whose envelope still has delivered=None (the adapter
+        under test is the one that fills it in).
+    """
+    envelope = TurnEnvelope(channel="line", room_key=room_key, outcome=outcome)  # type: ignore[arg-type]
+    return InboundResult(texts=texts, envelope=envelope)
 
 
 @pytest.fixture(autouse=True)
@@ -338,7 +361,7 @@ class TestGroupDispatch:
         assert task.kwargs["addressed"] is False
 
     async def test_direct_message_has_no_group_kwargs(self) -> None:
-        """Regression: a 1:1 message schedules the exact same positional-only task as before."""
+        """Regression: a 1:1 message schedules no group kwargs, only the event id."""
         event = Event.model_validate(
             {
                 "type": "message",
@@ -355,7 +378,9 @@ class TestGroupDispatch:
         assert task.args[0] == "line_U1"
         assert task.args[1] == "hi"
         assert task.args[3] == "reply_d"
-        assert task.kwargs == {}
+        # event_id rides along so the background task's log lines and turn
+        # envelope carry it; no group kwargs on the 1:1 path.
+        assert task.kwargs == {"event_id": "evt_d"}
 
     async def test_join_event_schedules_greeting_reply(self) -> None:
         event = Event.model_validate(
@@ -398,9 +423,9 @@ class TestGroupDispatch:
         """An unaddressed group message (core returns []) sends nothing to LINE."""
         captured: dict[str, InboundMessage] = {}
 
-        async def _fake_process(msg: InboundMessage, config: Settings) -> list[str]:
+        async def _fake_process(msg: InboundMessage, config: Settings) -> InboundResult:
             captured["msg"] = msg
-            return []
+            return _core_result([], room_key=msg.room_key, outcome="observed")
 
         with (
             patch(f"{_ADAPTER}.process_inbound", new=_fake_process),
@@ -478,7 +503,7 @@ async def test_process_and_reply_pushes_single_text_when_no_reply_token() -> Non
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=["哈囉，我是 Hermes"]),
+            new=AsyncMock(return_value=_core_result(["哈囉，我是 Hermes"])),
         ),
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
     ):
@@ -493,7 +518,7 @@ async def test_process_and_reply_uses_reply_token_for_first_text() -> None:
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=["哈囉"]),
+            new=AsyncMock(return_value=_core_result(["哈囉"])),
         ),
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
@@ -511,7 +536,7 @@ async def test_process_and_reply_first_text_reply_token_rest_push() -> None:
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=["notice", "agent reply"]),
+            new=AsyncMock(return_value=_core_result(["notice", "agent reply"])),
         ),
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
@@ -529,7 +554,7 @@ async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=_core_result([], outcome="agent_failed")),
         ),
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
@@ -540,3 +565,77 @@ async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
 
     mock_reply.assert_not_called()
     mock_push.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# LineAdapter._process_and_reply — turn envelope (docs/logging-design.md §5.7)
+# ---------------------------------------------------------------------------
+
+
+class TestTurnEnvelopeRecording:
+    async def test_successful_delivery_records_delivered_true(self) -> None:
+        """The adapter is what knows the reply landed, so it fills delivered=True."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"])),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()),
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.args[0].delivered is True
+
+    async def test_failed_push_records_delivered_false(self) -> None:
+        """A push that LINE rejects is recorded, not silently lost."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"])),
+            ),
+            patch(
+                f"{_ADAPTER}.push_line_message",
+                new=AsyncMock(side_effect=ApiException(status=500)),
+            ),
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        assert mock_record.call_args.args[0].delivered is False
+
+    async def test_nothing_to_deliver_records_delivered_none(self) -> None:
+        """An observed turn had nothing to send — neither success nor failure."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result([], outcome="observed")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "早安", _settings())
+
+        mock_push.assert_not_called()
+        assert mock_record.call_args.args[0].delivered is None
+
+    async def test_partial_delivery_records_delivered_false(self) -> None:
+        """With a notice plus a reply, one failed send makes the whole turn undelivered."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["notice", "agent reply"])),
+            ),
+            patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()),
+            patch(
+                f"{_ADAPTER}.push_line_message",
+                new=AsyncMock(side_effect=ApiException(status=500)),
+            ),
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply(
+                "line_room_AAA", "哈囉", _settings(), "reply_token_1"
+            )
+
+        assert mock_record.call_args.args[0].delivered is False

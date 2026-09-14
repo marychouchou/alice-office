@@ -10,6 +10,8 @@ from httpx import ASGITransport, AsyncClient
 from alice_office_router.channels import enabled_adapters
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings, get_settings
+from alice_office_router.conversation_log import TurnEnvelope
+from alice_office_router.core import InboundResult
 
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"
@@ -32,9 +34,27 @@ def _settings(**overrides: object) -> Settings:
         "LINE_CHANNEL_SECRET": TEST_SECRET,
         "LINE_CHANNEL_ACCESS_TOKEN": TEST_TOKEN,
         "HERMES_API_SERVER_KEY": "test_api_server_key",
+        # The turn envelope's file sink is exercised in test_conversation_log;
+        # off here so these tests never touch a real DATA_DIR.
+        "CONVERSATION_LOG_ENABLED": False,
     }
     defaults.update(overrides)
     return Settings(**defaults)  # type: ignore[arg-type]
+
+
+def _core_result(texts: list[str], room_key: str = _LINE_ROOM) -> InboundResult:
+    """Build the InboundResult core now returns, for a replied turn.
+
+    Args:
+        texts: The reply texts the fake core hands back.
+        room_key: The room key the envelope is tagged with.
+
+    Returns:
+        An InboundResult whose envelope still has delivered=None (the adapter
+        under test is the one that fills it in).
+    """
+    envelope = TurnEnvelope(channel="api", room_key=room_key, outcome="replied")
+    return InboundResult(texts=texts, envelope=envelope)
 
 
 def _build_app(settings: Settings) -> FastAPI:
@@ -147,7 +167,8 @@ async def test_blank_text_returns_422(api_client: AsyncClient) -> None:
 async def test_happy_path_passes_message_to_core(api_client: AsyncClient, room_key: str) -> None:
     """Both accepted room shapes reach core as an InboundMessage; replies pass through."""
     with patch(
-        f"{_API_MODULE}.process_inbound", new=AsyncMock(return_value=["好", "第二則"])
+        f"{_API_MODULE}.process_inbound",
+        new=AsyncMock(return_value=_core_result(["好", "第二則"])),
     ) as mock_core:
         response = await api_client.post(
             _MESSAGES_PATH,
@@ -184,3 +205,45 @@ async def test_route_absent_when_token_unset() -> None:
         )
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Turn envelope (docs/logging-design.md §5.7)
+# ---------------------------------------------------------------------------
+
+
+async def test_records_the_turn_envelope_with_delivered_true(api_client: AsyncClient) -> None:
+    """This channel's delivery is the HTTP body itself, so a reply is always delivered."""
+    with (
+        patch(
+            f"{_API_MODULE}.process_inbound",
+            new=AsyncMock(return_value=_core_result(["好"])),
+        ),
+        patch(f"{_API_MODULE}.record_turn") as mock_record,
+    ):
+        response = await api_client.post(
+            _MESSAGES_PATH, headers=_auth_header(), json={"room_key": "api_dev", "text": "你好"}
+        )
+
+    assert response.status_code == 200
+    mock_record.assert_called_once()
+    assert mock_record.call_args.args[0].delivered is True
+
+
+async def test_records_delivered_none_when_there_is_nothing_to_return(
+    api_client: AsyncClient,
+) -> None:
+    """An empty reply list is neither a delivery nor a delivery failure."""
+    with (
+        patch(
+            f"{_API_MODULE}.process_inbound",
+            new=AsyncMock(return_value=_core_result([])),
+        ),
+        patch(f"{_API_MODULE}.record_turn") as mock_record,
+    ):
+        response = await api_client.post(
+            _MESSAGES_PATH, headers=_auth_header(), json={"room_key": "api_dev", "text": "你好"}
+        )
+
+    assert response.json() == {"replies": []}
+    assert mock_record.call_args.args[0].delivered is None

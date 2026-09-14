@@ -24,6 +24,7 @@ services:
       - API_CHANNEL_TOKEN=${API_CHANNEL_TOKEN:-}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - LOG_FORMAT=${LOG_FORMAT:-json}
+      - CONVERSATION_LOG_ENABLED=${CONVERSATION_LOG_ENABLED:-true}
     ports:
       - "8000:8000"
     networks:

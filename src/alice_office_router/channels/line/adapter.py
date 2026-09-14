@@ -25,6 +25,7 @@ from alice_office_router.channels.line.events import Event, WebhookBody, resolve
 from alice_office_router.channels.line.profiles import resolve_sender_name
 from alice_office_router.channels.line.verify import verify_line_signature
 from alice_office_router.config import Settings, get_settings
+from alice_office_router.conversation_log import record_turn
 from alice_office_router.core import process_inbound
 
 logger = logging.getLogger(__name__)
@@ -174,7 +175,14 @@ class LineAdapter:
 
         reply_token = event.replyToken or None
         if not event.is_group:
-            background_tasks.add_task(self._process_and_reply, room_key, text, config, reply_token)
+            background_tasks.add_task(
+                self._process_and_reply,
+                room_key,
+                text,
+                config,
+                reply_token,
+                event_id=event.webhookEventId or None,
+            )
             return
 
         await self._schedule_group_message(
@@ -217,6 +225,7 @@ class LineAdapter:
             addressed=self._is_addressed(event, text, config),
             sender_id=sender_id,
             sender_name=sender_name,
+            event_id=event.webhookEventId or None,
         )
 
     def _is_addressed(self, event: Event, text: str, config: Settings) -> bool:
@@ -306,14 +315,15 @@ class LineAdapter:
         addressed: bool = True,
         sender_id: str | None = None,
         sender_name: str | None = None,
+        event_id: str | None = None,
     ) -> None:
         """Run one inbound LINE message through core and deliver its replies.
 
         Builds the channel-free InboundMessage, runs core.process_inbound
-        (Google gate -> container -> agent), and delivers each returned text
-        back to LINE. Runs in a background task after the router already
-        returned 200 OK, so core's own per-step error guards keep any failure
-        from raising here.
+        (Google gate -> container -> agent), delivers each returned text back to
+        LINE, then records the turn envelope with what delivery did. Runs in a
+        background task after the router already returned 200 OK, so core's own
+        per-step error guards keep any failure from raising here.
 
         Args:
             room_key: Channel-prefixed room key core routes on (`line_<id>`);
@@ -325,6 +335,9 @@ class LineAdapter:
             addressed: Whether this message is directed at the bot (1:1: True).
             sender_id: The group speaker's native id, if resolved.
             sender_name: The group speaker's display name, if resolved.
+            event_id: The triggering event's `webhookEventId`, re-bound here so
+                this task's log lines and turn envelope carry it (the context
+                _dispatch_event bound is gone by the time this runs).
         """
         msg = InboundMessage(
             channel=self.name,
@@ -336,14 +349,21 @@ class LineAdapter:
             sender_name=sender_name,
         )
         # Re-bound here, not inherited: this task runs after the webhook request
-        # (and the context _dispatch_event bound) is already done.
-        with bound_contextvars(channel=self.name, room_key=room_key):
-            texts = await process_inbound(msg, config)
-            await self._deliver_texts(self._native_id(room_key), texts, reply_token, config)
+        # (and the context _dispatch_event bound) is already done. event_id is
+        # left unbound rather than bound to None when the event carried none.
+        context = {"channel": self.name, "room_key": room_key}
+        if event_id:
+            context["event_id"] = event_id
+        with bound_contextvars(**context):
+            result = await process_inbound(msg, config)
+            delivered = await self._deliver_texts(
+                self._native_id(room_key), result.texts, reply_token, config
+            )
+            record_turn(result.envelope.model_copy(update={"delivered": delivered}), config)
 
     async def _deliver_texts(
         self, native_id: str, texts: list[str], reply_token: str | None, config: Settings
-    ) -> None:
+    ) -> bool | None:
         """Deliver core's ordered reply texts back to the LINE room.
 
         The first text may use the single-use reply token (falling back to
@@ -355,14 +375,23 @@ class LineAdapter:
             texts: Reply texts from core.process_inbound, in delivery order.
             reply_token: Reply token from the triggering event, if any.
             config: Application settings.
+
+        Returns:
+            None when there was nothing to deliver (an observed group message,
+            a failed agent call), else whether EVERY text reached LINE.
         """
+        if not texts:
+            return None
+        delivered = True
         for index, text in enumerate(texts):
             token = reply_token if index == 0 else None
-            await self._deliver_reply(native_id, text, token, config)
+            sent = await self._deliver_reply(native_id, text, token, config)
+            delivered = delivered and sent
+        return delivered
 
     async def _deliver_reply(
         self, native_id: str, text: str, reply_token: str | None, config: Settings
-    ) -> None:
+    ) -> bool:
         """Deliver a reply to LINE, preferring the free reply token over Push.
 
         LINE reply tokens are single-use and expire roughly 60 seconds after
@@ -376,11 +405,17 @@ class LineAdapter:
             text: Reply text to send.
             reply_token: Reply token from the triggering event, if any.
             config: Application settings.
+
+        Returns:
+            True when LINE accepted the message (by reply or by push), False
+            when even the push failed — the turn envelope's `delivered` field.
+            A failure is logged here and never raised: this runs in a
+            background task with nobody left to report it to.
         """
         if reply_token:
             try:
                 await reply_line_message(reply_token, text, config.LINE_CHANNEL_ACCESS_TOKEN)
-                return
+                return True
             except ApiException as exc:
                 logger.info(
                     f"LINE reply token rejected for room {native_id} ({exc}); falling back to push"
@@ -390,3 +425,5 @@ class LineAdapter:
             await push_line_message(native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN)
         except Exception as exc:
             logger.error(f"Failed to push LINE reply for room {native_id}: {exc}")
+            return False
+        return True
