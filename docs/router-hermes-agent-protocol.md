@@ -69,7 +69,8 @@ Headers:
   Authorization: Bearer {HERMES_API_SERVER_KEY}
   X-Hermes-Session-Id: {session_id}
 Body:
-  {"messages": [{"role": "user", "content": "<使用者訊息文字>"}]}
+  {"messages": [{"role": "user", "content": "<使用者訊息文字>"}],
+   "stream": true}
 ```
 
 - **`X-Hermes-Session-Id: session_id`**：讓同一聊天室的對話在 Hermes 端維持 session
@@ -80,14 +81,42 @@ Body:
   `docs/session-hygiene.md`。
 - **`Authorization: Bearer`**：跟容器建立時注入的 `API_SERVER_KEY` 比對，是
   router↔container 唯一的驗證機制。
-- **Timeout 120 秒**（`_REQUEST_TIMEOUT_SECONDS`），比 LINE webhook 本身的等待
-  時間長得多——這也是為什麼整段呼叫必須在 `BackgroundTasks` 裡進行，而不是同步
-  等待再回應 LINE。
-- **回應解析**：`ask_hermes_agent` 回傳 `AgentReply{text, prompt_tokens}`。`text` 取
-  `choices[0].message.content`；`choices` 為空或 `content` 不是非空字串時 `raise
-  ValueError`，視為 Hermes 沒給出可用回覆。`prompt_tokens` 取自回應的 `usage.prompt_tokens`
-  （缺 `usage` 或回報 <=0 → 正規化為 `None`，0 是 server「沒統計」的預設），供 session
-  輪替的 token 水位判斷用（累計語意警語見 `docs/session-hygiene.md`）。
+- **`"stream": true`（SSE）**：router 一律用 streaming 模式呼叫。**不是**為了逐字顯示
+  ——回覆仍然是整包送回 LINE——而是為了拿到「agent 還活著」的訊號：Hermes 的
+  `api_server` 在 streaming 期間每靜默 30 秒就寫一行 `: keepalive` 註解
+  （`CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS = 30.0`），**工具執行中也照送**，所以
+  「還活著」＝「還有 bytes 進來」。
+- **SSE 框格**：`Content-Type: text/event-stream`，事件是 `data: <json>\n\n`；以 `:`
+  開頭的是註解（keepalive）必須忽略；串流以 `data: [DONE]` 結束。
+  - 內容 chunk：`{"object":"chat.completion.chunk","choices":[{"index":0,
+    "delta":{"content":"..."},"finish_reason":null}]}`；第一個 chunk 的 delta 可能只有
+    `{"role":"assistant"}`、沒有 content。
+  - 結束 chunk：帶 `choices[0].finish_reason`（`stop`／截斷時 `length`／其他）與
+    `usage`；`finish_reason != "stop"` 時另外可能帶 `error: {message, type}` 與 Hermes
+    自己的 `hermes: {completed, partial, failed, error, error_code}` 區塊。
+  - 解析壞掉的 `data:` 行只跳過並記 warning（`hermes_agent_chunk_skipped`），不中止整輪
+    ——一格壞掉的 frame 不值得賠掉整輪回覆。
+- **兩條逾時，意義不同**（任一條踩到，使用者都收到固定提示，不再靜默）：
+  - **Idle（靜默上限）**：`HERMES_IDLE_TIMEOUT_SECONDS`，預設 120 秒。連 keepalive 都
+    沒了 ⇒ 容器／agent 卡死。實作是 httpx 的 read timeout，逾時拋 `httpx.ReadTimeout`。
+  - **Ceiling（絕對上限）**：`HERMES_REQUEST_TIMEOUT_SECONDS`，預設 3600 秒。keepalive
+    一直來但永遠不結束時的保險絲，正常不會踩到。實作是 `asyncio.timeout()`，逾時拋
+    `TimeoutError`。
+
+  判定「活著」靠 idle 而不是總時長：一輪純推理（~85 tok/s）跑十幾分鐘是正常的，用總時
+  長設限只會兩頭不討好——設小了把好答案丟掉（那輪的回覆孤零零留在 Hermes session
+  裡），設大了又等於死掉的 agent 沒人發現。兩條都比 LINE webhook 本身的等待時間長得多
+  ——這也是為什麼整段呼叫必須在 `BackgroundTasks` 裡進行，而不是同步等待再回應 LINE。
+- **回應解析**：`ask_hermes_agent` 回傳 `AgentReply{text, prompt_tokens}`。
+  - `text` = 所有 `delta.content` 依序串接。
+  - **成功／截斷／失敗**：`hermes.failed` 為真（或 `finish_reason` 不是 `stop`／`length`
+    且帶了錯誤訊息）→ `raise ValueError("Hermes agent failed: ...")`；
+    `finish_reason == "length"`（＝`hermes.partial`）→ 回傳截到一半的文字，另記 warning
+    `hermes_agent_truncated`（半個答案好過沒答案）；串流結束但一個字都沒有 →
+    `raise ValueError("Hermes agent response had no content")`。
+  - `prompt_tokens` 取自結束 chunk 的 `usage.prompt_tokens`（缺 `usage` 或回報 <=0 →
+    正規化為 `None`，0 是 server「沒統計」的預設），供 session 輪替的 token 水位判斷用
+    （累計語意警語見 `docs/session-hygiene.md`）。
 
 ### 媒體訊息不走這條 API body
 
@@ -113,8 +142,10 @@ Container 內由 `api_server` platform（`gateway run` 啟動的唯一介面）�
 2. 依 `X-Hermes-Session-Id` 找回（或新建）對應的 session，維持對話上下文。
 3. 把 `messages[-1].content` 當使用者輸入交給同進程內的 agent 核心（skills、
    記憶、LLM 呼叫都在 container 內部完成，對 router 而言是黑盒）。
-4. 產生回覆後，包成標準 OpenAI chat completion 格式回傳：
-   `{"choices": [{"message": {"content": "<回覆文字>"}}]}`。
+4. 因為請求帶了 `"stream": true`，回覆以 SSE 逐塊送出（`chat.completion.chunk`），
+   期間每靜默 30 秒補一行 `: keepalive`，最後一個 chunk 帶 `finish_reason`／`usage`／
+   `hermes` 區塊，再以 `data: [DONE]` 收尾；router 端把所有 `delta.content` 串回一段
+   完整文字。
 
 Hermes agent 完全不知道自己在跟 LINE 互動——它看到的只是「api_server 收到一則
 帶 session id 的文字訊息」，跟 LINE 的耦合、驗簽、Push/Reply 全部由 router 在這
@@ -143,13 +174,18 @@ sequenceDiagram
     end
     D-->>R: container URL（Docker DNS 或 localhost:port）
 
-    Note over R,H: 核心請求
-    R->>H: POST /v1/chat/completions<br/>Authorization: Bearer HERMES_API_SERVER_KEY<br/>X-Hermes-Session-Id: session_id（room_key 或 room_key#epoch）<br/>body: {"messages":[{"role":"user","content":text}]}
+    Note over R,H: 核心請求（SSE streaming）
+    R->>H: POST /v1/chat/completions<br/>Authorization: Bearer HERMES_API_SERVER_KEY<br/>X-Hermes-Session-Id: session_id（room_key 或 room_key#epoch）<br/>body: {"messages":[...], "stream": true}
     H->>H: 驗證 Bearer token
     H->>H: 依 X-Hermes-Session-Id 解析/建立 session
-    H->>H: agent 核心處理（skills / 記憶 / LLM 呼叫，黑盒）
-    H-->>R: 200 OK<br/>{"choices":[{"message":{"content": reply_text}}]}
-    R->>R: 解析 choices[0].message.content
+    H-->>R: 200 OK, Content-Type: text/event-stream
+    loop agent 核心處理（skills / 記憶 / LLM 呼叫，黑盒）
+        H-->>R: ": keepalive"（每靜默 30 秒，工具執行中也送）
+        H-->>R: data: {...,"delta":{"content":"..."}}
+    end
+    H-->>R: data: {...,"finish_reason":"stop","usage":{...},"hermes":{...}}
+    H-->>R: data: [DONE]
+    Note over R: 串接所有 delta.content；<br/>靜默超過 idle timeout → ReadTimeout，<br/>整輪超過 ceiling → TimeoutError
 
     Note over R: reply_text 交給 _deliver_reply() 送回 LINE（見 line-hermes-message-flow.md）
 ```
@@ -160,8 +196,11 @@ sequenceDiagram
 |---|---|---|
 | `get_or_create_container` | Docker API 錯誤 | log error，`_process_and_reply` 中止，使用者收不到回覆 |
 | `get_or_create_container` | `/health` 60 秒內未回 200 | `raise RuntimeError`，同上中止 |
-| `ask_hermes_agent` | HTTP 錯誤（非 2xx、連線失敗、逾時） | `httpx.HTTPError`，log error，中止 |
-| `ask_hermes_agent` | 回應無 `choices` 或 `content` 為空 | `raise ValueError`，log error，中止 |
+| `ask_hermes_agent` | HTTP 錯誤（非 2xx、連線失敗） | `httpx.HTTPError`，log error，回固定提示 |
+| `ask_hermes_agent` | 串流靜默超過 `HERMES_IDLE_TIMEOUT_SECONDS` | `httpx.ReadTimeout`，log error（idle），回逾時提示 |
+| `ask_hermes_agent` | 整輪超過 `HERMES_REQUEST_TIMEOUT_SECONDS` | `TimeoutError`，log error（ceiling），回逾時提示 |
+| `ask_hermes_agent` | `hermes.failed` 或串流無任何內容 | `raise ValueError`，log error，回固定提示 |
+| `ask_hermes_agent` | `finish_reason == "length"`（截斷） | **不算失敗**：回傳截到一半的文字，log warning `hermes_agent_truncated` |
 
 `core.py::_ask_agent()` 對這兩步各自 `try/except`，失敗只記 log 不
 往外拋——此時 LINE webhook 早已回過 200，沒有 HTTP response 可以再回錯誤給任何

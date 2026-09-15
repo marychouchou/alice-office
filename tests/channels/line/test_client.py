@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, patch
+
+import pytest
+from linebot.v3.messaging.exceptions import ApiException
 
 from alice_office_router.channels.line.client import (
     download_line_content,
     push_line_message,
     reply_line_message,
+    show_loading_animation,
 )
 
 
@@ -83,3 +88,54 @@ async def test_download_line_content_returns_bytes() -> None:
     mock_get_content.assert_awaited_once_with("message_id_123")
     assert content == b"binary-data"
     assert isinstance(content, bytes)
+
+
+# ---------------------------------------------------------------------------
+# show_loading_animation — 1:1 loading indicator (cosmetic, never raises)
+# ---------------------------------------------------------------------------
+
+
+async def test_show_loading_animation_sends_chat_id_and_seconds() -> None:
+    """The SDK gets the bare user id and the requested duration."""
+    mock_show = AsyncMock()
+    with patch(
+        "alice_office_router.channels.line.client.AsyncMessagingApi.show_loading_animation",
+        new=mock_show,
+    ):
+        await show_loading_animation("U123", "test_channel_token", 60)
+
+    mock_show.assert_awaited_once()
+    request = mock_show.call_args.args[0]
+    assert request.chat_id == "U123"
+    assert request.loading_seconds == 60
+
+
+async def test_show_loading_animation_defaults_to_sixty_seconds() -> None:
+    mock_show = AsyncMock()
+    with patch(
+        "alice_office_router.channels.line.client.AsyncMessagingApi.show_loading_animation",
+        new=mock_show,
+    ):
+        await show_loading_animation("U123", "test_channel_token")
+
+    assert mock_show.call_args.args[0].loading_seconds == 60
+
+
+async def test_show_loading_animation_swallows_api_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An API rejection is logged at warning level and never raised."""
+    mock_show = AsyncMock(side_effect=ApiException(status=400, reason="Bad Request"))
+    with (
+        patch(
+            "alice_office_router.channels.line.client.AsyncMessagingApi.show_loading_animation",
+            new=mock_show,
+        ),
+        caplog.at_level(logging.WARNING, logger="alice_office_router.channels.line.client"),
+    ):
+        await show_loading_animation("U123", "test_channel_token")
+
+    assert any(
+        record.levelno == logging.WARNING and "U123" in record.getMessage()
+        for record in caplog.records
+    )

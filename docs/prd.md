@@ -106,7 +106,19 @@ flowchart TB
   之後容器常駐，後續訊息秒級回覆。
 - 對話記憶延續：同房間下一則訊息帶同一個 session id（`room_key` 或輪替後的
   `room_key#N`），Hermes 據此接續上下文。
-- 對應：`core.process_inbound`、`core._ask_agent`、
+- 每則 1:1 訊息都附一段 ephemeral system message（`group_context.DIRECT_SYSTEM_PROMPT`，
+  與群組的 `GROUP_SYSTEM_PROMPT` 放在一起），由部署層統一規範回覆形狀：回覆精簡、重點
+  在前（LINE 聊天視窗不適合長篇 markdown 表格）；大型任務（解整份試卷、翻譯長文件、
+  多步驟研究）先交付第一段再問「要不要繼續」，每輪以兩分鐘內回完為目標；回答檔案內容
+  前要用工具重新讀檔（檔案內容不在 agent 記憶裡）；不確定就問、不編造。它不寫進房間的
+  `config.yaml`，所以改這段文字不需要動既有房間、重啟即生效。
+- **同一房間一次只跑一輪**：一則訊息還在跑 agent 時，同房間的下一則訊息會排隊等待
+  （process-local 的 per-room `asyncio.Lock`，FIFO、不設上限、不丟訊息），輪到它才照
+  原本流程處理。Hermes 每個房間只有一個 session，兩輪並行會互相拖慢並讓回覆交錯。
+  等待會記一筆 `room_turn_queued`（含 `waited_ms`）log。不同房間彼此不受影響；群組的
+  未點名訊息走 observe 捷徑，不等這把鎖（背景脈絡照常累積）。單 worker 部署才成立，
+  多 worker 需要換成共用鎖。
+- 對應：`core.process_inbound`、`core._route`／`core._take_turn`、`core._ask_agent`、
   `container_manager.get_or_create_container`。
 
 ### FR-02　群組訊息的 addressed／observe 判斷與行為差異
@@ -335,7 +347,9 @@ flowchart TD
 
 - 新房間容器冷啟動 30–60 秒（s6 supervision + skill sync），`/health` 輪詢間隔
   1 秒、最多 60 秒逾時。
-- 對 Hermes agent 的單次請求逾時 120 秒。
+- 對 Hermes agent 的單次請求走 SSE streaming，以「靜默多久」而非「總共多久」判定 agent
+  是否還活著：靜默上限預設 120 秒（`HERMES_IDLE_TIMEOUT_SECONDS`），絕對上限預設 3600 秒
+  （`HERMES_REQUEST_TIMEOUT_SECONDS`，正常不會踩到）；任一條逾時都回覆固定提示而非靜默。
 - Webhook 回 200 前只做同步部分（驗簽＋媒體下載＋事件解析＋排入背景任務），真正
   呼叫 agent（含容器冷啟動）在 `BackgroundTasks` 裡跑，不阻塞 LINE 對回應時間的
   期待。

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac as hmac_mod
 import json
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,6 +17,8 @@ from alice_office_router.channels.base import InboundMessage
 from alice_office_router.channels.line.adapter import LineAdapter
 from alice_office_router.channels.line.events import Event
 from alice_office_router.config import Settings
+from alice_office_router.conversation_log import TurnEnvelope
+from alice_office_router.core import InboundResult
 
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"
@@ -49,9 +53,30 @@ def _settings(**overrides: object) -> Settings:
         "LINE_CHANNEL_SECRET": TEST_SECRET,
         "LINE_CHANNEL_ACCESS_TOKEN": TEST_TOKEN,
         "HERMES_API_SERVER_KEY": "test_api_server_key",
+        # The turn envelope's file sink is exercised in test_conversation_log;
+        # off here so these tests never touch a real DATA_DIR.
+        "CONVERSATION_LOG_ENABLED": False,
     }
     defaults.update(overrides)
     return Settings(**defaults)  # type: ignore[arg-type]
+
+
+def _core_result(
+    texts: list[str], room_key: str = "line_room_AAA", outcome: str = "replied"
+) -> InboundResult:
+    """Build the InboundResult core now returns, standing in for a real turn.
+
+    Args:
+        texts: The reply texts the fake core hands back.
+        room_key: The room key the envelope is tagged with.
+        outcome: The envelope's outcome label.
+
+    Returns:
+        An InboundResult whose envelope still has delivered=None (the adapter
+        under test is the one that fills it in).
+    """
+    envelope = TurnEnvelope(channel="line", room_key=room_key, outcome=outcome)  # type: ignore[arg-type]
+    return InboundResult(texts=texts, envelope=envelope)
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +91,13 @@ def override_settings_dep() -> None:
     app.dependency_overrides[get_settings] = _test_settings
     yield  # type: ignore[misc]
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def stub_loading_animation() -> Iterator[AsyncMock]:
+    """Keep the cosmetic 1:1 loading indicator off the network in every test."""
+    with patch(f"{_ADAPTER}.show_loading_animation", new=AsyncMock()) as mock_show:
+        yield mock_show
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +370,7 @@ class TestGroupDispatch:
         assert task.kwargs["addressed"] is False
 
     async def test_direct_message_has_no_group_kwargs(self) -> None:
-        """Regression: a 1:1 message schedules the exact same positional-only task as before."""
+        """Regression: a 1:1 message schedules no group kwargs, only the event id."""
         event = Event.model_validate(
             {
                 "type": "message",
@@ -355,7 +387,9 @@ class TestGroupDispatch:
         assert task.args[0] == "line_U1"
         assert task.args[1] == "hi"
         assert task.args[3] == "reply_d"
-        assert task.kwargs == {}
+        # event_id rides along so the background task's log lines and turn
+        # envelope carry it; no group kwargs on the 1:1 path.
+        assert task.kwargs == {"event_id": "evt_d"}
 
     async def test_join_event_schedules_greeting_reply(self) -> None:
         event = Event.model_validate(
@@ -371,8 +405,8 @@ class TestGroupDispatch:
 
         assert len(background_tasks.tasks) == 1
         task = background_tasks.tasks[0]
-        # _deliver_reply(native_id, greeting, reply_token, config)
-        assert task.args[0] == "C1"
+        # _greet_group(room_key, greeting, reply_token, config)
+        assert task.args[0] == "line_C1"
         assert "小幫手" in task.args[1]
         assert task.args[2] == "reply_j"
 
@@ -398,9 +432,9 @@ class TestGroupDispatch:
         """An unaddressed group message (core returns []) sends nothing to LINE."""
         captured: dict[str, InboundMessage] = {}
 
-        async def _fake_process(msg: InboundMessage, config: Settings) -> list[str]:
+        async def _fake_process(msg: InboundMessage, config: Settings) -> InboundResult:
             captured["msg"] = msg
-            return []
+            return _core_result([], room_key=msg.room_key, outcome="observed")
 
         with (
             patch(f"{_ADAPTER}.process_inbound", new=_fake_process),
@@ -478,7 +512,7 @@ async def test_process_and_reply_pushes_single_text_when_no_reply_token() -> Non
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=["哈囉，我是 Hermes"]),
+            new=AsyncMock(return_value=_core_result(["哈囉，我是 Hermes"])),
         ),
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
     ):
@@ -493,7 +527,7 @@ async def test_process_and_reply_uses_reply_token_for_first_text() -> None:
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=["哈囉"]),
+            new=AsyncMock(return_value=_core_result(["哈囉"])),
         ),
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
@@ -511,7 +545,7 @@ async def test_process_and_reply_first_text_reply_token_rest_push() -> None:
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=["notice", "agent reply"]),
+            new=AsyncMock(return_value=_core_result(["notice", "agent reply"])),
         ),
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
@@ -529,7 +563,7 @@ async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
     with (
         patch(
             f"{_ADAPTER}.process_inbound",
-            new=AsyncMock(return_value=[]),
+            new=AsyncMock(return_value=_core_result([], outcome="agent_failed")),
         ),
         patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
         patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
@@ -540,3 +574,151 @@ async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
 
     mock_reply.assert_not_called()
     mock_push.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# LineAdapter._process_and_reply — turn envelope (docs/logging-design.md §5.7)
+# ---------------------------------------------------------------------------
+
+
+class TestTurnEnvelopeRecording:
+    async def test_successful_delivery_records_delivered_true(self) -> None:
+        """The adapter is what knows the reply landed, so it fills delivered=True."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"])),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()),
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        mock_record.assert_called_once()
+        assert mock_record.call_args.args[0].delivered is True
+
+    async def test_failed_push_records_delivered_false(self) -> None:
+        """A push that LINE rejects is recorded, not silently lost."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"])),
+            ),
+            patch(
+                f"{_ADAPTER}.push_line_message",
+                new=AsyncMock(side_effect=ApiException(status=500)),
+            ),
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        assert mock_record.call_args.args[0].delivered is False
+
+    async def test_nothing_to_deliver_records_delivered_none(self) -> None:
+        """An observed turn had nothing to send — neither success nor failure."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result([], outcome="observed")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "早安", _settings())
+
+        mock_push.assert_not_called()
+        assert mock_record.call_args.args[0].delivered is None
+
+    async def test_partial_delivery_records_delivered_false(self) -> None:
+        """With a notice plus a reply, one failed send makes the whole turn undelivered."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["notice", "agent reply"])),
+            ),
+            patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()),
+            patch(
+                f"{_ADAPTER}.push_line_message",
+                new=AsyncMock(side_effect=ApiException(status=500)),
+            ),
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter()._process_and_reply(
+                "line_room_AAA", "哈囉", _settings(), "reply_token_1"
+            )
+
+        assert mock_record.call_args.args[0].delivered is False
+
+
+# ---------------------------------------------------------------------------
+# LineAdapter._loading_animation — LINE's 1:1 loading indicator while we wait
+# ---------------------------------------------------------------------------
+
+
+class TestLoadingAnimation:
+    async def test_one_to_one_starts_animation_before_the_reply_lands(
+        self, stub_loading_animation: AsyncMock
+    ) -> None:
+        """A 1:1 turn shows the indicator first, then pushes the reply."""
+        order: list[str] = []
+        stub_loading_animation.side_effect = lambda *_args, **_kwargs: order.append("loading")
+        mock_push = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("push"))
+
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"])),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=mock_push),
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        assert order == ["loading", "push"]
+        # Bare LINE user id (prefix stripped), 60 s — LINE's maximum.
+        stub_loading_animation.assert_awaited_with("room_AAA", TEST_TOKEN, 60)
+
+    async def test_group_message_never_shows_the_animation(
+        self, stub_loading_animation: AsyncMock
+    ) -> None:
+        """LINE only supports the loading indicator in one-on-one chats."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"], room_key="line_C1")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()),
+        ):
+            await LineAdapter()._process_and_reply(
+                "line_C1", "@bot 哈囉", _settings(), None, is_group=True
+            )
+
+        stub_loading_animation.assert_not_called()
+
+    async def test_slow_turn_refreshes_the_animation(self) -> None:
+        """A turn outliving one animation gets it re-issued until core returns."""
+        refreshed = asyncio.Event()
+        calls: list[str] = []
+
+        async def _fake_loading(native_id: str, token: str, seconds: int = 60) -> None:
+            calls.append(native_id)
+            if len(calls) >= 2:
+                refreshed.set()
+
+        async def _fake_process(msg: InboundMessage, config: Settings) -> InboundResult:
+            await asyncio.wait_for(refreshed.wait(), timeout=5)
+            return _core_result(["哈囉"])
+
+        with (
+            patch(f"{_ADAPTER}._LOADING_REFRESH_INTERVAL", 0.01),
+            patch(f"{_ADAPTER}.show_loading_animation", new=_fake_loading),
+            patch(f"{_ADAPTER}.process_inbound", new=_fake_process),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()),
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        assert len(calls) >= 2
+        assert set(calls) == {"room_AAA"}
+        # The refresher is cancelled with the turn, so the count stops growing.
+        settled = len(calls)
+        await asyncio.sleep(0.05)
+        assert len(calls) == settled

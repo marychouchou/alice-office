@@ -125,7 +125,7 @@ flowchart LR
     S1[get_or_create_container] -->|成功| S2[ask_hermes_agent]
     S1 -->|Exception| X1[記錄 error log，結束]
     S2 -->|成功 reply_text| S3["_deliver_reply"]
-    S2 -->|httpx.HTTPError / ValueError| X2[記錄 error log，結束]
+    S2 -->|httpx.HTTPError / TimeoutError / ValueError| X2[記錄 error log，回固定提示]
     S3 -->|reply token 成功或 push fallback 成功| Done[使用者收到回覆]
     S3 -->|reply 與 push 皆失敗| X3[記錄 error log，回覆遺失]
 ```
@@ -180,15 +180,22 @@ Headers:
   Authorization: Bearer {HERMES_API_SERVER_KEY}
   X-Hermes-Session-Id: {room_id}
 Body:
-  {"messages": [{"role": "user", "content": "<待轉發的文字（原始文字／媒體通知／佔位文字）>"}]}
+  {"messages": [{"role": "user", "content": "<待轉發的文字（原始文字／媒體通知／佔位文字）>"}],
+   "stream": true}
 ```
 
 - `X-Hermes-Session-Id: room_id` 是同一聊天室對話記憶延續的關鍵：同房間下一次訊息帶
   同一個 session id，Hermes 內部才能接續前後文；不同房間的 session 也因為根本是不同
   container，天生互相隔離。
-- 逾時設定 120 秒（`_REQUEST_TIMEOUT_SECONDS`）。
-- 回應解析：取 `choices[0].message.content` 當作回覆文字；若 `choices` 為空或
-  `content` 不是非空字串，`raise ValueError`（視為 Hermes 沒有給出可用回覆）。
+- 一律用 SSE streaming（`"stream": true`）：不是為了逐字顯示（回覆仍整包送回 LINE），
+  而是拿 Hermes 每 30 秒一次的 `: keepalive` 當「agent 還活著」的訊號。
+- 兩條逾時：**靜默**超過 `HERMES_IDLE_TIMEOUT_SECONDS`（預設 120 秒，拋
+  `httpx.ReadTimeout`）＝ agent 卡死；整輪超過 `HERMES_REQUEST_TIMEOUT_SECONDS`
+  （預設 3600 秒，拋 `TimeoutError`）＝ 絕對上限保險絲，正常不會踩到。任一條踩到都回固定
+  提示。完整協定見 `docs/router-hermes-agent-protocol.md`。
+- 回應解析：把所有 `delta.content` 串接成回覆文字；Hermes 回報該輪失敗（`hermes.failed`）
+  或整串沒有任何內容時 `raise ValueError`（視為沒有給出可用回覆）；`finish_reason == "length"`
+  的截斷回覆照送，另記一筆 warning。
 
 ### 8. Hermes Agent container 內部
 

@@ -11,19 +11,28 @@ The channel-free core never sees any of this; it only receives an
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from linebot.v3.messaging.exceptions import ApiException
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
-from alice_office_router.channels.line.client import push_line_message, reply_line_message
+from alice_office_router.channels.line.client import (
+    push_line_message,
+    reply_line_message,
+    show_loading_animation,
+)
 from alice_office_router.channels.line.dedup import EventDeduplicator
 from alice_office_router.channels.line.events import Event, WebhookBody, resolve_inbound_text
 from alice_office_router.channels.line.profiles import resolve_sender_name
 from alice_office_router.channels.line.verify import verify_line_signature
 from alice_office_router.config import Settings, get_settings
+from alice_office_router.conversation_log import record_turn
 from alice_office_router.core import process_inbound
 
 logger = logging.getLogger(__name__)
@@ -36,6 +45,14 @@ _GROUP_JOIN_GREETING = (
     "需要我幫忙時，請 @我，或用設定好的呼叫詞開頭跟我說話；"
     "其他訊息我會安靜聽著、當作背景脈絡，不會插話。"
 )
+
+# LINE's loading indicator runs for at most 60 s and only in 1:1 chats
+# (https://developers.line.biz/en/docs/messaging-api/use-loading-indicator/),
+# so covering a multi-minute agent turn means re-issuing it just before each
+# one lapses. The refresh interval sits under the duration so the animation
+# never visibly blinks out between calls.
+_LOADING_ANIMATION_SECONDS = 60
+_LOADING_REFRESH_INTERVAL = 50.0
 
 
 class LineAdapter:
@@ -133,16 +150,26 @@ class LineAdapter:
         if event.type not in {"message", "join"}:
             return
 
-        event_id = event.webhookEventId
-        if event_id and self._dedup.is_duplicate(event_id):
-            logger.info(f"Skipping duplicate LINE webhook event {event_id}")
-            return
+        event_id = event.webhookEventId or None
+        # Every line logged while this event is handled carries these; the
+        # background tasks scheduled below outlive the binding, so they re-bind
+        # their own room context (docs/logging-design.md §5.1). event_id is left
+        # unbound rather than bound to None when the event carried none — the
+        # same rule `_process_and_reply` follows, so a `| json | event_id != ""`
+        # filter means one thing across both.
+        context = {"channel": self.name}
+        if event_id:
+            context["event_id"] = event_id
+        with bound_contextvars(**context):
+            if event_id and self._dedup.is_duplicate(event_id):
+                logger.info(f"Skipping duplicate LINE webhook event {event_id}")
+                return
 
-        if event.type == "join":
-            self._schedule_join_greeting(event, background_tasks, config)
-            return
+            if event.type == "join":
+                self._schedule_join_greeting(event, background_tasks, config)
+                return
 
-        await self._dispatch_message(event, background_tasks, config)
+            await self._dispatch_message(event, background_tasks, config)
 
     async def _dispatch_message(
         self, event: Event, background_tasks: BackgroundTasks, config: Settings
@@ -169,7 +196,14 @@ class LineAdapter:
 
         reply_token = event.replyToken or None
         if not event.is_group:
-            background_tasks.add_task(self._process_and_reply, room_key, text, config, reply_token)
+            background_tasks.add_task(
+                self._process_and_reply,
+                room_key,
+                text,
+                config,
+                reply_token,
+                event_id=event.webhookEventId or None,
+            )
             return
 
         await self._schedule_group_message(
@@ -212,6 +246,7 @@ class LineAdapter:
             addressed=self._is_addressed(event, text, config),
             sender_id=sender_id,
             sender_name=sender_name,
+            event_id=event.webhookEventId or None,
         )
 
     def _is_addressed(self, event: Event, text: str, config: Settings) -> bool:
@@ -248,14 +283,32 @@ class LineAdapter:
             background_tasks: FastAPI background task queue.
             config: Application settings.
         """
-        native_id = event.native_id
-        if native_id is None:
+        room_key = event.room_key
+        if room_key is None:
             logger.warning("Skipping LINE join event with unresolvable room id")
             return
         reply_token = event.replyToken or None
         background_tasks.add_task(
-            self._deliver_reply, native_id, _GROUP_JOIN_GREETING, reply_token, config
+            self._greet_group, room_key, _GROUP_JOIN_GREETING, reply_token, config
         )
+
+    async def _greet_group(
+        self, room_key: str, text: str, reply_token: str | None, config: Settings
+    ) -> None:
+        """Deliver the group-join greeting under this room's log context.
+
+        A thin wrapper over _deliver_reply that exists so the background task —
+        which runs after the request (and its bound context) is gone — logs
+        under the room it greets.
+
+        Args:
+            room_key: Channel-prefixed room key of the joined group.
+            text: The greeting to send.
+            reply_token: The join event's reply token, if any.
+            config: Application settings.
+        """
+        with bound_contextvars(channel=self.name, room_key=room_key):
+            await self._deliver_reply(self._native_id(room_key), text, reply_token, config)
 
     def _native_id(self, room_key: str) -> str:
         """Strip the channel prefix back off to recover the bare LINE id.
@@ -283,14 +336,15 @@ class LineAdapter:
         addressed: bool = True,
         sender_id: str | None = None,
         sender_name: str | None = None,
+        event_id: str | None = None,
     ) -> None:
         """Run one inbound LINE message through core and deliver its replies.
 
         Builds the channel-free InboundMessage, runs core.process_inbound
-        (Google gate -> container -> agent), and delivers each returned text
-        back to LINE. Runs in a background task after the router already
-        returned 200 OK, so core's own per-step error guards keep any failure
-        from raising here.
+        (Google gate -> container -> agent), delivers each returned text back to
+        LINE, then records the turn envelope with what delivery did. Runs in a
+        background task after the router already returned 200 OK, so core's own
+        per-step error guards keep any failure from raising here.
 
         Args:
             room_key: Channel-prefixed room key core routes on (`line_<id>`);
@@ -302,6 +356,9 @@ class LineAdapter:
             addressed: Whether this message is directed at the bot (1:1: True).
             sender_id: The group speaker's native id, if resolved.
             sender_name: The group speaker's display name, if resolved.
+            event_id: The triggering event's `webhookEventId`, re-bound here so
+                this task's log lines and turn envelope carry it (the context
+                _dispatch_event bound is gone by the time this runs).
         """
         msg = InboundMessage(
             channel=self.name,
@@ -312,12 +369,78 @@ class LineAdapter:
             sender_id=sender_id,
             sender_name=sender_name,
         )
-        texts = await process_inbound(msg, config)
-        await self._deliver_texts(self._native_id(room_key), texts, reply_token, config)
+        # Re-bound here, not inherited: this task runs after the webhook request
+        # (and the context _dispatch_event bound) is already done. event_id is
+        # left unbound rather than bound to None when the event carried none.
+        context = {"channel": self.name, "room_key": room_key}
+        if event_id:
+            context["event_id"] = event_id
+        with bound_contextvars(**context):
+            # The animation runs only while we wait; the reply pushed right
+            # after clears it (LINE drops it on the next message we send).
+            async with self._loading_animation(room_key, config, enabled=not is_group):
+                result = await process_inbound(msg, config)
+            delivered = await self._deliver_texts(
+                self._native_id(room_key), result.texts, reply_token, config
+            )
+            record_turn(result.envelope.model_copy(update={"delivered": delivered}), config)
+
+    @asynccontextmanager
+    async def _loading_animation(
+        self, room_key: str, config: Settings, *, enabled: bool
+    ) -> AsyncIterator[None]:
+        """Hold LINE's native loading animation up for the duration of the block.
+
+        An agent turn routinely takes tens of seconds to several minutes, during
+        which a 1:1 user would otherwise see nothing at all. One LINE animation
+        lasts 60 s at most, so a companion task re-issues it until the block
+        exits. Everything here is cosmetic: `show_loading_animation` swallows its
+        own failures, and the block's body runs either way.
+
+        Args:
+            room_key: Channel-prefixed room key, stripped to the bare LINE user id.
+            config: Application settings (for the channel access token).
+            enabled: False for group/multi-person rooms, which LINE's loading
+                indicator does not support — then this is a plain no-op.
+
+        Yields:
+            None — with the animation running for a 1:1 chat, nothing otherwise.
+        """
+        if not enabled:
+            yield
+            return
+
+        native_id = self._native_id(room_key)
+        token = config.LINE_CHANNEL_ACCESS_TOKEN
+        await show_loading_animation(native_id, token, _LOADING_ANIMATION_SECONDS)
+        refresher = asyncio.create_task(self._refresh_loading_animation(native_id, token))
+        try:
+            yield
+        finally:
+            refresher.cancel()
+            with suppress(asyncio.CancelledError):
+                await refresher
+
+    @staticmethod
+    async def _refresh_loading_animation(native_id: str, channel_access_token: str) -> None:
+        """Re-issue the loading animation just before each one lapses.
+
+        Runs as a companion task that `_loading_animation` cancels once the
+        agent turn is done.
+
+        Args:
+            native_id: Bare LINE user id of the 1:1 chat.
+            channel_access_token: LINE channel access token for authentication.
+        """
+        while True:
+            await asyncio.sleep(_LOADING_REFRESH_INTERVAL)
+            await show_loading_animation(
+                native_id, channel_access_token, _LOADING_ANIMATION_SECONDS
+            )
 
     async def _deliver_texts(
         self, native_id: str, texts: list[str], reply_token: str | None, config: Settings
-    ) -> None:
+    ) -> bool | None:
         """Deliver core's ordered reply texts back to the LINE room.
 
         The first text may use the single-use reply token (falling back to
@@ -329,14 +452,23 @@ class LineAdapter:
             texts: Reply texts from core.process_inbound, in delivery order.
             reply_token: Reply token from the triggering event, if any.
             config: Application settings.
+
+        Returns:
+            None when there was nothing to deliver (an observed group message,
+            a failed agent call), else whether EVERY text reached LINE.
         """
+        if not texts:
+            return None
+        delivered = True
         for index, text in enumerate(texts):
             token = reply_token if index == 0 else None
-            await self._deliver_reply(native_id, text, token, config)
+            sent = await self._deliver_reply(native_id, text, token, config)
+            delivered = delivered and sent
+        return delivered
 
     async def _deliver_reply(
         self, native_id: str, text: str, reply_token: str | None, config: Settings
-    ) -> None:
+    ) -> bool:
         """Deliver a reply to LINE, preferring the free reply token over Push.
 
         LINE reply tokens are single-use and expire roughly 60 seconds after
@@ -350,11 +482,17 @@ class LineAdapter:
             text: Reply text to send.
             reply_token: Reply token from the triggering event, if any.
             config: Application settings.
+
+        Returns:
+            True when LINE accepted the message (by reply or by push), False
+            when even the push failed — the turn envelope's `delivered` field.
+            A failure is logged here and never raised: this runs in a
+            background task with nobody left to report it to.
         """
         if reply_token:
             try:
                 await reply_line_message(reply_token, text, config.LINE_CHANNEL_ACCESS_TOKEN)
-                return
+                return True
             except ApiException as exc:
                 logger.info(
                     f"LINE reply token rejected for room {native_id} ({exc}); falling back to push"
@@ -364,3 +502,5 @@ class LineAdapter:
             await push_line_message(native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN)
         except Exception as exc:
             logger.error(f"Failed to push LINE reply for room {native_id}: {exc}")
+            return False
+        return True

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Container-only defaults for DATA_DIR/HERMES_TEMPLATES_DIR (see their field
 # docs below). Host-mode dev must override both — see _validate_host_mode_paths.
 _DOCKER_DEFAULT_DATA_DIR = Path("/app/data")
 _DOCKER_DEFAULT_HERMES_TEMPLATES_DIR = Path("/app/hermes-templates")
+
+# The stdlib logging level names, which is exactly what dictConfig accepts.
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 
 class Settings(BaseSettings):
@@ -27,6 +31,24 @@ class Settings(BaseSettings):
     # Shared bearer secret between the router and every Hermes agent
     # container's api_server platform (sets API_SERVER_KEY in the container).
     HERMES_API_SERVER_KEY: str
+    # Maximum SILENCE (seconds) between bytes of one agent turn before the agent
+    # is considered dead. The router asks for a streamed response, and Hermes
+    # writes a `: keepalive` comment after every 30s of inactivity — including
+    # while a tool runs — so liveness is "bytes keep arriving", not "the turn
+    # finished in time". This is what a hung container trips, usually within
+    # minutes; a legitimately slow turn never does, however long it thinks.
+    HERMES_IDLE_TIMEOUT_SECONDS: float = 120.0
+    # Absolute ceiling (seconds) on ONE agent turn, a safety valve for a stream
+    # that keeps emitting keepalives forever. Normally never reached: liveness
+    # is judged by HERMES_IDLE_TIMEOUT_SECONDS above, and a turn is a whole tool
+    # loop, so pure-reasoning or many-tool turns legitimately run for many
+    # minutes. The webhook itself already returned 200 and the turn runs in a
+    # background task, so raising this does not affect LINE's own webhook
+    # deadline. On expiry (either budget) the router stops waiting and sends the
+    # user the fixed timeout notice (core.AGENT_TIMEOUT_NOTICE) — the agent is
+    # not interrupted, so that turn's answer still lands in the room's Hermes
+    # session.
+    HERMES_REQUEST_TIMEOUT_SECONDS: float = 3600.0
     # Set False when router runs on the host (not inside Docker).
     # Containers will publish port 8642 to a random host port so the host
     # can reach them via localhost instead of Docker-internal DNS.
@@ -91,6 +113,39 @@ class Settings(BaseSettings):
     # near-empty transcript. 2026-09-15: LLM backend window doubled to 262144
     # (compression trigger ~197k), so this doubled in lockstep to 240000.
     SESSION_ROTATE_PROMPT_TOKENS: int = 240000
+    # Minimum level every logger in the router process emits (see
+    # logging_setup.configure_logging). Noisy third-party loggers (docker,
+    # httpx, ...) stay pinned at WARNING regardless, so DEBUG stays readable.
+    # Typed as a Literal so a typo fails at startup with a pydantic error
+    # naming the field and the five valid values — rather than reaching
+    # dictConfig, which raises a ValueError about an "unknown level" from deep
+    # inside logging.config with no mention of which setting caused it.
+    LOG_LEVEL: LogLevel = "INFO"
+    # Rendering of those log lines: "json" (default — one JSON object per
+    # line, what a collector reads) or "console" (colored, human-readable;
+    # for host-mode dev in a terminal).
+    LOG_FORMAT: Literal["json", "console"] = "json"
+    # Whether each inbound turn also appends one JSON envelope line to
+    # DATA_DIR/_conversations/<room_key>.jsonl (see conversation_log.py). The
+    # envelope never carries the agent's reply text — conversation content lives
+    # only in each room's Hermes state.db (docs/logging-design.md §5.7). Set
+    # False for a deployment contractually barred from keeping any per-turn
+    # record; the same line still goes to stdout for the log collector.
+    CONVERSATION_LOG_ENABLED: bool = True
+
+    @field_validator("LOG_LEVEL", mode="before")
+    @classmethod
+    def _normalize_log_level(cls, value: object) -> object:
+        """Accept `LOG_LEVEL=debug` as well as the canonical upper-case name.
+
+        Args:
+            value: The raw environment value, before the Literal is checked.
+
+        Returns:
+            The string upper-cased; anything that is not a string is passed
+            through untouched, so pydantic reports the type error itself.
+        """
+        return value.upper() if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
@@ -161,6 +216,35 @@ class Settings(BaseSettings):
             (google_dir), used by ensure_google_seed as the copy source.
         """
         return self.google_dir / "gcp-oauth.keys.installed.json"
+
+    @property
+    def conversations_dir(self) -> Path:
+        """Router-local path to the cross-room turn-envelope directory.
+
+        Returns:
+            DATA_DIR / "_conversations" — one <room_key>.jsonl per room, each
+            line a TurnEnvelope (conversation_log.py). Underscore-prefixed like
+            google_dir so it never collides with a room directory, and so the
+            conversations CLI can skip it when enumerating rooms.
+        """
+        return self.DATA_DIR / "_conversations"
+
+    def room_conversation_log(self, room_id: str) -> Path:
+        """Router-local path to one room's turn-envelope JSONL file.
+
+        Args:
+            room_id: Unique identifier for the chatroom, same raw (original
+                case) value used for DATA_DIR / room_id elsewhere — must not
+                be lowercased, or the CLI's join back onto the room's
+                data/<room_id>/state.db would miss.
+
+        Returns:
+            DATA_DIR / "_conversations" / f"{room_id}.jsonl" — deliberately
+            OUTSIDE data/<room_id>/ (which is bind-mounted into the room's
+            container as /opt/data), so a room's own agent can never read or
+            rewrite the router's record of that room.
+        """
+        return self.conversations_dir / f"{room_id}.jsonl"
 
     def room_google_dir(self, room_id: str) -> Path:
         """Router-local path to one room's own Google OAuth data directory.

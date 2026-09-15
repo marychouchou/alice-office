@@ -1,0 +1,79 @@
+# Loki 單機（single binary，預設 -target=all）設定。
+# 設計見 docs/logging-design.md §5.4；schema 對照 Loki 3.7 官方文件：
+#   https://grafana.com/docs/loki/latest/configure/
+#   https://grafana.com/docs/loki/latest/operations/storage/retention/
+#
+# 這份設定刻意不開任何 auth，也不對 host 開 port：唯一的存取者是同一個
+# logging_net 上的 Alloy（push）與 Grafana（query）。那個 network 只有這三個
+# 服務，房間的 agent 容器（hermes_global_net）連 DNS 都解析不到 loki。
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    # 只有一組 schema，因為這是全新部署。index period 必須是 24h，否則
+    # compactor 的 retention 不會生效（官方限制）。
+    - from: "2026-01-01"
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+  # retention_enabled: true 時必填。單機用 filesystem，跟 chunks 同一顆碟。
+  delete_request_store: filesystem
+
+limits_config:
+  # 30 天（§5.4）。要改保留期就改這一個值，compactor 會自己掃。
+  retention_period: 720h
+  # 關掉 delete API：`retention_enabled: true` 會把 /loki/api/v1/delete 這組
+  # endpoint 註冊起來，而 auth_enabled: false 代表任何連得到 :3100 的東西都能
+  # 呼叫它刪別人的 log。deletion_mode: disabled 讓那些 endpoint 一律回 403
+  # （Loki 3.7 三個合法值：disabled / filter-only / filter-and-delete）。
+  # 這不影響 compactor 的保留期回收——retention 由上面的 retention_period 加
+  # compactor.retention_enabled 驅動，跟使用者發起的 delete request 是兩條路。
+  deletion_mode: disabled
+  # 關掉 Loki 自己的 service_name 推導——它預設會照 service／app／container…
+  # 的順序抄一份出來變成新 label，跟我們 relabel 出來的 service 一模一樣，
+  # 只是多一份基數。label 集合以 Alloy 那端為準（§5.4 六個）。
+  discover_service_name: []
+  # discover_log_levels 維持預設 true：它把等級放進 structured metadata 的
+  # detected_level（不是 index label，不影響基數），讓 hermes 那份純文字
+  # 檔案 log 也能按等級篩。
+  # 一個房間一個 stream 組合，數十房間仍遠低於這個上限；設高一點是為了
+  # 房間數成長時不會突然開始丟行。
+  max_streams_per_user: 10000
+  max_global_streams_per_user: 10000
+
+# 單機部署不需要 ruler，也不要把使用量回報給 Grafana Labs。
+analytics:
+  reporting_enabled: false

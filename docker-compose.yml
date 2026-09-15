@@ -12,6 +12,8 @@ services:
       - HERMES_TEMPLATES_DIR=/app/hermes-templates
       - HERMES_IMAGE=${HERMES_IMAGE}
       - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
+      - HERMES_IDLE_TIMEOUT_SECONDS=${HERMES_IDLE_TIMEOUT_SECONDS:-120}
+      - HERMES_REQUEST_TIMEOUT_SECONDS=${HERMES_REQUEST_TIMEOUT_SECONDS:-3600}
       - LLM_BASE_URL=${LLM_BASE_URL}
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_MODEL=${LLM_MODEL}
@@ -22,11 +24,24 @@ services:
       - SESSION_IDLE_RESET_MINUTES=${SESSION_IDLE_RESET_MINUTES:-1440}
       - SESSION_ROTATE_PROMPT_TOKENS=${SESSION_ROTATE_PROMPT_TOKENS:-240000}
       - API_CHANNEL_TOKEN=${API_CHANNEL_TOKEN:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - CONVERSATION_LOG_ENABLED=${CONVERSATION_LOG_ENABLED:-true}
     ports:
       - "8000:8000"
     networks:
       - hermes_global_net
     restart: always
+    # Same label/rotation contract the router puts on every hermes_<room_id>
+    # container it creates (see container_manager); a log collector discovers
+    # both through alice.role (docs/logging-design.md §5.2).
+    labels:
+      alice.role: router
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 networks:
   hermes_global_net:

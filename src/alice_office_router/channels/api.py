@@ -17,9 +17,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, field_validator
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings, get_settings
+from alice_office_router.conversation_log import record_turn
 from alice_office_router.core import process_inbound
 
 # room_key flows into a docker container name (hermes_<room_key>, whose network
@@ -135,7 +137,15 @@ class ApiChannelAdapter:
         ) -> dict[str, list[str]]:
             _verify_bearer(authorization, settings.API_CHANNEL_TOKEN)
             msg = InboundMessage(channel=self.name, room_key=body.room_key, text=body.text)
-            replies = await process_inbound(msg, settings)
-            return {"replies": replies}
+            # Marks every line of this turn as this channel's; core binds the
+            # room_key itself (docs/logging-design.md §5.1).
+            with bound_contextvars(channel=self.name):
+                result = await process_inbound(msg, settings)
+                # This channel's "delivery" is the HTTP response body being
+                # built right here, so it cannot fail separately: True whenever
+                # there is something to return, None when there is nothing.
+                delivered = True if result.texts else None
+                record_turn(result.envelope.model_copy(update={"delivered": delivered}), settings)
+            return {"replies": result.texts}
 
         return router

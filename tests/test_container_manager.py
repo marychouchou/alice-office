@@ -201,6 +201,31 @@ def test_missing_container_is_created_with_hermes_env() -> None:
     assert "LINE_CHANNEL_SECRET" not in env
 
 
+def test_created_container_is_labelled_and_its_log_is_capped() -> None:
+    """A new container carries the alice.* labels and a rotating json-file log."""
+    mock_container = _make_running_container()
+    mock_client = MagicMock()
+    mock_client.containers.get.side_effect = docker.errors.NotFound("not found")
+    mock_client.containers.run.return_value = mock_container
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready"),
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch("alice_office_router.container_manager._ensure_mcp_seed"),
+        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        get_or_create_container("line_U1234", SETTINGS_IN_DOCKER)
+
+    call_kwargs = mock_client.containers.run.call_args.kwargs
+    assert call_kwargs["labels"]["alice.room_id"] == "line_U1234"
+    assert call_kwargs["labels"]["alice.role"] == "agent"
+    log_config = call_kwargs["log_config"]
+    assert log_config.type == "json-file"
+    assert log_config.config == {"max-size": "10m", "max-file": "3"}
+
+
 def test_missing_container_publishes_port_on_host() -> None:
     """When ROUTER_IN_DOCKER=False, new container must publish port to host."""
     mock_container = _make_running_container(host_port="54321")
@@ -449,6 +474,51 @@ def test_wait_until_ready_raises_on_timeout() -> None:
         pytest.raises(RuntimeError, match="did not become ready"),
     ):
         _wait_until_ready("http://hermes_room_AAA:8642", timeout=0.01)
+
+
+def test_container_removed_between_get_and_start_is_recreated() -> None:
+    """`docker rm` racing the restart must fall through to the create path.
+
+    The Phase 2 note tells operators to remove a room's container so the router
+    rebuilds it with labels; if that lands between containers.get() and
+    container.start(), the NotFound has to be handled here, not escape.
+    """
+    stale = _make_running_container()
+    stale.status = "exited"
+    stale.start.side_effect = docker.errors.NotFound("no such container")
+    fresh = _make_running_container()
+    mock_client = _make_mock_client(stale)
+    mock_client.containers.run.return_value = fresh
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready") as mock_wait,
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch("alice_office_router.container_manager._ensure_mcp_seed"),
+        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        url = get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
+
+    assert url == EXPECTED_URL_DOCKER
+    mock_client.containers.run.assert_called_once()
+    mock_wait.assert_called_once_with(EXPECTED_URL_DOCKER)
+
+
+def test_docker_api_error_from_start_is_logged_and_raised() -> None:
+    """A non-NotFound failure while restarting still propagates after logging."""
+    stopped = _make_running_container()
+    stopped.status = "exited"
+    stopped.start.side_effect = docker.errors.APIError("boom")
+    mock_client = _make_mock_client(stopped)
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        pytest.raises(docker.errors.APIError),
+    ):
+        get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
+
+    mock_client.containers.run.assert_not_called()
 
 
 def test_docker_api_error_is_raised() -> None:

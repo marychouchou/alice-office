@@ -110,6 +110,47 @@ Webhook URL 設為 `https://your-domain.com/webhook`（服務監聽 `http://loca
 日常開發不用起 compose——只在動到 Dockerfile / compose / `container_manager.py`
 連線邏輯時，才需要用 container 模式驗一次。
 
+### 選配：集中式 log（Loki）
+
+預設**不開**。router 與每個 `hermes_<room_id>` 容器的 stdout 由 Docker 的
+`json-file` driver 保存（各 10 MB × 3），每房間的檔案 log 在
+`data/<room_id>/logs/`，用 `docker compose logs` / `docker logs` / `tail` 就能查。
+
+房間多到要跨 router、容器 stdout、檔案 log 三種來源追同一則訊息時，
+`deploy/logging/` 有一組現成的 Alloy（收集）→ Loki（儲存，30 天）→
+Grafana（查詢）堆疊，跟 router 同一台主機，但**掛在自己的 `logging_net` 上、不接
+`hermes_global_net`**（Loki 沒有 auth，同網段就等於每個房間的 agent 都讀得到所有房間
+的 log）。Alloy 讀 log 走的是 docker.sock 與 ro mount，不需要那個網段：
+
+```bash
+# 1. .env 設定 Grafana 的 admin 密碼（router 不讀這個變數，只給 compose 用）
+echo "GRAFANA_ADMIN_PASSWORD=$(openssl rand -hex 16)" >> .env
+
+# 2. 在 repo 根目錄多疊一個 -f（主 compose 的行為完全不變）
+docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml up -d
+#    全新主機用部署腳本的話：./scripts/deploy_host.sh --with-logging
+
+# 3. Grafana 只綁 127.0.0.1:3000（Loki 完全不對外開 port），從自己的機器開 tunnel
+ssh -N -L 3000:127.0.0.1:3000 <user>@<host>
+#    → 瀏覽器開 http://localhost:3000，帳號 admin / 上面那組密碼
+#    → Explore（Loki 資料來源已自動接好）→ 例：{room_id="line_U1234..."}
+```
+
+> **既有房間容器要重建一次**：Alloy 靠 `alice.*` label 發現容器，而 label 是建立時
+> 寫死的。這個版本之前建的 `hermes_<room_id>` 容器沒有 label，Grafana 裡不會出現。
+> `docker rm -f hermes_<room_id>` 之後 router 會在下一則訊息進來時自動重建（`data/`
+> 不受影響，只中斷一次開機時間）。
+
+關掉就是 `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml
+stop alloy loki grafana`——router 不受影響，它從頭到尾不知道這個堆疊存在。
+成本約 480 MB RAM（實測 Alloy 65 / Loki 107 / Grafana 310 MB）。常用 LogQL 查詢見
+`docs/troubleshooting.md` 第 1 節，設計與方案比較見 `docs/logging-design.md`。
+
+> Alloy 用 `HOST_DATA_DIR` 把 `data/` 以唯讀掛進 `/rooms` 讀每房間的
+> `logs/*.log`，所以 `HOST_DATA_DIR` 必須跟 router 用的是同一個目錄
+> （見 `docs/env-data-paths.md`）；host 模式（`ROUTER_IN_DOCKER=false`）的 router
+> 直接跑在主機上、沒有 Docker label，它的 stdout **不會**被收進去，這是預期行為。
+
 ## 環境需求
 
 - Docker（宿主機）
@@ -311,6 +352,11 @@ Skill 是純檔案，格式照 `data/<room>/skills/` 裡的現成範例
 2. `docker restart hermes_<room_id>`
 3. 用 `test_webhook.py` 送會觸發該 skill 的訊息驗證
 
+要讓**所有房間（含之後新建的）**都拿到的 skill，放進 `src/hermes/skill/<category>/<name>/`
+並 rebuild image（`Dockerfile.hermes` 會 COPY 到 `/opt/hermes/skills/`，Hermes 開機的
+manifest sync 自動發到每個房間、跳過房間手改過的副本）。目前只有 `alice/runtime-env`
+（告訴 agent 三個 Python 環境各是誰的、使用者檔案在 `/opt/data/incoming/`）。
+
 ### C. Plugin / MCP
 
 MCP server 原始碼放在 `src/hermes/mcp/<name>/`（目前只有 `secretary/`）。**每個房間
@@ -480,6 +526,11 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
 到這個 venv；login shell（`/etc/profile.d/90-alice-tools.sh`）也會 export 同一個
 變數，並把 `/opt/node_modules/.bin` 加進 PATH，`/usr/local/bin/tools-python` 是
 指向這個 venv 直譯器的 wrapper script，可在容器內任何 shell 直接呼叫。
+
+**這個 venv 只給我們自己寫的東西用。** Hermes 官方 bundled skill 跑在另一個獨立的
+`/opt/skills/.venv`（terminal 裡的 `python`／`pip` 就是它，官方 skill 文件照原文能跑），
+預裝清單在 `src/hermes/runtime/skills-requirements.txt`，其餘由 agent runtime
+`pip install`（容器本地）。三個環境的分工見 `AGENTS.md`「Hermes Container Model」。
 
 ##### 測試 plugins 修改
 
@@ -779,9 +830,10 @@ alice-office-router/
 │   │   └── google-calendar/      # thin registration，實際 server 是烤進 image 的 npm 套件
 │   ├── plugin/
 │   │   └── local-tools/         # 台灣薪資/法規/數學/記憶/OCR/瀏覽器 工具包
-│   ├── runtime/                 # 共用 Python 工具環境（烤進 image 的 /opt/tools/.venv）
-│   │   ├── pyproject.toml       # third-party 套件清單（sympy/pymupdf/selenium）
+│   ├── runtime/                 # 烤進 image 的 Python 環境定義
+│   │   ├── pyproject.toml       # 自家 plugin/MCP 套件清單 → /opt/tools/.venv（tools-python）
 │   │   ├── uv.lock              # 對應鎖版檔（image build 用 uv sync --locked）
+│   │   ├── skills-requirements.txt # 官方 bundled skill 預裝套件 → /opt/skills/.venv（python/pip）
 │   │   └── profile-tools.sh     # login shell 用，export TOOLS_PYTHON + PATH
 ├── scripts/
 │   └── test_webhook.py          # 手動 end-to-end 測試腳本
@@ -814,6 +866,7 @@ alice-office-router/
 | `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
 | `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 `docs/session-hygiene.md`「1. 手動指令」 |
 | `GROUP_OBSERVED_MAX_MESSAGES` | | 每個群組房間背景 buffer（`data/<room_id>/group_state/observed.jsonl`）最多保留幾則未點名訊息，超過丟最舊（預設 `50`；`0`＝不保留背景） |
+| `GRAFANA_ADMIN_PASSWORD` | | **唯一一個 router 不讀的變數**（不在 `Settings` 裡），只給 `docker compose` 做變數替換用：選配的集中式 log 堆疊裡 Grafana 的 admin 密碼。沒啟用那份 compose 就留空；啟用了卻沒設會直接讓 compose 失敗（不會靜默起一個 `admin/admin` 的 Grafana）。見「[選配：集中式 log（Loki）](#選配集中式-logloki)」 |
 
 ## 安全性
 

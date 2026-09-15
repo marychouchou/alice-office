@@ -11,8 +11,10 @@ from typing import Any
 import docker
 import docker.errors
 import docker.models.containers
+import docker.types
 import httpx
 import yaml
+from structlog.contextvars import bound_contextvars
 
 from alice_office_router.config import Settings
 
@@ -58,6 +60,23 @@ CONTAINER_MCP_DIR = f"{CONTAINER_DATA_DIR}/mcp"
 # calendar MCP, gmail/drive token_manager.py) receives explicit
 # env-provided paths under this directory via its mcp.manifest.yaml.
 CONTAINER_GOOGLE_DIR = "/opt/google-workspace"
+
+# Docker labels every room container carries, so a log collector can tell which
+# room a stdout line belongs to without parsing it — Alloy's discovery.docker
+# filters and relabels on exactly these (docs/logging-design.md §5.2). The
+# channel is not a separate label: a room key is `<channel>_<native id>`, so
+# alice.room_id already carries it. Labels are set at creation time only: a
+# container created before this existed must be `docker rm -f`'d for the router
+# to recreate it with them.
+_LABEL_ROLE = "alice.role"
+_LABEL_ROOM_ID = "alice.room_id"
+
+# Per-container stdout cap. Docker's json-file driver does NOT rotate by
+# default, so an idle-but-long-lived room would grow without bound; 10m x 3
+# keeps each room under 30 MB and leaves `docker logs` working exactly as
+# before (the troubleshooting flows all read through it).
+_LOG_MAX_SIZE = "10m"
+_LOG_MAX_FILE = "3"
 
 # Filenames/patterns _seed_templates never copies from a template into a
 # room: node_modules/package-lock.json are shared via /opt/node_modules (see
@@ -567,9 +586,65 @@ def _create_container(
         volumes=_build_volume_config(room_id, config),
         network=config.HERMES_NETWORK,
         ports=ports,
+        labels={
+            _LABEL_ROLE: "agent",
+            _LABEL_ROOM_ID: room_id,
+        },
+        log_config=docker.types.LogConfig(
+            type=docker.types.LogConfig.types.JSON,
+            config={"max-size": _LOG_MAX_SIZE, "max-file": _LOG_MAX_FILE},
+        ),
     )
     logger.info(f"Container {container_name} created.")
     return container
+
+
+def _resolve_container(
+    client: docker.DockerClient,
+    container_name: str,
+    room_id: str,
+    config: Settings,
+) -> tuple[docker.models.containers.Container, bool]:
+    """Get the room's container, starting or creating it when it isn't running.
+
+    Split out of get_or_create_container so that function stays within the
+    nesting budget once it binds the room's log context; the caller holds the
+    module lock around this call.
+
+    Args:
+        client: Docker client instance.
+        container_name: Name of this room's container (hermes_<room_id>).
+        room_id: Unique identifier for the chatroom.
+        config: Application settings.
+
+    Returns:
+        The running Container, and whether it was just started/created (so the
+        caller must wait for its api_server health check).
+
+    Raises:
+        docker.errors.APIError: If a Docker API call fails.
+    """
+    # start()/reload() belong INSIDE this try, not after it: a container that
+    # was removed between the get and the start (an operator running
+    # `docker rm`, exactly what the Phase 2 relabelling note tells them to do)
+    # makes start() raise NotFound, which must fall through to the create path
+    # instead of escaping as an unhandled error. The same goes for any other
+    # APIError from those two calls — it gets logged with the container name
+    # before it propagates, like every other Docker failure here.
+    try:
+        container = client.containers.get(container_name)
+        if container.status != "running":
+            logger.info(f"Container {container_name} is stopped; restarting.")
+            container.start()
+            container.reload()
+            return container, True
+        logger.debug(f"Container {container_name} already running.")
+        return container, False
+    except docker.errors.NotFound:
+        return _create_container(client, container_name, room_id, config), True
+    except docker.errors.APIError as exc:
+        logger.error(f"Docker API error for container {container_name}: {exc}")
+        raise
 
 
 def get_or_create_container(room_id: str, config: Settings) -> str:
@@ -595,28 +670,14 @@ def get_or_create_container(room_id: str, config: Settings) -> str:
             does not become ready within the startup timeout.
     """
     container_name = f"hermes_{room_id}"
-    needs_wait = False
 
-    with _lock:
-        client: docker.DockerClient = docker.from_env()
-        try:
-            container = client.containers.get(container_name)
-            if container.status != "running":
-                logger.info(f"Container {container_name} is stopped; restarting.")
-                container.start()
-                container.reload()
-                needs_wait = True
-            else:
-                logger.debug(f"Container {container_name} already running.")
-        except docker.errors.NotFound:
-            container = _create_container(client, container_name, room_id, config)
-            needs_wait = True
-        except docker.errors.APIError as exc:
-            logger.error(f"Docker API error for container {container_name}: {exc}")
-            raise
+    with bound_contextvars(container=container_name):
+        with _lock:
+            client: docker.DockerClient = docker.from_env()
+            container, needs_wait = _resolve_container(client, container_name, room_id, config)
 
-    url = _get_container_url(container, config)
-    if needs_wait:
-        logger.info(f"Waiting for {container_name} to become ready...")
-        _wait_until_ready(url)
-    return url
+        url = _get_container_url(container, config)
+        if needs_wait:
+            logger.info(f"Waiting for {container_name} to become ready...")
+            _wait_until_ready(url)
+        return url

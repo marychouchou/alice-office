@@ -2,7 +2,8 @@
 
 依 2026-09-14 的程式碼現況（channel adapter 重構、第一方 API channel、群組聊天
 addressed/observe 判斷、session-epoch 輪替皆已落地；本次稽核補上遺漏的
-google-calendar MCP、LineAdapter 的 profiles 子模組）繪製，
+google-calendar MCP、LineAdapter 的 profiles 子模組；同日再補上選配的集中式 log
+profile——Alloy / Loki / Grafana，見 Level 2）繪製，
 並依 [c4model.com](https://c4model.com) 的官方定義核對過（見文末「與官方定義的對照」）。
 三個層級：System Context → Container → Component；Code（class）層級暫不畫。
 
@@ -56,9 +57,11 @@ flowchart TB
 ## Level 2 — Container
 
 系統內的可執行單元與資料存放：router（application）、每房間一個的 Hermes agent
-容器（application）、每房間一份的資料目錄（data store）。依官方定義，這一層
-呈現主要技術選型與 container 之間的通訊協定。Docker Engine 在這裡不是部署細節，
-而是 router 在執行期呼叫的外部系統（動態建立房間容器是核心功能）。
+容器（application）、每房間一份的資料目錄（data store），以及一組**選配**的
+log 收集／儲存／查詢 container（Alloy / Loki / Grafana，預設不啟用）。依官方定義，
+這一層呈現主要技術選型與 container 之間的通訊協定。Docker Engine 在這裡不是部署
+細節，而是 router 在執行期呼叫的外部系統（動態建立房間容器是核心功能）；同理
+Alloy 也是真的 application，不是「部署設定」，所以它在這一層而不是被省略。
 受眾：技術人員。
 
 ```mermaid
@@ -72,6 +75,7 @@ flowchart TB
 
   employee["<b>企業使用者</b><br/>[Person]<br/><i>LINE 聊天室</i>"]:::person
   dev["<b>開發者 / 自家 client</b><br/>[Person]<br/><i>TUI / mobile / curl</i>"]:::person
+  operator["<b>Operator（部署者）</b><br/>[Person]<br/><i>維運這台主機、追查<br/>「訊息為什麼沒回」</i>"]:::person
   line["<b>LINE Platform</b><br/>[Software System：外部]<br/><i>Messaging API</i>"]:::ext
   google["<b>Google</b><br/>[Software System：外部]<br/><i>OAuth 2.0 + Calendar / Gmail / Drive API</i>"]:::ext
   llm["<b>LLM Provider</b><br/>[Software System：外部]<br/><i>OpenAI 相容端點</i>"]:::ext
@@ -80,7 +84,13 @@ flowchart TB
   subgraph alice["Alice Office"]
     router["<b>Alice Office Router</b><br/>[Container: Python 3.12 / FastAPI]<br/><i>驗簽、解析各 channel wire format、事件 dedup、<br/>Google OAuth gate、群組 addressed/observe 判斷、<br/>session-epoch 輪替、依 room_key 分派到房間容器、<br/>把回覆送回房間</i>"]:::container
     hermes["<b>Hermes Agent 容器（每房間一個）</b><br/>[Container: Docker image nousresearch/hermes-agent]<br/><i>hermes_&lt;room_key&gt;，port 8642；gateway + 該房間自己的<br/>MCP servers / plugins / skills；容器間互不相通<br/>（內部行程結構見下方放大圖）</i>"]:::container
-    roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens、<br/>group_state/（observed buffer）、<br/>router_state/（session epoch）——每房間各自一份</i>")]:::container
+    roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens、<br/>group_state/（observed buffer）、<br/>router_state/（session epoch）、<br/>logs/*.log——每房間各自一份</i>")]:::container
+
+    subgraph logging["選配 profile：集中式 log（deploy/logging/，預設不啟用；自己的 logging_net，不接 hermes_global_net）"]
+      alloy["<b>Alloy</b><br/>[Container: grafana/alloy v1.19]<br/><i>discovery.docker 依 alice.role label 動態發現容器並收 stdout；<br/>local.file_match tail 每房間的 logs/*.log；<br/>relabel 成 service / room_id / container / source / file / level</i>"]:::container
+      loki["<b>Loki</b><br/>[Container: grafana/loki 3.7，single binary]<br/><i>只索引 label 不做全文索引；tsdb ＋ filesystem，<br/>compactor 保留 30 天；不對 host 開 port，<br/>只有 logging_net 上的 Alloy／Grafana 連得到；<br/>delete API 關閉（deletion_mode: disabled）</i>"]:::container
+      grafana["<b>Grafana</b><br/>[Container: grafana/grafana 13.2]<br/><i>LogQL 查詢介面；只綁 127.0.0.1:3000，<br/>Loki 資料來源由 provisioning 自動接好</i>"]:::container
+    end
   end
 
   employee -- "傳訊息（LINE app）" --> line
@@ -95,7 +105,25 @@ flowchart TB
   hermes -- "HERMES_HOME 讀寫（bind mount）；<br/>每次開機自行補齊 sessions / skills / db" --> roomdata
   hermes -- "chat completions（HTTPS）" --> llm
   hermes -- "Calendar / Gmail / Drive MCP 以房間 token 呼叫（HTTPS）" --> google
+  alloy -- "讀容器清單與 stdout<br/>（docker.sock，唯讀）" --> docker
+  alloy -- "tail logs/*.log<br/>（/rooms，唯讀）" --> roomdata
+  alloy -- "push（HTTP）" --> loki
+  grafana -- "LogQL 查詢（HTTP）" --> loki
+  operator -- "SSH tunnel → 瀏覽器<br/>（127.0.0.1:3000）" --> grafana
 ```
+
+logging profile 的三個設計重點（細節見 `docs/logging-design.md`）：
+
+- **router 與房間容器都不知道它存在**。兩者唯一提供的東西是建立時掛上的
+  `alice.role` / `alice.room_id` Docker label（`docker-compose.yml` 與
+  `container_manager.py`），Alloy 走 `docker.sock` 自己去發現——所以新房間的容器
+  一冒出來就自動被收，不需要改容器生命週期邏輯，也不需要重啟 Alloy。
+- **上面那三個箭頭都不是容器網路**。Alloy → Docker Engine 是 docker.sock，
+  Alloy → 房間資料是 ro mount；三個 logging 容器只掛自己的 `logging_net`，跟房間
+  容器所在的 `hermes_global_net` 完全不相通。Loki 沒有 auth，同網段就等於每個房間
+  的 agent 都能讀走／竄改所有房間的 log（`docs/logging-design.md` §6）。
+- **三個容器全部關掉，router 行為完全不變**。這是它做成 opt-in（多疊一個 `-f`）
+  而不是寫進主 `docker-compose.yml` 的理由：客戶部署預設維持最小化。
 
 責任分界（誰寫 `data/<room_key>/` 的哪部分）：
 
