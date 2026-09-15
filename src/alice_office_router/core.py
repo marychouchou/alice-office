@@ -155,6 +155,11 @@ class AgentTurn:
         rotated: Whether this turn rotated the room to a fresh session epoch.
         duration_ms: Wall time of the agent HTTP call, None if it never ran.
         prompt_tokens: The reply's reported prompt_tokens, if any.
+        tool_calls: How many tool calls Hermes made answering this turn, or
+            None when the call never ran or the count could not be read (see
+            hermes_client.AgentReply).
+        api_calls: How many internal LLM API calls this turn made, same
+            caveats as tool_calls.
         error: Short reason string when the turn failed; None otherwise.
     """
 
@@ -164,6 +169,8 @@ class AgentTurn:
     rotated: bool = False
     duration_ms: float | None = None
     prompt_tokens: int | None = None
+    tool_calls: int | None = None
+    api_calls: int | None = None
     error: str | None = None
 
 
@@ -180,6 +187,8 @@ class RouteResult:
         rotated: Whether this turn rotated the room's session epoch.
         agent_duration_ms: Wall time of the agent HTTP call, if it ran.
         prompt_tokens: The reply's reported prompt_tokens, if any.
+        tool_calls: How many tool calls Hermes made this turn, if known.
+        api_calls: How many internal LLM API calls this turn made, if known.
         error: Short reason string when the turn failed; None otherwise.
     """
 
@@ -190,6 +199,8 @@ class RouteResult:
     rotated: bool = False
     agent_duration_ms: float | None = None
     prompt_tokens: int | None = None
+    tool_calls: int | None = None
+    api_calls: int | None = None
     error: str | None = None
 
 
@@ -366,6 +377,8 @@ async def _ask_agent(
         rotated=plan.rotated,
         duration_ms=_elapsed_ms(started),
         prompt_tokens=result.prompt_tokens,
+        tool_calls=result.tool_calls,
+        api_calls=result.api_calls,
     )
 
 
@@ -486,6 +499,8 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         rotated=turn.rotated,
         agent_duration_ms=turn.duration_ms,
         prompt_tokens=turn.prompt_tokens,
+        tool_calls=turn.tool_calls,
+        api_calls=turn.api_calls,
         error=turn.error,
     )
 
@@ -553,6 +568,8 @@ def _draft_envelope(msg: InboundMessage, result: RouteResult) -> TurnEnvelope:
         rotated=result.rotated,
         agent_duration_ms=result.agent_duration_ms,
         prompt_tokens=result.prompt_tokens,
+        tool_calls=result.tool_calls,
+        api_calls=result.api_calls,
         error=result.error,
     )
 

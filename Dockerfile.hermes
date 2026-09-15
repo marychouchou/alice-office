@@ -93,8 +93,13 @@ COPY src/hermes/runtime/profile-tools.sh /etc/profile.d/90-alice-tools.sh
 #                      which has no pip and is externally-managed, so those
 #                      docs could never work there (2026-09-14: the agent
 #                      couldn't read a PDF because `python` had no pymupdf).
+#                      It is also the `python` the built-in `execute_code`
+#                      tool runs the model's own scripts in (same PATH
+#                      lookup), so this is the sandbox agent-written code
+#                      executes in — see skills-requirements.txt.
 #                      Pre-baked: skills-requirements.txt only — packages a
-#                      bundled skill's own SKILL.md asks for and we rely on.
+#                      bundled skill's own SKILL.md asks for and we rely on,
+#                      plus a small set pinned for the execute_code sandbox.
 #                      Everything else the agent installs at runtime with
 #                      plain `pip install`; that lands here too, container-
 #                      local, gone on recreate (promote it to the requirements
@@ -108,6 +113,55 @@ RUN python3 -m venv /opt/skills/.venv \
     && /opt/skills/.venv/bin/pip install --no-cache-dir -r /opt/skills/requirements.txt \
     && chmod -R a+rwX /opt/skills/.venv
 ENV PATH="/opt/skills/.venv/bin:${PATH}"
+
+# execute_code (the built-in code tool) does NOT use PATH to pick its
+# interpreter. In our default `code_execution.mode: project`, Hermes's
+# `_resolve_child_python()` (/opt/hermes/tools/code_execution_tool.py) reads
+# the agent process's VIRTUAL_ENV / CONDA_PREFIX env vars first and only
+# falls back to sys.executable (Hermes's own sealed venv) when neither is
+# set — so PATH alone fixes the terminal's `python` but leaves execute_code
+# stuck on Hermes's own venv (no numpy/sympy). Point VIRTUAL_ENV at the same
+# venv as PATH so both resolve to the same interpreter.
+ENV VIRTUAL_ENV=/opt/skills/.venv
+
+# The ENV above is not sufficient by itself — the base image re-sources its
+# OWN venv's `activate` in TWO independent places, and both unconditionally
+# re-export VIRTUAL_ENV=/opt/hermes/.venv, clobbering the ENV above:
+#
+#   1. /opt/hermes/docker/main-wrapper.sh (a static shell script) — the CMD
+#      dispatcher every container this repo starts goes through, since
+#      container_manager.py always runs `command=["gateway", "run"]`.
+#   2. hermes_cli/service_manager.py's `S6ServiceManager._render_run_script()`
+#      (Python, NOT a static file — it writes an s6 "run" script to
+#      /run/service/gateway-<profile>/ at startup). This is the one that
+#      actually matters: `hermes gateway run` (run by main-wrapper.sh above)
+#      does not itself become the long-lived server — it registers and hands
+#      off to this s6-supervised child, which is the process that actually
+#      binds the HTTP port and services execute_code calls. Patching #1
+#      alone looked sufficient (build-time checks and a manual replay of
+#      main-wrapper.sh both passed) but an end-to-end container test still
+#      hit `ModuleNotFoundError: numpy` on the first live execute_code call;
+#      reading the supervised child's real /proc/<pid>/environ (as the
+#      same-uid `hermes` user, since cross-uid /proc reads need
+#      CAP_SYS_PTRACE which the container doesn't have) showed
+#      VIRTUAL_ENV=/opt/hermes/.venv — confirming #2 is the one serving
+#      requests and #1's fix never reaches it. Both must be patched.
+#
+# PATH is deliberately left alone in both: activate also prepends
+# /opt/hermes/.venv/bin to PATH ahead of ours, but that's pre-existing
+# behavior execute_code never consults (it only reads VIRTUAL_ENV), and the
+# terminal tool already gets the right PATH via profile-tools.sh's
+# login-shell reset. Each grep -q below fails the build loudly — instead of
+# silently reviving the old bug — if a Hermes base image bump changes either
+# of these.
+RUN sed -i \
+        '\#^\. /opt/hermes/\.venv/bin/activate$#a export VIRTUAL_ENV=/opt/skills/.venv  # alice: execute_code sandbox — see Dockerfile.hermes' \
+        /opt/hermes/docker/main-wrapper.sh \
+    && grep -q '^export VIRTUAL_ENV=/opt/skills/\.venv' /opt/hermes/docker/main-wrapper.sh \
+    && sed -i \
+        '\#^            "\. /opt/hermes/\.venv/bin/activate",$#a\            "export VIRTUAL_ENV=/opt/skills/.venv",  # alice: execute_code sandbox — see Dockerfile.hermes' \
+        /opt/hermes/hermes_cli/service_manager.py \
+    && grep -q 'export VIRTUAL_ENV=/opt/skills/\.venv",' /opt/hermes/hermes_cli/service_manager.py
 
 # ── Our own skill: tell the agent which environment is which ───────────────
 # Baked under /opt/hermes/skills/alice/ — Hermes's boot-time manifest sync
@@ -150,10 +204,45 @@ RUN cd /opt && npm ci --omit=dev
 RUN which geckodriver firefox node npm tools-python \
     && tools-python -c "import sympy, fitz, selenium, mcp, httpx, requests, sys; assert sys.prefix == '/opt/tools/.venv', sys.prefix" \
     && /opt/hermes/.venv/bin/python3 -c "import yaml" \
-    && bash -lc 'python -c "import pymupdf, pymupdf4llm, sys; assert sys.prefix == \"/opt/skills/.venv\", sys.prefix" && test "$(command -v pip)" = /opt/skills/.venv/bin/pip' \
+    && bash -lc 'python -c "import pymupdf, pymupdf4llm, numpy, sympy, sys; assert sys.prefix == \"/opt/skills/.venv\", sys.prefix" && test "$(command -v pip)" = /opt/skills/.venv/bin/pip' \
     && ! tools-python -c "import pymupdf4llm" 2>/dev/null \
     && test -f /opt/hermes/skills/alice/runtime-env/SKILL.md \
     && test -d /opt/node_modules/@modelcontextprotocol/sdk \
     && test -d /opt/node_modules/zod \
     && test -d /opt/node_modules/@cocal/google-calendar-mcp \
     && test -x /opt/node_modules/.bin/google-calendar-mcp
+
+# execute_code sandbox checks — three layers, since a build-time RUN never
+# goes through main-wrapper.sh OR the s6-supervised gateway child:
+#   1. Exercise Hermes's own resolution function directly, with the ENV
+#      above already in effect (true for any RUN, no entrypoint needed),
+#      to confirm our understanding of `_resolve_child_python()` is right.
+#   2. Extract exactly the two lines main-wrapper.sh will actually run at
+#      container startup — the base image's activate line plus whatever
+#      immediately follows it — and source THOSE in a throwaway shell.
+#      Sourcing bare activate() alone would only prove the base image still
+#      clobbers VIRTUAL_ENV (which we already know); this instead proves our
+#      sed'd override line is really there, immediately after activate, and
+#      really wins.
+#   3. Call `S6ServiceManager._render_run_script()` — the Python generator
+#      for the s6-supervised gateway child's run script (the process that
+#      ACTUALLY serves execute_code; see the long comment above) — and check
+#      its output the same way. #2 alone is not enough: it proves
+#      main-wrapper.sh is fine but says nothing about this second,
+#      independently-generated script (this gap is exactly how the first
+#      version of this fix passed every build-time check here yet still
+#      failed the real end-to-end container test).
+RUN /opt/hermes/.venv/bin/python3 -c "\
+import sys; sys.path.insert(0, '/opt/hermes'); \
+from tools.code_execution_tool import _resolve_child_python as r; \
+p = r('project'); \
+assert p == '/opt/skills/.venv/bin/python', p" \
+    && grep -A1 '^\. /opt/hermes/\.venv/bin/activate$' /opt/hermes/docker/main-wrapper.sh > /tmp/activate-check.sh \
+    && sh -c '. /tmp/activate-check.sh; test "$VIRTUAL_ENV" = /opt/skills/.venv' \
+    && rm -f /tmp/activate-check.sh \
+    && /opt/hermes/.venv/bin/python3 -c "\
+import sys; sys.path.insert(0, '/opt/hermes'); \
+from hermes_cli.service_manager import S6ServiceManager; \
+lines = S6ServiceManager._render_run_script('default', {}).splitlines(); \
+i = lines.index('. /opt/hermes/.venv/bin/activate'); \
+assert lines[i + 1] == 'export VIRTUAL_ENV=/opt/skills/.venv', lines[i + 1]"

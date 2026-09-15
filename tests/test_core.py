@@ -670,6 +670,31 @@ async def test_envelope_outcome_replied_carries_session_and_latency(tmp_path: Pa
     assert envelope.room_key == "line_room_AAA"
 
 
+async def test_envelope_carries_the_reply_call_counts(tmp_path: Path) -> None:
+    """tool_calls/api_calls flow AgentReply -> AgentTurn -> RouteResult -> envelope untouched."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(
+                return_value=AgentReply(text="回覆", tool_calls=11, api_calls=14),
+            ),
+        ),
+    ):
+        result = await process_inbound(_msg(), settings)
+
+    assert result.envelope.tool_calls == 11
+    assert result.envelope.api_calls == 14
+
+
 async def test_envelope_outcome_observed_keeps_the_text(tmp_path: Path) -> None:
     """An unaddressed group message exists nowhere else, so the envelope keeps its text."""
     from alice_office_router.core import process_inbound

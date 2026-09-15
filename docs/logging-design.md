@@ -166,11 +166,34 @@ Router 的 `room_key` 刻意**不**當 Loki label 而是留在 JSON 行內：一
 | `event_id` | LINE `webhookEventId`（`adapter.py:136` 已取出） | `LineAdapter._dispatch_event`，每個 event 進入時 bind，離開時 unbind |
 | `room_key` | `InboundMessage.room_key` | `core.process_inbound` 開頭 bind（`bound_contextvars` context manager，離開自動還原） |
 | `container` | `hermes_<room_id>` | `container_manager.get_or_create_container` 內部 |
-| `duration_ms` | 對 Hermes agent HTTP 呼叫耗時 | `hermes_client.py` 呼叫完成那一行 log（`event="hermes_agent_call"`）的 kwargs，同一行還帶 `session_id`／`status`／`chunks`（收到幾個 SSE chunk）／`finish_reason`／`prompt_tokens` |
+| `duration_ms` | 對 Hermes agent HTTP 呼叫耗時 | `hermes_client.py` 呼叫完成那一行 log（`event="hermes_agent_call"`）的 kwargs，同一行還帶 `session_id`／`status`／`chunks`（收到幾個 SSE chunk）／`finish_reason`／`prompt_tokens`／`tool_calls`／`api_calls`（後兩者見下方 2026-09-15 補充） |
 
 背景任務（群組訊息的 `_schedule_group_message`、join greeting）從 request 分出去時
 contextvars 會被 `asyncio.create_task` 自動複製，所以 `request_id` 仍會跟過去；但要在
 task 內重新 bind `room_key`（task 可能比 request 活得久）。
+
+**`tool_calls`／`api_calls`（2026-09-15 加入）**：這一輪 Hermes 內部分別呼叫了幾次工具、
+打了幾次 LLM API——動機是一輪考卷從 3 分鐘拖到 15 分鐘時（`execute_code` 失敗後反覆重
+試），router 的 log 原本完全看不出來，得 SSH 進容器翻 `data/<room_id>/logs/agent.log`
+才知道。`/v1/chat/completions` 的串流回應本身不帶這兩個數字（`usage` 只有 OpenAI 的
+token 三件組，見 `docs/router-hermes-agent-protocol.md`），Hermes 只在
+`GET /api/sessions/{id}` 回應的 `session.tool_call_count`／`session.api_call_count`
+公開——而且是整個 session 的累計值，不是單輪。`hermes_client.ask_hermes_agent` 因此在
+自己的 POST 呼叫前後各打一次這個端點，取差值當作這一輪的貢獻
+（`hermes_client._fetch_session_counts` / `_count_delta`）：呼叫前的 session 若還不存在
+（新 epoch 的第一輪，Hermes 要等第一次 chat completions 才會建立）視為基準 0；任一次讀取
+失敗（逾時、非 2xx、回應格式不符）兩個欄位一律回 `None`，代表「不知道」而非「這一輪打了
+0 次」，且從不讓這個讀取失敗拖垮或掩蓋原本的回覆。欄位也補進 `AgentReply`（供
+`core._ask_agent` 使用）與 §5.7 的 `TurnEnvelope`，兩個 sink 都不是 JSONL only——純數字，
+沒有內容或身分疑慮。**已知取捨**：`tool_errors`（工具呼叫中失敗幾次）目前沒有加——
+Hermes 只在容器內 `logs/agent.log`／`errors.log` 印一行
+`WARNING agent.tool_executor: Tool X returned error`（`tool_executor.py` 的
+`_detect_tool_failure`），`state.db` 與 `/api/sessions` 都沒有對應欄位；chat completions
+SSE 的 `hermes.tool.progress` 事件（`status: running`/`completed`）也不帶錯誤旗標
+（Hermes 只在 `/v1/runs` 的事件回呼裡才傳 `is_error`，我們用的 `/v1/chat/completions`
+沒有接這條線）。要拿到 `tool_errors`唯一的路只剩 tail 這行 log，需要新的檔案位置追蹤
+（每輪前後記 offset、只讀新增位元組）與容器模式下的讀取權限風險（見
+`docs/router-hermes-agent-protocol.md` 的偵察結論），這次先不做，留給下一輪視需要決定。
 
 **Access log 一行**：`event="http_request"`、`method`、`path`、`status`、`duration_ms`。
 LINE webhook 的 body 不記錄（見 §6）。
@@ -417,6 +440,7 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 | `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
 | `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
 | `gate_status`, `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
+| `tool_calls`, `api_calls` | 這一輪 Hermes 內部的工具呼叫次數／LLM API 呼叫次數，`None`＝未知（沒有呼叫或讀取失敗）。兩個都不是 JSONL only——純數字，兩個 sink 都有。來源與取捨見 §5.1 的 2026-09-15 補充 |
 | `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `core.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
 
 `process_inbound` 拆成 `_route` + 薄包裝的做法不變；只是發出點移到 adapter，讓

@@ -92,22 +92,69 @@ def _mock_transport(handler: Handler) -> Iterator[list[httpx.Request]]:
         yield seen
 
 
-@contextmanager
-def _serving(body: bytes, status_code: int = 200) -> Iterator[list[httpx.Request]]:
-    """Serve one fixed SSE body for every request.
+def _session_stats_not_found(_request: httpx.Request) -> httpx.Response:
+    """Default GET /api/sessions/{id} response: the session does not exist yet.
+
+    Every ask_hermes_agent call now brackets its POST with two of these GETs
+    (docs/router-hermes-agent-protocol.md), so any test not specifically about
+    tool_calls/api_calls needs a harmless default for them: a 404 on both
+    reads resolves to a clean (0, 0) -> (0, 0) delta instead of the
+    `hermes_session_stats_unavailable` warning an unparseable body would log.
+    """
+    return httpx.Response(404, json={"error": {"message": "not found"}})
+
+
+def _session_stats_ok(*, tool_call_count: int, api_call_count: int) -> httpx.Response:
+    """Render a `GET /api/sessions/{id}` 200 body with the given counters."""
+    return httpx.Response(
+        200,
+        json={
+            "object": "hermes.session",
+            "session": {
+                "tool_call_count": tool_call_count,
+                "api_call_count": api_call_count,
+            },
+        },
+    )
+
+
+def _only_post(seen: list[httpx.Request]) -> httpx.Request:
+    """Return the turn's one POST /v1/chat/completions request out of `seen`.
+
+    Every call also makes two GET /api/sessions/{id} bracket requests now, so
+    a test asserting on "the request" must pick the POST out explicitly.
 
     Args:
-        body: The raw response body to stream back.
-        status_code: The HTTP status to report.
+        seen: All requests recorded by a `_mock_transport` handler.
+
+    Returns:
+        The single POST request among them.
+    """
+    posts = [r for r in seen if r.method == "POST"]
+    assert len(posts) == 1
+    return posts[0]
+
+
+@contextmanager
+def _serving(body: bytes, status_code: int = 200) -> Iterator[list[httpx.Request]]:
+    """Serve one fixed SSE body for the turn's POST; 404 its stats GETs.
+
+    Args:
+        body: The raw response body to stream back for the POST call.
+        status_code: The HTTP status to report for the POST call.
 
     Yields:
         The list of requests seen so far.
     """
-    with _mock_transport(
-        lambda _request: httpx.Response(
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _session_stats_not_found(request)
+        return httpx.Response(
             status_code, headers={"content-type": "text/event-stream"}, content=body
         )
-    ) as seen:
+
+    with _mock_transport(_handler) as seen:
         yield seen
 
 
@@ -274,6 +321,91 @@ async def test_ask_hermes_agent_raises_on_http_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Session call counts (docs/router-hermes-agent-protocol.md, docs/logging-design.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_ask_hermes_agent_reports_the_turns_call_count_deltas() -> None:
+    """tool_calls/api_calls are the bracketed GET /api/sessions delta, not the raw total."""
+    counts = [(3, 9), (7, 15)]  # (tool_call_count, api_call_count): before, after
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            tool_call_count, api_call_count = counts.pop(0)
+            return _session_stats_ok(tool_call_count=tool_call_count, api_call_count=api_call_count)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_REPLY_BODY
+        )
+
+    with _mock_transport(_handler):
+        reply = await _ask()
+
+    assert reply.tool_calls == 4
+    assert reply.api_calls == 6
+
+
+async def test_ask_hermes_agent_treats_a_missing_session_as_a_zero_baseline() -> None:
+    """A fresh epoch's first turn: the "before" GET 404s, so the delta is just the after value."""
+    responses = [
+        _session_stats_not_found,
+        lambda _r: _session_stats_ok(tool_call_count=2, api_call_count=5),
+    ]
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return responses.pop(0)(request)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_REPLY_BODY
+        )
+
+    with _mock_transport(_handler):
+        reply = await _ask()
+
+    assert reply.tool_calls == 2
+    assert reply.api_calls == 5
+
+
+async def test_ask_hermes_agent_session_stats_failure_yields_none_counts() -> None:
+    """A broken stats read must not fail the turn — the counts just go unknown."""
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_REPLY_BODY
+        )
+
+    with _mock_transport(_handler):
+        reply = await _ask()
+
+    assert reply.text == "哈囉，我是 Hermes"
+    assert reply.tool_calls is None
+    assert reply.api_calls is None
+
+
+async def test_ask_hermes_agent_percent_encodes_the_session_id_in_the_stats_path() -> None:
+    """A rotated session id (`room_key#N`) must not be truncated at a URL fragment."""
+    with _serving(_REPLY_BODY) as seen:
+        await ask_hermes_agent(
+            "http://hermes_room_AAA:8642",
+            "room_AAA#2",
+            "哈囉",
+            "test_key",
+            idle_timeout_seconds=_IDLE,
+            max_seconds=_MAX,
+        )
+
+    gets = [r for r in seen if r.method == "GET"]
+    assert len(gets) == 2
+    # `#` must reach the wire percent-encoded (raw_path), or httpx would treat
+    # it as a URL fragment and silently drop "2" from the request entirely —
+    # `.path` decodes it back to "#" for display, so raw_path is the one that
+    # proves what was actually sent.
+    assert all(r.url.raw_path == b"/api/sessions/room_AAA%232" for r in gets)
+    assert all(r.url.fragment == "" for r in gets)
+
+
+# ---------------------------------------------------------------------------
 # Request shape
 # ---------------------------------------------------------------------------
 
@@ -283,7 +415,7 @@ async def test_ask_hermes_agent_requests_a_stream_with_auth_and_session_headers(
     with _serving(_REPLY_BODY) as seen:
         await _ask()
 
-    request = seen[0]
+    request = _only_post(seen)
     # httpx lower-cases the host; only the path is ours to assert exactly.
     assert request.url.path == "/v1/chat/completions"
     assert request.headers["Authorization"] == "Bearer test_key"
@@ -298,7 +430,7 @@ async def test_ask_hermes_agent_prepends_system_message_when_given() -> None:
     with _serving(_REPLY_BODY) as seen:
         await _ask(system="be brief")
 
-    assert json.loads(seen[0].content)["messages"] == [
+    assert json.loads(_only_post(seen).content)["messages"] == [
         {"role": "system", "content": "be brief"},
         {"role": "user", "content": "哈囉"},
     ]
@@ -313,6 +445,8 @@ async def test_ask_hermes_agent_propagates_the_idle_read_timeout() -> None:
     """Silence longer than idle_timeout_seconds surfaces as httpx.ReadTimeout."""
 
     def _silent(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _session_stats_not_found(request)
         raise httpx.ReadTimeout("", request=request)
 
     with _mock_transport(_silent), pytest.raises(httpx.ReadTimeout):
@@ -327,7 +461,9 @@ async def test_ask_hermes_agent_raises_timeout_error_at_the_ceiling() -> None:
         await asyncio.sleep(30)
         yield b"data: [DONE]\n\n"
 
-    def _trickle(_request: httpx.Request) -> httpx.Response:
+    def _trickle(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return _session_stats_not_found(request)
         return httpx.Response(
             200, headers={"content-type": "text/event-stream"}, content=_endless()
         )

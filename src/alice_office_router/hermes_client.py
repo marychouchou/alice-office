@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -21,6 +22,11 @@ _DONE_SENTINEL = "[DONE]"
 # turn, "length" a truncated one (returned, with a warning). Anything else with
 # an error message is a failed turn.
 _USABLE_FINISH_REASONS = frozenset({"stop", "length"})
+
+# Budget for the two GET /api/sessions/{id} bracket calls (see
+# _fetch_session_counts): they read one small JSON row and must never borrow
+# the turn's own idle/ceiling budget, which can be minutes to an hour.
+_SESSION_STATS_TIMEOUT = httpx.Timeout(10.0)
 
 
 class _Delta(BaseModel):
@@ -104,12 +110,38 @@ class AgentReply(BaseModel):
             context-window size (see config.SESSION_ROTATE_PROMPT_TOKENS);
             session_hygiene uses it only as an over-estimating rotation
             watermark.
+        tool_calls: How many tool calls Hermes made during this turn, or None
+            when it could not be determined (see _fetch_session_counts) — a
+            bracket diff of the session's own cumulative counter, since the
+            chat completions response carries no per-turn figure.
+        api_calls: How many internal LLM API calls this turn made (the
+            tool-loop iteration count), same bracket-diff caveat as
+            tool_calls.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     text: str
     prompt_tokens: int | None = None
+    tool_calls: int | None = None
+    api_calls: int | None = None
+
+
+class _SessionCounts(BaseModel):
+    """The two cumulative call counters `GET /api/sessions/{id}` exposes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    tool_call_count: int | None = None
+    api_call_count: int | None = None
+
+
+class _SessionEnvelope(BaseModel):
+    """The `{"object": "hermes.session", "session": {...}}` response wrapper."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    session: _SessionCounts = Field(default_factory=_SessionCounts)
 
 
 @dataclass
@@ -177,6 +209,80 @@ class _StreamOutcome:
         if self.finish_reason not in _USABLE_FINISH_REASONS and reported:
             return reported
         return None
+
+
+async def _fetch_session_counts(
+    client: httpx.AsyncClient, base_url: str, session_id: str, api_key: str
+) -> tuple[int | None, int | None]:
+    """Read a session's cumulative tool-call and API-call counters from Hermes.
+
+    `POST /v1/chat/completions` reports neither figure (its usage block is the
+    OpenAI-shaped token triad only — docs/router-hermes-agent-protocol.md).
+    `GET /api/sessions/{id}` is the only place Hermes exposes them, and only as
+    running totals for the whole session, so `ask_hermes_agent` calls this once
+    before and once after its own request and diffs the two readings to get
+    this turn's contribution (`_count_delta`).
+
+    Args:
+        client: The turn's own httpx client (reused for connection pooling;
+            this call overrides its timeout, see _SESSION_STATS_TIMEOUT).
+        base_url: Base URL of the Hermes agent container.
+        session_id: The session whose counters to read.
+        api_key: Bearer token matching the container's API_SERVER_KEY.
+
+    Returns:
+        (tool_call_count, api_call_count). Both 0 when the session does not
+        exist yet — Hermes creates it lazily on the first chat completions
+        call, not before, so a fresh epoch's first turn always starts from a
+        real zero baseline rather than an unknown one. Both None when the read
+        itself failed (network error, unexpected response shape); callers must
+        treat that as "unknown", never as zero.
+    """
+    url = f"{base_url}/api/sessions/{quote(session_id, safe='')}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = await client.get(url, headers=headers, timeout=_SESSION_STATS_TIMEOUT)
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "hermes_session_stats_unavailable", session_id=session_id, error=type(exc).__name__
+        )
+        return None, None
+    if response.status_code == 404:
+        return 0, 0
+    if response.status_code >= 400:
+        logger.warning(
+            "hermes_session_stats_unavailable",
+            session_id=session_id,
+            status=response.status_code,
+        )
+        return None, None
+    try:
+        parsed = _SessionEnvelope.model_validate_json(response.content)
+    except ValidationError as exc:
+        logger.warning(
+            "hermes_session_stats_unavailable", session_id=session_id, errors=exc.error_count()
+        )
+        return None, None
+    return parsed.session.tool_call_count, parsed.session.api_call_count
+
+
+def _count_delta(after: int | None, before: int | None) -> int | None:
+    """Return how much a cumulative session counter grew during one call.
+
+    Args:
+        after: The counter read once the call finished, or None if that read
+            failed.
+        before: The counter read just before the call started, or None if
+            that read failed.
+
+    Returns:
+        `after - before` when both reads succeeded and the counter did not go
+        backwards (a session's counters only ever grow); None otherwise, so a
+        failed reading never gets silently reported as "zero calls".
+    """
+    if after is None or before is None or after < before:
+        return None
+    return after - before
 
 
 def _build_messages(text: str, system: str | None) -> list[dict[str, str]]:
@@ -291,7 +397,9 @@ async def ask_hermes_agent(
 
     Returns:
         The assistant's reply text plus the request's reported prompt_tokens
-        (None when the server reported none). A truncated reply
+        (None when the server reported none), and this turn's tool_calls /
+        api_calls counts bracketed from GET /api/sessions/{id} (None when
+        that read failed — see _fetch_session_counts). A truncated reply
         (finish_reason "length") is returned as far as it got, with a warning
         logged.
 
@@ -313,6 +421,9 @@ async def ask_hermes_agent(
     started = time.perf_counter()
     timeout = httpx.Timeout(connect=10.0, read=idle_timeout_seconds, write=10.0, pool=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
+        before_tool_calls, before_api_calls = await _fetch_session_counts(
+            client, base_url, session_id, api_key
+        )
         async with client.stream("POST", url, json=payload, headers=headers) as response:
             if response.status_code >= 400:
                 # Nothing will iterate the body once raise_for_status fires, so
@@ -322,10 +433,19 @@ async def ask_hermes_agent(
             async with asyncio.timeout(max_seconds):
                 outcome = await _consume_stream(response, session_id)
         status_code = response.status_code
+        after_tool_calls, after_api_calls = await _fetch_session_counts(
+            client, base_url, session_id, api_key
+        )
+
+    tool_calls = _count_delta(after_tool_calls, before_tool_calls)
+    api_calls = _count_delta(after_api_calls, before_api_calls)
 
     # The room's turn latency, the single most useful number when a user says
-    # "it did not answer" (docs/logging-design.md §5.1). A failed call raises
-    # instead, and is logged by core with the room context already bound.
+    # "it did not answer" (docs/logging-design.md §5.1). tool_calls/api_calls
+    # turn a "why did this take 15 minutes" question into a number an operator
+    # can read straight off this line instead of SSHing into the container to
+    # read logs/agent.log (docs/router-hermes-agent-protocol.md). A failed call
+    # raises instead, and is logged by core with the room context already bound.
     logger.info(
         "hermes_agent_call",
         session_id=session_id,
@@ -334,6 +454,8 @@ async def ask_hermes_agent(
         chunks=outcome.chunks,
         finish_reason=outcome.finish_reason,
         prompt_tokens=outcome.prompt_tokens,
+        tool_calls=tool_calls,
+        api_calls=api_calls,
     )
 
     failure = outcome.failure_message()
@@ -358,4 +480,6 @@ async def ask_hermes_agent(
     # the rotation watermark never reads it as a genuine measurement.
     reported = outcome.prompt_tokens
     prompt_tokens = reported if reported is not None and reported > 0 else None
-    return AgentReply(text=content, prompt_tokens=prompt_tokens)
+    return AgentReply(
+        text=content, prompt_tokens=prompt_tokens, tool_calls=tool_calls, api_calls=api_calls
+    )

@@ -76,6 +76,8 @@ def test_each_outcome_round_trips_through_the_jsonl_file(tmp_path: Path, outcome
         rotated=True,
         agent_duration_ms=1234.5,
         prompt_tokens=27000,
+        tool_calls=6,
+        api_calls=9,
         delivered=True,
     )
 
@@ -193,6 +195,19 @@ def test_log_event_carries_the_envelope_fields(tmp_path: Path) -> None:
     assert entry["session_id"] == "line_room_AAA#2"
     assert entry["error"] == "agent: boom"
     assert entry["agent_duration_ms"] == 42.0
+
+
+def test_log_event_carries_the_call_counts(tmp_path: Path) -> None:
+    """tool_calls/api_calls ride the log stream too — they are plain numbers, not text."""
+    settings = _settings(tmp_path)
+    envelope = _envelope("replied", session_id="line_room_AAA", tool_calls=11, api_calls=14)
+
+    with structlog.testing.capture_logs() as captured:
+        record_turn(envelope, settings)
+
+    entry = captured[0]
+    assert entry["tool_calls"] == 11
+    assert entry["api_calls"] == 14
 
 
 def test_log_event_never_carries_message_text_or_speaker_identity(tmp_path: Path) -> None:
