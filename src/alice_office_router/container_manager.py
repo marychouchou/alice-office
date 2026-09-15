@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import socket
 import threading
 import time
@@ -17,6 +16,12 @@ import yaml
 from structlog.contextvars import bound_contextvars
 
 from alice_office_router.config import Settings
+from alice_office_router.room_seed import (
+    ensure_google_seed,
+    ensure_mcp_seed,
+    ensure_plugin_seed,
+    ensure_soul_seed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +45,10 @@ CONTAINER_DATA_DIR = "/opt/data"
 CONTAINER_PLUGINS_DIR = f"{CONTAINER_DATA_DIR}/plugins"
 
 # Path (also inside CONTAINER_DATA_DIR) where each room's own seeded copy of
-# every configured MCP server's source lives — see _ensure_mcp_seed. Node
-# ESM dependency resolution for these walks up from here to /opt/node_modules
-# (baked into the image by Dockerfile.hermes; NODE_PATH is ignored by ESM).
+# every configured MCP server's source lives — see room_seed.ensure_mcp_seed.
+# Node ESM dependency resolution for these walks up from here to
+# /opt/node_modules (baked into the image by Dockerfile.hermes; NODE_PATH is
+# ignored by ESM).
 CONTAINER_MCP_DIR = f"{CONTAINER_DATA_DIR}/mcp"
 
 # In-container mount path for a room's own Google OAuth tokens + credentials
@@ -78,17 +84,6 @@ _LABEL_ROOM_ID = "alice.room_id"
 _LOG_MAX_SIZE = "10m"
 _LOG_MAX_FILE = "3"
 
-# Filenames/patterns _seed_templates never copies from a template into a
-# room: node_modules/package-lock.json are shared via /opt/node_modules (see
-# CONTAINER_MCP_DIR) rather than duplicated per room; __pycache__/*.pyc are
-# build artifacts; .env is handled explicitly (seeded from .env.example, see
-# _seed_templates' seed_dotenv) rather than copied verbatim, since a real
-# .env sitting in a dev checkout of the template must never leak into a
-# room's seeded copy.
-_SEED_IGNORE = shutil.ignore_patterns(
-    "__pycache__", "*.pyc", ".env", "node_modules", "package-lock.json"
-)
-
 
 def _find_free_port() -> int:
     """Bind to port 0 to let the OS pick a free port, then return it.
@@ -111,166 +106,6 @@ def _ensure_data_dir(room_id: str, config: Settings) -> None:
     data_path = config.DATA_DIR / room_id
     data_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Ensured data directory exists: {data_path}")
-
-
-def _seed_templates(
-    templates_root: Path,
-    dest_root: Path,
-    *,
-    seed_dotenv: bool,
-    skip: frozenset[str] | set[str] = frozenset(),
-) -> None:
-    """Copy each template subdirectory into dest_root, once per name.
-
-    Write-once: a name already present under dest_root is left completely
-    untouched, so a room's own edits to its seeded copy — or a room created
-    before a template was added/changed — never get silently overwritten.
-    Mirrors how _ensure_config_yaml treats config.yaml.
-
-    Args:
-        templates_root: Directory holding one subdirectory per template
-            (e.g. HERMES_TEMPLATES_DIR/mcp or HERMES_TEMPLATES_DIR/plugin).
-        dest_root: Room-local destination directory (e.g.
-            DATA_DIR/<room_id>/mcp or DATA_DIR/<room_id>/plugins).
-        seed_dotenv: When True, a template's .env.example (if present) is
-            also seeded as a sibling .env in the destination — for MCP
-            servers that load their own secrets from a .env file next to
-            their source.
-        skip: Template directory names to skip entirely (e.g. Google-gated
-            MCPs when Google OAuth isn't configured for this deployment).
-    """
-    if not templates_root.is_dir():
-        return
-    dest_root.mkdir(parents=True, exist_ok=True)
-    for template_dir in sorted(templates_root.iterdir()):
-        if not template_dir.is_dir() or template_dir.name in skip:
-            continue
-        dest_dir = dest_root / template_dir.name
-        if dest_dir.exists():
-            continue
-        shutil.copytree(template_dir, dest_dir, ignore=_SEED_IGNORE)
-        if seed_dotenv:
-            env_example = dest_dir / ".env.example"
-            env_path = dest_dir / ".env"
-            if env_example.exists() and not env_path.exists():
-                shutil.copyfile(env_example, env_path)
-        logger.info(f"Seeded template [{template_dir.name}] into {dest_dir}")
-
-
-def _google_gated_template_names(mcp_templates_root: Path) -> frozenset[str]:
-    """Find MCP template names whose manifest requires Google OAuth.
-
-    Args:
-        mcp_templates_root: HERMES_TEMPLATES_DIR/mcp — directory holding one
-            subdirectory per MCP template.
-
-    Returns:
-        Frozen set of template directory names with `requires_google_oauth:
-        true` in their mcp.manifest.yaml. A missing/malformed manifest is
-        tolerated (not skipped) — this is only used to decide what to skip
-        seeding, never to fail room creation.
-    """
-    gated: set[str] = set()
-    if not mcp_templates_root.is_dir():
-        return frozenset(gated)
-    for template_dir in mcp_templates_root.iterdir():
-        manifest_path = template_dir / "mcp.manifest.yaml"
-        if not template_dir.is_dir() or not manifest_path.exists():
-            continue
-        try:
-            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
-            logger.error(f"Failed to read manifest {manifest_path}: {exc}")
-            continue
-        if isinstance(manifest, dict) and manifest.get("requires_google_oauth"):
-            gated.add(template_dir.name)
-    return frozenset(gated)
-
-
-def _ensure_mcp_seed(room_id: str, config: Settings) -> None:
-    """Seed every MCP server template into a room's data dir, once.
-
-    After this runs, data/<room_id>/mcp/<name>/ is the room's own editable
-    copy of that MCP's source — the room may freely modify it (a container
-    restart is required for Hermes to pick up changes; it has no hot-reload).
-    Repo template updates never reach a room that already has a seeded copy.
-    Templates requiring Google OAuth are skipped when this deployment has no
-    Google OAuth configured (see Settings.google_oauth_enabled) — a room
-    created while disabled never gets those MCPs seeded (write-once means
-    enabling Google later won't retroactively add them to existing rooms).
-
-    Args:
-        room_id: Unique identifier for the chatroom.
-        config: Application settings containing the templates and data directories.
-    """
-    mcp_templates_root = config.HERMES_TEMPLATES_DIR / "mcp"
-    skip = (
-        frozenset()
-        if config.google_oauth_enabled
-        else _google_gated_template_names(mcp_templates_root)
-    )
-    _seed_templates(
-        mcp_templates_root,
-        config.DATA_DIR / room_id / "mcp",
-        seed_dotenv=True,
-        skip=skip,
-    )
-
-
-def _ensure_plugin_seed(room_id: str, config: Settings) -> None:
-    """Seed every plugin template into a room's data dir, once.
-
-    Same write-once semantics as _ensure_mcp_seed. The plugin's own
-    executable dependencies (sympy, pymupdf, etc.) resolve via Hermes's
-    Python venv baked into the image, not anything seeded here — only the
-    plugin's own source (tools.py, scripts/, ...) is per-room.
-
-    Args:
-        room_id: Unique identifier for the chatroom.
-        config: Application settings containing the templates and data directories.
-    """
-    _seed_templates(
-        config.HERMES_TEMPLATES_DIR / "plugin",
-        config.DATA_DIR / room_id / "plugins",
-        seed_dotenv=False,
-    )
-
-
-def ensure_google_seed(room_id: str, config: Settings) -> None:
-    """Copy this deployment's GCP OAuth client credentials into a room, once.
-
-    Mirrors _ensure_mcp_seed/_ensure_plugin_seed's write-once semantics, but
-    the "template" here is deployment secrets (config.google_dir, the
-    operator's one-time drop location — see README「Google Workspace 整合」)
-    rather than versioned source under HERMES_TEMPLATES_DIR. Once copied, a
-    room's own data/<room_id>/google/ is never touched again by this repo —
-    deleting data/<room_id>/ wipes this room's Google authorization (both
-    its tokens.json and its credential copies) along with everything else,
-    by design.
-
-    Called from both _create_container (so a fresh container's bind mount
-    has something to see) and google_oauth.oauth_start: a room's very first
-    message is gated *before* its container/data dir would otherwise be
-    created (see core.process_inbound running the gate ahead of
-    get_or_create_container), so the OAuth routes must be able to seed a
-    room's google/ dir on demand, not only at container-creation time.
-
-    No-op when this deployment has no Google OAuth configured.
-
-    Args:
-        room_id: Unique identifier for the chatroom.
-        config: Application settings containing the seed source and
-            per-room data directory.
-    """
-    if not config.google_oauth_enabled:
-        return
-    dest_dir = config.room_google_dir(room_id)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for src in (config.google_web_creds_path, config.google_installed_creds_path):
-        dest = dest_dir / src.name
-        if src.exists() and not dest.exists():
-            shutil.copyfile(src, dest)
-            logger.info(f"Seeded Google credential [{src.name}] into room [{room_id}]")
 
 
 def _build_container_env(config: Settings) -> dict[str, str]:
@@ -302,13 +137,14 @@ def _build_volume_config(room_id: str, config: Settings) -> dict[str, dict[str, 
     Always mounts the room's data directory (read-write, room-isolated) at
     CONTAINER_DATA_DIR. Plugin and MCP server source used to be separate
     shared, read-only mounts; both are now seeded once into this same data
-    directory instead (see _ensure_plugin_seed, _ensure_mcp_seed), so each
-    room can edit its own copy independently — no extra mount is needed
-    since they already live under the rw mount.
+    directory instead (see room_seed.ensure_plugin_seed,
+    room_seed.ensure_mcp_seed), so each room can edit its own copy
+    independently — no extra mount is needed since they already live under
+    the rw mount.
 
     When Google OAuth is configured for this deployment, also mounts this
     room's own tokens/credentials directory (config.room_google_host_dir,
-    seeded once by ensure_google_seed) at CONTAINER_GOOGLE_DIR — fully
+    seeded once by room_seed.ensure_google_seed) at CONTAINER_GOOGLE_DIR — fully
     isolated per room, unlike an earlier design that shared one directory
     across every room's container. CONTAINER_GOOGLE_DIR is a neutral path
     outside /root and /opt/data: MCP subprocesses run as uid 10000 `hermes`
@@ -395,8 +231,9 @@ def _load_mcp_manifest(mcp_dir: Path, room_id: str) -> dict[str, Any] | None:
 def _format_mcp_section(room_id: str, config: Settings) -> str:
     """Render the mcp_servers / toolsets block for a room's config.yaml.
 
-    Reads every MCP already seeded under data/<room_id>/mcp/ (_ensure_mcp_seed
-    must run first) and emits one mcp_servers.<name> entry per MCP, with args
+    Reads every MCP already seeded under data/<room_id>/mcp/
+    (room_seed.ensure_mcp_seed must run first) and emits one
+    mcp_servers.<name> entry per MCP, with args
     rewritten to that MCP's in-container seeded path (CONTAINER_MCP_DIR/<name>/...).
 
     Args:
@@ -452,8 +289,9 @@ def _ensure_config_yaml(room_id: str, config: Settings) -> None:
     """Write a default Hermes config.yaml for a room if one doesn't already exist.
 
     Configures the shared LLM provider, default plugins, and every MCP
-    server already seeded for this room (see _ensure_mcp_seed, which must
-    run first) so the agent can answer without any manual per-room setup.
+    server already seeded for this room (see room_seed.ensure_mcp_seed,
+    which must run first) so the agent can answer without any manual
+    per-room setup.
     Left untouched on subsequent calls so operators can hand-edit a room's
     config without it being overwritten on container recreation.
 
@@ -560,11 +398,16 @@ def _create_container(
     """
     logger.info(f"Creating new container for room [{room_id}]: {container_name}")
     _ensure_data_dir(room_id, config)
+    # Independent of the seed steps below, but must land before
+    # containers.run: Hermes writes its own generic default SOUL.md on first
+    # boot if the file is absent, and (like every write-once seed) never
+    # overwrites it afterwards — a late seed would never take effect.
+    ensure_soul_seed(room_id, config)
     # MCP/plugin seeding must happen before config.yaml is written:
     # _format_mcp_section reads each MCP's manifest from its just-seeded
     # directory to know what to register.
-    _ensure_mcp_seed(room_id, config)
-    _ensure_plugin_seed(room_id, config)
+    ensure_mcp_seed(room_id, config)
+    ensure_plugin_seed(room_id, config)
     _ensure_config_yaml(room_id, config)
     # No-ops (already seeded) if this room reached ensure_google_seed earlier
     # via /oauth/start — see its docstring for why that ordering happens.

@@ -15,7 +15,7 @@ directly. Both must be reimplemented here rather than ported as-is:
 
 tokens.json and both GCP credential files live per room, under
 Settings.room_google_dir(room_id) — never a shared/global location (see
-container_manager.ensure_google_seed). Two different identifiers are both in
+room_seed.ensure_google_seed). Two different identifiers are both in
 play and must not be conflated:
 
 - room_id: the raw LINE room/user/group id (starts with uppercase U/C/R),
@@ -46,7 +46,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
 from alice_office_router.config import Settings, get_settings
-from alice_office_router.container_manager import ensure_google_seed
+from alice_office_router.room_seed import ensure_google_seed
 
 logger = logging.getLogger(__name__)
 

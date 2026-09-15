@@ -251,7 +251,7 @@ docker inspect hermes_<room_id> | jq '.[0].Config.Labels, .[0].HostConfig.LogCon
 5. 需要本機手動重新走一次授權流程時，用 `uv run python scripts/google_reauth.py
    <room_id>`，或直接開 `<GOOGLE_OAUTH_PUBLIC_URL>/oauth/start?user_id=<room_id>`。
 
-### 2.6 改了 config.yaml / skills / MCP 沒生效
+### 2.6 改了 config.yaml / skills / MCP / SOUL.md 沒生效
 
 Hermes 沒有熱載入（見 CLAUDE.md「Hermes Container Model」），改完一定要
 `docker restart hermes_<room_id>` 才會生效：
@@ -265,6 +265,11 @@ Hermes 沒有熱載入（見 CLAUDE.md「Hermes Container Model」），改完�
   write-once 資料）。
 - `skills/` 不受這兩支腳本管——它是 Hermes gateway 自己開機時做的
   manifest-based sync，一樣是 restart 容器後、下次開機才會重新比對。
+- `SOUL.md`（人設）：房間自己的 `data/<room_id>/SOUL.md` 是 write-once seed（來源
+  `src/hermes/SOUL.md`），也**不**在 `dev_sync_src.py` 的同步範圍內（它是使用者可能
+  已經客製化過的人設，不該被開發腳本強制蓋掉）。改完 repo 樣板只影響之後新建立的
+  房間；既有房間要套用新版，手動
+  `cp src/hermes/SOUL.md data/<room_id>/SOUL.md && docker restart hermes_<room_id>`。
 
 ### 2.7 用 API 通道 curl 進任何房間（不經 LINE 除錯）
 

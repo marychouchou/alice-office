@@ -58,10 +58,10 @@ from alice_office_router.config import Settings
 ENV_FILE = Path(__file__).parent.parent / ".env"
 DEBOUNCE_SECONDS = 0.4  # let rapid multi-file saves (editor tmp+rename) settle
 
-# 忽略清單與 container_manager._SEED_IGNORE 相同（複本；那份是 seed 用、這份是 sync
-# 用）。刻意在這裡自己定義而不 import container_manager——import 它會連帶 import docker
-# SDK，純 mcp/plugins sync 不該付這個成本（見模組 docstring 的範圍說明與 4. config
-# 重渲染的 lazy import）。若忽略規則有變，兩處一起改。
+# 忽略清單與 room_seed._SEED_IGNORE 相同（複本；那份是 seed 用、這份是 sync
+# 用）。刻意在這裡自己定義而不 import alice_office_router 的任何模組——這支腳本
+# 純粹操作檔案系統，不該依賴 router 套件本身能不能 import（見模組 docstring 的
+# 範圍說明與 4. config 重渲染的 lazy import）。若忽略規則有變，兩處一起改。
 _SEED_IGNORE = shutil.ignore_patterns(
     "__pycache__", "*.pyc", ".env", "node_modules", "package-lock.json"
 )
@@ -106,9 +106,10 @@ def _google_oauth_enabled(data_dir: Path) -> bool:
 def _google_gated_names(mcp_templates_root: Path) -> frozenset[str]:
     """Names of MCP templates whose manifest sets requires_google_oauth: true.
 
-    Copy of container_manager._google_gated_template_names' logic, kept here so
-    the pure mcp/plugins sync path never imports container_manager (which pulls
-    in the docker SDK). Keep the two in sync if the manifest key changes.
+    Copy of room_seed._google_gated_template_names' logic, kept here so the
+    pure mcp/plugins sync path never imports alice_office_router.room_seed or
+    container_manager (which pulls in the docker SDK). Keep the two in sync
+    if the manifest key changes.
 
     Args:
         mcp_templates_root: src/hermes/mcp — one subdirectory per MCP template.
@@ -185,7 +186,7 @@ def clean_sync_template(src_dir: Path, dest_dir: Path, *, seed_dotenv: bool) -> 
         src_dir: Repo template directory (src/hermes/{mcp,plugin}/<name>).
         dest_dir: Room's seeded copy directory to overwrite.
         seed_dotenv: When True and dest has no .env yet (first-time sync of a
-            room that was never seeded via container_manager._ensure_mcp_seed),
+            room that was never seeded via room_seed.ensure_mcp_seed),
             copy src's .env.example as dest's .env — mirrors _seed_templates'
             seed_dotenv so a freshly-created mcp/<name>/ isn't left without the
             secrets file its server.mjs expects to find next to it.
@@ -209,7 +210,7 @@ def _skip_gated(
 ) -> bool:
     """Whether to skip a Google-gated template for this deployment/room.
 
-    Mirrors _ensure_mcp_seed's gating: when Google OAuth is disabled, a gated
+    Mirrors room_seed.ensure_mcp_seed's gating: when Google OAuth is disabled, a gated
     template is added only if the room already has it (seeded while enabled) —
     a room without it is left without it (skip). Non-gated templates never skip.
 
@@ -262,7 +263,7 @@ def _sync_template_group(
         gated: Google-gated template names (empty for the plugin group).
         google_enabled: Whether this deployment has Google OAuth configured.
         seed_dotenv: Passed through to clean_sync_template (True for the mcp
-            group, False for plugins — mirrors _ensure_mcp_seed/_ensure_plugin_seed).
+            group, False for plugins — mirrors room_seed.ensure_mcp_seed/ensure_plugin_seed).
     """
     if not templates_root.is_dir():
         return

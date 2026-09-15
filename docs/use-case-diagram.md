@@ -151,7 +151,7 @@ flowchart TB
 |---|---|---|---|
 | UC9 | 透過 API channel 直接測試/整合 | `channels/api.py::ApiChannelAdapter`（`POST /webhooks/api/messages`，同步回傳，不去 Markdown/不分段） | `docs/channels-walkthrough.md` Step 7、README「用 API 通道打進房間」 |
 | UC10 | 驗證整條訊息管線（e2e／webhook 模擬） | `scripts/test_webhook.py`（模擬簽章）、`scripts/e2e_smoke.py`（`--line` 額外驗真實簽章） | `docs/testing-paths.md` |
-| UC11 | 建立與管理房間 container（維運） | `container_manager.py::get_or_create_container`／`_create_container`／`_ensure_config_yaml`／`_ensure_mcp_seed`／`_ensure_plugin_seed` | `docs/architecture-c4.md` Level 2、AGENTS.md「Hermes Container Model」 |
+| UC11 | 建立與管理房間 container（維運） | `container_manager.py::get_or_create_container`／`_create_container`／`_ensure_config_yaml`；`room_seed.py::ensure_mcp_seed`／`ensure_plugin_seed`／`ensure_soul_seed` | `docs/architecture-c4.md` Level 2、AGENTS.md「Hermes Container Model」 |
 | UC12 | 診斷房間執行期問題（維運） | `scripts/debug_room.py` | `docs/troubleshooting.md` |
 
 ---

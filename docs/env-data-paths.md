@@ -20,10 +20,13 @@
 
 程式碼對應：
 
-- `DATA_DIR` 用於 `container_manager.py` 的 `_ensure_data_dir()`、`_ensure_mcp_seed()`、
-  `_ensure_plugin_seed()`、`_ensure_config_yaml()`（router 進程自己的檔案系統操作）。
-- `HERMES_TEMPLATES_DIR` 同樣用於 `_ensure_mcp_seed()` / `_ensure_plugin_seed()`，
-  是 `_seed_templates()` 讀取樣板來源的那一端。
+- `DATA_DIR` 用於 `container_manager.py` 的 `_ensure_data_dir()`、`_ensure_config_yaml()`，
+  以及 `room_seed.py` 的 `ensure_mcp_seed()` / `ensure_plugin_seed()` / `ensure_soul_seed()`
+  （router 進程自己的檔案系統操作）。
+- `HERMES_TEMPLATES_DIR` 同樣用於 `room_seed.ensure_mcp_seed()` /
+  `room_seed.ensure_plugin_seed()` / `room_seed.ensure_soul_seed()`，是
+  `_seed_templates()` 讀取樣板來源的那一端（`ensure_soul_seed` 直接複製單一檔案
+  `SOUL.md`，不經過 `_seed_templates`）。
 - `HOST_DATA_DIR` 用於 `_build_volume_config()`，組成傳給
   `docker.containers.run(volumes=...)` 的宿主機路徑——現在整個函式只剩這一條掛載。
   另外**選配的 log 堆疊**（`deploy/logging/docker-compose.logging.yml`，見下節）
@@ -32,7 +35,7 @@
 > **這是架構上刻意的簡化**：MCP/plugin 原始碼以前是另外兩個 `HOST_*` 變數
 > （`HOST_PLUGINS_DIR`、`HOST_SECRETARY_MCP_DIR`），一樣講給 Docker daemon 聽、
 > 一樣是全房間共用的唯讀掛載。現在改成**每個房間各自 seed 一份、可自由編輯**（見
-> `container_manager.py` 的 `_ensure_mcp_seed` / `_ensure_plugin_seed`），複製動作是
+> `room_seed.py` 的 `ensure_mcp_seed` / `ensure_plugin_seed`），複製動作是
 > router process 自己做的檔案系統操作，不再假手 Docker daemon，所以它自然就落進
 > `DATA_DIR` 這一類（router 自己看得到的路徑），而不是 `HOST_*` 那一類。
 
@@ -108,13 +111,13 @@ graph LR
     end
 
     subgraph HermesC["hermes_&lt;room_id&gt; 容器"]
-        OptData["/opt/data<br/>(含 seed 出來的 mcp/、plugins/)"]
+        OptData["/opt/data<br/>(含 seed 出來的 mcp/、plugins/、SOUL.md)"]
     end
 
     HostData -- mount --> AppData
     RepoTemplates -- mount --> AppTemplates
     HostRoomData -- mount --> OptData
-    AppTemplates -. "_ensure_mcp_seed /<br/>_ensure_plugin_seed<br/>複製（非掛載）" .-> HostRoomData
+    AppTemplates -. "room_seed.ensure_mcp_seed /<br/>ensure_plugin_seed / ensure_soul_seed<br/>複製（非掛載）" .-> HostRoomData
 ```
 
 router 容器和 Hermes 容器各自被掛了一份宿主機的 `data/<room_id>/`，只是掛入路徑不同
@@ -137,7 +140,7 @@ graph LR
         OptData["/opt/data"]
     end
 
-    Templates -- "_ensure_mcp_seed /<br/>_ensure_plugin_seed 複製" --> RouterProc
+    Templates -- "room_seed.ensure_mcp_seed /<br/>ensure_plugin_seed / ensure_soul_seed 複製" --> RouterProc
     RouterProc -- "mkdir / 寫 config.yaml / 寫入 seed" --> HostData
     HostData -- mount --> OptData
 ```

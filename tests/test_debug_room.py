@@ -73,6 +73,7 @@ def test_check_key_paths_reports_existing_and_missing(tmp_path: Path) -> None:
 
     assert result == {
         "config.yaml": True,
+        "SOUL.md": False,
         "mcp": True,
         "plugins": False,
         "google/tokens.json": False,

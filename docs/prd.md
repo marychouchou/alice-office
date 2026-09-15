@@ -112,6 +112,13 @@ flowchart TB
   多步驟研究）先交付第一段再問「要不要繼續」，每輪以兩分鐘內回完為目標；回答檔案內容
   前要用工具重新讀檔（檔案內容不在 agent 記憶裡）；不確定就問、不編造。它不寫進房間的
   `config.yaml`，所以改這段文字不需要動既有房間、重啟即生效。
+- agent 的人設（自我認知、語氣、行為原則）則由每個房間的 `data/<room_id>/SOUL.md`
+  決定——Hermes 自己 prompt 疊層裡優先度最高的一層，跟上述 ephemeral system message
+  是不同分工：`SOUL.md` 管「是誰、什麼態度」，`*_SYSTEM_PROMPT` 管「回覆形狀」，兩邊
+  刻意不重複規則。房間第一次建立時由 `room_seed.ensure_soul_seed` 從
+  `src/hermes/SOUL.md` write-once 複製，定位為「企業級個人助理」、繁體中文、會在
+  合適時機主動舉例提示能幫上什麼，但同時明講能力不僅限於此；之後永不覆蓋，可
+  逐房間編輯後 `docker restart` 生效。
 - **同一房間一次只跑一輪**：一則訊息還在跑 agent 時，同房間的下一則訊息會排隊等待
   （process-local 的 per-room `asyncio.Lock`，FIFO、不設上限、不丟訊息），輪到它才照
   原本流程處理。Hermes 每個房間只有一個 session，兩輪並行會互相拖慢並讓回覆交錯。

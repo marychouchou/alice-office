@@ -14,7 +14,7 @@ Google Calendar MCP server 是官方發布的 npm 套件
 - `package.json`——只用來讓 `tests/test_hermes_shared_node_deps.py` 檢查
   `@cocal/google-calendar-mcp` 的版本號有同步進 `src/hermes/mcp/package.json`
   （image build 實際安裝套件的地方），並不會被 `npm ci` 直接讀取。
-- `mcp.manifest.yaml`——跟其他 MCP 一樣，被 `_ensure_mcp_seed` seed 進每個房間的
+- `mcp.manifest.yaml`——跟其他 MCP 一樣，被 `room_seed.ensure_mcp_seed` seed 進每個房間的
   `data/<room_id>/mcp/google-calendar/`，並被 `_format_mcp_section` 讀取寫進該房間的
   `config.yaml`。`command:` 直接指向 image 內建的 `google-calendar-mcp` 執行檔
   （不帶參數執行即啟動 stdio MCP server），不是 `node <path-to-seeded-script>`——

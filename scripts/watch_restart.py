@@ -4,10 +4,12 @@
 
 MCP／plugin 原始碼不再是共用的 repo-level bind mount：每個房間第一次建立
 container 時，會各自從 src/hermes/{mcp,plugin}/ seed 出一份自己的、可自由編輯
-的副本，放在 data/<room_id>/{mcp,plugins}/ 底下（見 container_manager.py 的
-_ensure_mcp_seed / _ensure_plugin_seed）。所以要監看的是**這個房間自己的
+的副本，放在 data/<room_id>/{mcp,plugins}/ 底下（見 room_seed.py 的
+ensure_mcp_seed / ensure_plugin_seed）。所以要監看的是**這個房間自己的
 seed 副本**，不是 repo 裡的樣板——改 repo 樣板不會影響已建立的房間（write-once
-/ frozen），只有改房間自己 data/ 底下那份才會在 restart 後生效。
+/ frozen），只有改房間自己 data/ 底下那份才會在 restart 後生效。此腳本不監看
+`SOUL.md`（人設）——它極少變動，改完手動 restart 即可，見
+docs/troubleshooting.md §2.6。
 
 前置條件
 --------
@@ -41,7 +43,7 @@ DEBOUNCE_SECONDS = 0.4  # let rapid multi-file saves (editor tmp+rename) settle
 def resolve_watch_paths(env: dict[str, str], room_id: str) -> list[Path]:
     """Determine the room's own seeded mcp/plugins directories to watch.
 
-    Mirrors container_manager._ensure_mcp_seed / _ensure_plugin_seed's
+    Mirrors room_seed.ensure_mcp_seed / ensure_plugin_seed's
     destination paths: data/<room_id>/mcp/ and data/<room_id>/plugins/.
     Neither exists until the room's container has been created at least
     once (that's what seeds them) — see this module's docstring.
