@@ -6,7 +6,7 @@ Registers 7 tools into the 'local_tools' toolset:
   math      工程數學計算機 (alice-tools-pack/math/)
   longmem   本機長期記憶 (alice-tools-pack/memory/)
   research  AI 助理生態系查詢 (alice-tools-pack/research/)
-  image_ocr 圖片/PDF OCR，呼叫 vision API (alice-tools-pack/image-ocr/)
+  image_ocr PDF／圖片讀取（文字層優先、掃描頁走視覺模型） (alice-tools-pack/image-ocr/)
   webdriver 瀏覽器自動化 (alice-tools-pack/browser/；依賴未安裝時 check_fn=False)
 
 工具名稱刻意避開 hermes 內建的 'memory' 與 'browser'，防止撞名。
@@ -30,7 +30,6 @@ from .tools import (
     handle_research,
     handle_webdriver,
     check_browser_available,
-    pre_llm_call_ocr_hook,
 )
 
 _TOOLS = (
@@ -54,4 +53,3 @@ def register(ctx) -> None:
             check_fn=check_fn,
             emoji=emoji,
         )
-    ctx.register_hook("pre_llm_call", pre_llm_call_ocr_hook)

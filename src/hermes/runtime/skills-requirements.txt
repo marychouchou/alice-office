@@ -1,0 +1,15 @@
+# Packages pre-baked into /opt/skills/.venv — the Python that Hermes's bundled
+# (official) skills run in; it is `python`/`pip` on the agent's terminal PATH
+# (see Dockerfile.hermes and profile-tools.sh).
+#
+# Rules:
+# - One line per package, pinned, with the bundled skill whose own SKILL.md
+#   asks for it. This file is the record of what we promise official skills.
+# - Anything NOT listed here the agent installs itself at runtime with plain
+#   `pip install` (as the skill docs say). That install is container-local and
+#   disappears on container recreate — promote it here to keep it.
+# - Our own plugin/MCP dependencies do NOT go here; they live in
+#   pyproject.toml/uv.lock → /opt/tools/.venv (tools-python).
+
+pymupdf==1.28.2        # productivity/ocr-and-documents — scripts/extract_pymupdf.py
+pymupdf4llm==1.28.2    # productivity/ocr-and-documents — --markdown mode

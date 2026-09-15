@@ -37,7 +37,7 @@ Hermes agent 本機工具包，從 `~/alice-tools-pack/` 移植而來，以 herm
     │   ├── alice-assistant-ecosystem.sh
     │   └── china-ai-assistant-index.json
     ├── image-ocr/
-    │   └── alice-image-exam-ocr.py
+    │   └── alice-image-exam-ocr.py    # ⚠️ 有修改（多頁 PDF＋文字層優先）
     └── browser/
         ├── alice-browser-task.py          # ⚠️ 有修改（截圖清理機制）
         ├── alice-browser-task.sh
@@ -53,7 +53,7 @@ Plugin 的執行資料（SQLite DB、法規快取、截圖等）統一放在：
 │   └── raw/                 # 從 law.moj.gov.tw 下載的原始 ZIP/JSON
 ├── memory/
 │   └── alice-memory.sqlite  # 長期記憶 SQLite
-├── image-ocr-cache/         # OCR 辨識結果快取（以 SHA-256 + prompt hash 為 key）
+├── image-ocr-cache/         # 讀取結果快取（以 SHA-256 + prompt hash + 頁數上限為 key）
 └── browser/
     ├── firefox-profile/     # Firefox 使用者設定檔
     ├── screenshots/         # 自動截圖（超過 ALICE_BROWSER_SS_MAX_DAYS 天自動清除）
@@ -73,7 +73,7 @@ Plugin 的執行資料（SQLite DB、法規快取、截圖等）統一放在：
 | `math` | `alice-tools-pack/math/` | 工程數學計算機 |
 | `longmem` | `alice-tools-pack/memory/` | 本機長期記憶（原名 `memory`，與 hermes 內建衝突改名） |
 | `research` | `alice-tools-pack/research/` | AI 助理生態系查詢 |
-| `image_ocr` | `alice-tools-pack/image-ocr/` | 圖片／PDF OCR，呼叫 vision API（Qwen2.5-VL） |
+| `image_ocr` | `alice-tools-pack/image-ocr/` | PDF／圖片讀取（PDF 文字層優先、掃描頁才走視覺模型） |
 | `webdriver` | `alice-tools-pack/browser/` | 瀏覽器自動化（原名 `browser`，與 hermes 內建衝突改名） |
 
 > **注意：** hermes 的 `tools list` 指令顯示的 `memory` 和 `browser` 是 hermes 內建工具，不是本 plugin 的工具。
@@ -100,7 +100,7 @@ Plugin 進入點。hermes 在啟動時呼叫 `register(ctx)`，將七個工具�
 
 `webdriver` 工具有 `check_fn=check_browser_available`，若 `geckodriver` 未安裝則自動從工具清單排除，不影響其他工具。
 
-另外在 `register()` 最後會以 `ctx.register_hook("pre_llm_call", pre_llm_call_ocr_hook)` 掛載 `image_ocr` 的自動辨識 hook。
+`register()` 只註冊工具，沒有掛任何 hook——PDF／圖片一律由模型自己呼叫 `image_ocr`，原因見下方「為什麼沒有自動注入的 hook」。
 
 ---
 
@@ -168,48 +168,65 @@ Plugin 資料根目錄：`$HERMES_HOME/local-tools-data/`（預設 `~/.hermes/lo
 
 ### 腳本
 
-`scripts/image-ocr/alice-image-exam-ocr.py`（直接從 `alice-tools-pack/image-ocr/` 移植，未修改）
+`scripts/image-ocr/alice-image-exam-ocr.py`（從 `alice-tools-pack/image-ocr/` 移植，⚠️ 有修改：多頁 PDF＋文字層優先，見下）
 
 ### 功能
 
-呼叫本機 vision API（預設 Qwen2.5-VL）辨識圖片或 PDF 的文字與內容：
+讀取 PDF 或圖片的文字與內容：
 
-- 支援格式：`.jpg`、`.jpeg`、`.png`、`.webp`、`.pdf`
-- PDF 自動取第一頁，以 2× 解析度轉成 PNG 後辨識（需要 `pymupdf`）
-- 辨識結果以 `SHA-256（檔案內容）+ SHA-256（prompt）` 為 key 快取到 `~/.hermes/local-tools-data/image-ocr-cache/`，相同檔案＋相同 prompt 不重複呼叫 API
-- 回傳 JSON：`{ ok, text, image_hash, cache_key, cache_hit, mime, elapsed_ms }`
+- 支援格式：`.pdf`、`.jpg`、`.jpeg`、`.png`、`.webp`
+- **PDF 逐頁處理**（`--max-pages`，預設 30 頁，需要 `pymupdf`）：
+  - 每頁先用 `page.get_text("text")` 抽文字層，抽到 20 字以上就直接採用，**完全不呼叫模型、不連網**；
+  - 抽不到（掃描／拍照頁）才把該頁以 2× 解析度算成 PNG 送視覺模型辨識；
+  - 合併後的文字以 `--- 第 N 頁 ---` 分頁，`ocr_pages` 列出真的走了視覺辨識的頁碼。
+  - 所以一份整份都有文字層的 PDF（多數電子公文、考卷、合約）**不需要任何 vision endpoint 就能讀完**。
+- 圖片：照舊，單次視覺辨識。
+- 辨識結果以 `SHA-256（檔案內容）+ SHA-256（prompt）+ 頁數上限` 為 key 快取到 `~/.hermes/local-tools-data/image-ocr-cache/`，相同檔案＋相同 prompt＋相同上限不重複辨識
+- 回傳 JSON：`{ ok, text, pages, ocr_pages, image_hash, cache_key, cache_hit, mime, elapsed_ms }`
 
 ### 設定來源
 
-Vision API 的端點與 model 從 `~/.hermes/config.yaml` 讀取：
+視覺辨識用的端點／model／金鑰由 `tools.py` 的 `_load_vision_config()` 從 `$HERMES_HOME/config.yaml` 推導，**預設就是這個房間自己的主模型**（主模型本身是多模態的），不需要另外設定：
 
-```yaml
-auxiliary:
-  vision:
-    base_url: http://127.0.0.1:8001/v1   # 預設值
-    model: qwen2.5-vl                     # 預設值
-```
+| 項目 | 來源 |
+|---|---|
+| model | `auxiliary.vision.model` → 沒有就用 `model.default`（主模型）→ 都沒有才 fallback `qwen2.5-vl` |
+| endpoint | `auxiliary.vision.base_url` → 沒有就用 `providers.<model.provider>.base_url`（預設 provider 名為 `custom`），後面接 `/chat/completions` |
+| 金鑰 | `providers.<provider>.key_env` 指名的環境變數（預設 `LLM_API_KEY`）→ fallback `$HERMES_HOME/.env` 的 `OPENAI_API_KEY` → shell 的 `OPENAI_API_KEY` |
 
-`OPENAI_API_KEY` 優先從 `~/.hermes/.env` 讀取，其次繼承 shell 環境變數。
+房間真的自己跑了另一個視覺模型時，才需要在自己的 `config.yaml` 手動加 `auxiliary.vision`（`model`，必要時再加 `base_url`）覆蓋。
+
+> ⚠️ 舊版預設是 `http://127.0.0.1:8001/v1`＋`$HERMES_HOME/.env` 的 `OPENAI_API_KEY`——容器裡兩者都不存在，每次呼叫都以 `URLError: Connection refused` 收場。
 
 可覆蓋的環境變數（`tools.py` 中的 `_OCR_ENV`）：
 
 | 環境變數 | 說明 | 預設值 |
 |---|---|---|
-| `ALICE_VISION_CHAT_URL` | Vision API endpoint | 由 `config.yaml` 讀取，fallback `http://127.0.0.1:8001/v1/chat/completions` |
-| `ALICE_VISION_MODEL` | 模型名稱 | 由 `config.yaml` 讀取，fallback `qwen2.5-vl` |
+| `ALICE_VISION_CHAT_URL` | Vision API endpoint | 由 `config.yaml` 推導，fallback `http://127.0.0.1:8001/v1/chat/completions` |
+| `ALICE_VISION_MODEL` | 模型名稱 | 由 `config.yaml` 推導（預設＝主模型） |
+| `ALICE_VISION_API_KEY` | API 金鑰 | 由 `config.yaml` 的 `key_env`（預設 `LLM_API_KEY`）解析 |
 | `ALICE_IMAGE_OCR_CACHE_DIR` | 快取目錄 | `~/.hermes/local-tools-data/image-ocr-cache/` |
-| `OPENAI_API_KEY` | API 金鑰 | 從 `~/.hermes/.env` 讀取 |
+| `OPENAI_API_KEY` | 舊腳本相容用的金鑰 | 同 `ALICE_VISION_API_KEY` |
 
-### `pre_llm_call` hook — 自動 PDF OCR
+### 為什麼沒有自動注入的 hook
 
-`tools.py` 中的 `pre_llm_call_ocr_hook` 會在每次 LLM 收到訊息前執行。若訊息包含 `It is saved at: /path/to/file.pdf` 格式的字串（hermes 上傳附件後的標準格式），hook 會自動呼叫 OCR 並將辨識結果以 context 注入，讓 LLM 直接讀取文字內容，不需要手動呼叫 `image_ocr` 工具。
+這個 plugin 曾經在 `register()` 掛一個 `pre_llm_call` hook，訊息裡提到 PDF 路徑就自動讀取內容注入 context；**2026-09-15 移除**。
+
+原因：hermes 的 hook context 只加進「這一輪送出去的 API 訊息副本」，`messages` 裡的原始訊息不會被改寫，所以注入的內容從來沒有進入 session 持久化。實測結果是第 1 輪答得很好，第 2 輪少了約 6,100 個 input token、PDF 內容完全消失，模型卻仍以為自己讀過，開始憑印象編造題目。
+
+工具結果則相反：會留在 session 逐字稿裡。而且模型看到 router 的檔案提示就會自己呼叫 `image_ocr`，加上 SHA-256 快取，重複呼叫幾乎是瞬間完成。所以 PDF／圖片一律走 `image_ocr` 工具呼叫，不做自動注入。
 
 ---
 
 ## Scripts 修改說明
 
-原始腳本複製後有以下兩處修改：
+原始腳本複製後有以下三處修改：
+
+### `scripts/image-ocr/alice-image-exam-ocr.py`
+
+**問題：** 原版 PDF 只取 `doc[0]`（第一頁）算成圖片送視覺模型，多頁文件讀不完；而且電子檔 PDF 本來就有文字層，送圖辨識既慢又失真，還硬性依賴 vision endpoint。
+
+**修改：** 逐頁處理（`--max-pages`，預設 30），每頁文字層優先、抽不到才走視覺；輸出加上 `pages`／`ocr_pages`；金鑰改讀 `ALICE_VISION_API_KEY`（fallback `OPENAI_API_KEY`）；快取 key 加入頁數上限。詳見上方「`image_ocr` 工具說明」。
 
 ### `scripts/law/alice-tw-law-local.py`
 
@@ -348,12 +365,18 @@ ALICE_TW_LAW_DB=~/.hermes/local-tools-data/law-data/tw-law.sqlite \
 python3 "$SCRIPTS/law/alice-tw-law-local.py" search "勞基法第84條" --limit 3
 # 預期：{"ok": true, "count": 3, "results": [...]}
 
-# image_ocr（需要本機 vision API 正在執行，且有圖片或 PDF 檔案）
+# image_ocr — 有文字層的 PDF：不需要任何 vision endpoint 就能讀
 ALICE_IMAGE_OCR_CACHE_DIR=~/.hermes/local-tools-data/image-ocr-cache \
-ALICE_VISION_CHAT_URL=http://127.0.0.1:8001/v1/chat/completions \
-ALICE_VISION_MODEL=qwen2.5-vl \
+python3 "$SCRIPTS/image-ocr/alice-image-exam-ocr.py" --path /path/to/test.pdf
+# 預期：{"ok": true, "text": "--- 第 1 頁 ---\n...", "pages": N, "ocr_pages": [], ...}
+
+# image_ocr — 圖片或掃描頁：需要 vision endpoint（容器內由 tools.py 從 config.yaml 帶入）
+ALICE_IMAGE_OCR_CACHE_DIR=~/.hermes/local-tools-data/image-ocr-cache \
+ALICE_VISION_CHAT_URL=https://<你的 provider>/v1/chat/completions \
+ALICE_VISION_MODEL=<主模型或視覺模型名稱> \
+ALICE_VISION_API_KEY=<金鑰> \
 python3 "$SCRIPTS/image-ocr/alice-image-exam-ocr.py" --path /path/to/test.jpg
-# 預期：{"ok": true, "text": "...", "cache_hit": false, "elapsed_ms": ...}
+# 預期：{"ok": true, "text": "...", "pages": 1, "ocr_pages": [1], "cache_hit": false, ...}
 
 # 相同檔案第二次呼叫：
 # 預期：{..., "cache_hit": true, "elapsed_ms": <極短>}
@@ -416,16 +439,16 @@ A：透過 hermes 呼叫 `webdriver` 工具，`command=cleanup`，選填 `days` 
 A：`fitz` 是 `pymupdf` 套件。執行 `pip3 install pymupdf --break-system-packages` 安裝。純圖片格式（jpg/png/webp）不需要此套件，僅 PDF 辨識時才用到。
 
 **Q：image_ocr 工具回傳 `ConnectionRefusedError` 或 `URLError`？**
-A：vision API server 未啟動。確認 Qwen2.5-VL（或 `~/.hermes/config.yaml` 中設定的模型）正在監聽對應 port。直接 `curl http://127.0.0.1:8001/v1/models` 確認是否有回應。
+A：代表它退回了 `http://127.0.0.1:8001` 這個 fallback——也就是 `config.yaml` 裡讀不到可用的 `providers.<provider>.base_url`（或房間自己寫的 `auxiliary.vision.base_url` 指到沒東西在聽的位址）。檢查房間的 `config.yaml`，改完要 `docker restart hermes_<room_id>`（plugin 沒有熱載入）。有文字層的 PDF 不會走到這條路徑。
 
-**Q：PDF 辨識只取第一頁，如何辨識多頁？**
-A：目前腳本設計為單頁辨識（`doc[0]`），多頁 PDF 需分頁處理。可多次呼叫 `image_ocr` 工具並傳入不同頁數，或直接修改腳本。
+**Q：多頁 PDF 讀得到嗎？**
+A：可以，預設最多 30 頁（腳本 `--max-pages`）。有文字層的頁直接抽文字、不呼叫模型；掃描頁才逐頁送視覺辨識。回傳的 `ocr_pages` 會告訴你哪幾頁是用視覺讀的。
 
 **Q：快取占用空間過大怎麼清？**
 A：快取存在 `~/.hermes/local-tools-data/image-ocr-cache/`，直接刪除 `.json` 檔案即可。每筆快取以辨識文字為主，通常很小，但大量圖片的 base64 content 不存入快取，僅存 OCR 結果文字。
 
-**Q：pre_llm_call hook 沒有自動 OCR？**
-A：hook 只比對訊息中 `It is saved at: <path>.pdf` 格式的字串（hermes 附件上傳的標準格式）。若 PDF 路徑是以其他格式傳入，hook 不會觸發，需手動呼叫 `image_ocr` 工具。
+**Q：PDF 不會被自動讀取嗎？**
+A：不會，而且是刻意的（2026-09-15 移除 `pre_llm_call` hook，原因見「為什麼沒有自動注入的 hook」）。PDF／圖片一律由模型呼叫 `image_ocr` 工具，把 `/opt/data/incoming/<檔名>` 的路徑傳進去；有快取，同一個檔案重複呼叫幾乎不花時間。
 
 **Q：hermes 說工具執行失敗，但直接 Python 測試是正常的？**
 A：檢查 `hermes logs` 是否有 `Tool registration REJECTED` 或 `TypeError`。常見原因：（1）hermes 未重啟、舊版 plugin 仍在記憶體中；（2）toolset `local_tools` 未啟用；（3）model 未實際呼叫工具而是自行回答。
@@ -437,5 +460,5 @@ A：檢查 `hermes logs` 是否有 `Tool registration REJECTED` 或 `TypeError`�
 - **`webdriver` 工具不支援有 display 的模式**：目前僅 headless 模式，在有 GUI 的環境可加 `--headed` 參數手動測試，但透過 hermes 呼叫時固定 headless。
 - **Model 依賴**：qwen3-next 等較小的 model 在 tool use 指令選擇上不穩定，建議配合 Claude Sonnet/Opus 或 GPT-4o 使用以獲得最佳體驗。
 - **`law mirror` 需要網路**：法規資料庫需要定期手動更新（`law` 工具 `command=mirror`），無自動排程。
-- **`image_ocr` PDF 辨識僅限第一頁**：多頁 PDF 需多次呼叫或手動修改腳本。
-- **`image_ocr` 依賴本機 vision API**：需要 Qwen2.5-VL（或 `config.yaml` 設定的模型）在本機運行，無法在沒有 GPU 的環境使用。
+- **`image_ocr` PDF 預設最多 30 頁**：更長的文件要自行調 `--max-pages`（工具 schema 未開放此參數，需改 `tools.py`）。
+- **`image_ocr` 的掃描頁依賴視覺模型**：有文字層的 PDF 純靠 `pymupdf` 就能讀完；掃描／拍照頁則需要 `config.yaml` 指到的模型真的支援影像輸入。

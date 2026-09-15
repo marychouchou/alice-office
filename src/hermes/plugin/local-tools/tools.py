@@ -7,12 +7,18 @@ baked into the Hermes image by Dockerfile.hermes and exposed to this
 process via the TOOLS_PYTHON env var — NOT Hermes's own venv/interpreter
 (sys.executable), which only carries pyyaml for the in-process plugin
 layer itself.
+
+Reading files a user sent in goes through image_ocr alone:
+_load_vision_config reads the room's config.yaml so image_ocr talks to the
+room's own main model on its own provider/key — the main model is multimodal —
+instead of a local vision server that doesn't exist inside the container.
+
+Runs in-process inside Hermes, so it must stay stdlib + pyyaml only.
 """
 from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -212,10 +218,16 @@ def handle_research(args: dict, **_: Any) -> str:
 
 # ─── image_ocr ───────────────────────────────────────────────────────────
 
-def _load_hermes_dotenv() -> dict[str, str]:
+_DEFAULT_VISION_URL = "http://127.0.0.1:8001/v1/chat/completions"
+_DEFAULT_VISION_MODEL = "qwen2.5-vl"
+_DEFAULT_KEY_ENV = "LLM_API_KEY"
+
+
+def _load_hermes_dotenv(hermes_home: Path) -> dict[str, str]:
+    """Parse HERMES_HOME/.env into a dict (missing/unreadable file -> {})."""
     result: dict[str, str] = {}
     try:
-        for line in (_HERMES_HOME / ".env").read_text(encoding="utf-8").splitlines():
+        for line in (hermes_home / ".env").read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -226,21 +238,69 @@ def _load_hermes_dotenv() -> dict[str, str]:
     return result
 
 
-def _load_vision_config() -> tuple[str, str]:
+def _load_vision_config(hermes_home: Path) -> tuple[str, str, str]:
+    """Resolve (chat_completions_url, model, api_key) for image recognition.
+
+    Reads the room's config.yaml, which the router renders from
+    src/hermes/config.template.yml:
+
+        model:
+          default: qwen3.6-35b   # the main model — already multimodal
+          provider: custom
+        providers:
+          custom:
+            base_url: https://.../v1
+            key_env: LLM_API_KEY
+
+    Default = the room's MAIN model on its own provider: same endpoint, same
+    key, no extra configuration. There is no separate vision server inside the
+    container, which is why the old `auxiliary.vision.base_url` fallback of
+    127.0.0.1:8001 made every call die with "Connection refused"; likewise the
+    key came from a `HERMES_HOME/.env` that doesn't exist, instead of the
+    container's real `LLM_API_KEY`.
+
+    A room that really does run a different vision model/endpoint can still
+    override it by hand in its own config.yaml:
+
+        auxiliary:
+          vision:
+            model: qwen2.5-vl
+            base_url: http://.../v1   # optional
+
+    Args:
+        hermes_home: The Hermes home directory holding config.yaml and .env
+            (/opt/data inside a room's container).
+
+    Returns:
+        (url, model, api_key). url always ends in /chat/completions; api_key
+        may be "" when nothing is configured (the call then fails loudly at
+        the endpoint rather than silently here).
+    """
+    url, model, key_env = _DEFAULT_VISION_URL, _DEFAULT_VISION_MODEL, _DEFAULT_KEY_ENV
     try:
-        cfg = yaml.safe_load((_HERMES_HOME / "config.yaml").read_text(encoding="utf-8"))
-        vision = cfg.get("auxiliary", {}).get("vision", {})
-        base_url = str(vision.get("base_url", "")).rstrip("/")
-        model = str(vision.get("model", "qwen2.5-vl"))
-        if base_url:
-            return f"{base_url}/chat/completions", model
+        cfg = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
     except Exception:
-        pass
-    return "http://127.0.0.1:8001/v1/chat/completions", "qwen2.5-vl"
+        cfg = None
+    if isinstance(cfg, dict):
+        vision = (cfg.get("auxiliary") or {}).get("vision") or {}
+        main_model = cfg.get("model") or {}
+        provider_name = str(main_model.get("provider") or "custom")
+        provider = (cfg.get("providers") or {}).get(provider_name) or {}
+        model = str(vision.get("model") or main_model.get("default") or model)
+        key_env = str(provider.get("key_env") or key_env)
+        base_url = str(vision.get("base_url") or provider.get("base_url") or "").rstrip("/")
+        if base_url:
+            url = f"{base_url}/chat/completions"
+    dotenv = _load_hermes_dotenv(hermes_home)
+    api_key = (
+        os.environ.get(key_env, "")
+        or dotenv.get("OPENAI_API_KEY", "")
+        or os.environ.get("OPENAI_API_KEY", "")
+    )
+    return url, model, api_key
 
 
-_HERMES_DOTENV = _load_hermes_dotenv()
-_VISION_URL, _VISION_MODEL = _load_vision_config()
+_VISION_URL, _VISION_MODEL, _VISION_API_KEY = _load_vision_config(_HERMES_HOME)
 
 _OCR_SCRIPT = TOOLS_ROOT / "image-ocr" / "alice-image-exam-ocr.py"
 _OCR_ENV: dict[str, str] = {
@@ -248,10 +308,19 @@ _OCR_ENV: dict[str, str] = {
     "ALICE_IMAGE_OCR_CACHE_DIR": str(_PLUGIN_DATA / "image-ocr-cache"),
     "ALICE_VISION_CHAT_URL":     _VISION_URL,
     "ALICE_VISION_MODEL":        _VISION_MODEL,
-    "OPENAI_API_KEY":            _HERMES_DOTENV.get("OPENAI_API_KEY", _BASE_ENV.get("OPENAI_API_KEY", "")),
+    "ALICE_VISION_API_KEY":      _VISION_API_KEY,
+    # Kept for compatibility with older copies of the script (and any other
+    # OpenAI-flavoured tool) that only look at OPENAI_API_KEY.
+    "OPENAI_API_KEY":            _VISION_API_KEY or _BASE_ENV.get("OPENAI_API_KEY", ""),
 }
 
 
+# 刻意「沒有」pre_llm_call hook 自動注入檔案內容（2026-09-15 移除）：Hermes 的
+# hook context 只加進「這一輪送出去的訊息副本」，原始訊息不會被改寫，所以注入的內容
+# 從來沒進過 session 持久化——下一輪模型就看不到它了，卻仍以為自己讀過這份檔案，
+# 於是開始憑印象編造內容（實測：turn 2 少了約 6,100 input tokens，答案整段虛構）。
+# 工具結果則相反，會留在 session 逐字稿裡，而模型看到 router 的檔案提示就會自己呼叫
+# image_ocr（有快取，重複呼叫幾乎不花時間）。所以這裡只留工具，不留 hook。
 def handle_ocr(args: dict, **_: Any) -> str:
     path = args.get("path", "")
     prompt = args.get("prompt", "")
@@ -261,29 +330,6 @@ def handle_ocr(args: dict, **_: Any) -> str:
     if prompt:
         argv += ["--prompt", prompt]
     return _run(_OCR_SCRIPT, argv, timeout=120, env=_OCR_ENV)
-
-
-# ─── pre_llm_call hook — 自動 OCR 傳入的 PDF ────────────────────────────────
-
-_DOC_PATH_RE = re.compile(r"It is saved at:\s*([^\n]+?\.pdf)\b", re.IGNORECASE)
-
-
-def pre_llm_call_ocr_hook(*, user_message: str = "", **_: Any) -> dict | None:
-    """在 LLM 收到訊息前，自動辨識訊息中的 PDF 並將 OCR 結果注入 context。"""
-    match = _DOC_PATH_RE.search(user_message or "")
-    if not match:
-        return None
-    pdf_path = match.group(1).strip().rstrip(".")
-    if not Path(pdf_path).exists():
-        return None
-    result = handle_ocr({"path": pdf_path})
-    try:
-        data = json.loads(result)
-        if data.get("ok") and data.get("text"):
-            return {"context": f"[PDF OCR 辨識結果：{Path(pdf_path).name}]\n{data['text']}"}
-    except Exception:
-        pass
-    return None
 
 
 # ─── browser_task ────────────────────────────────────────────────────────────

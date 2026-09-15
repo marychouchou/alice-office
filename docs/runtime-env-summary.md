@@ -32,7 +32,10 @@ tool 執行），MCP 支援任意 stdio `command`，所以「全域環境 + 清�
 - `src/hermes/mcp/package-lock.json` — Node 依賴 lockfile
 - `src/hermes/skill/alice/runtime-env/SKILL.md`（+ 群組 `DESCRIPTION.md`）— 烤進
   `/opt/hermes/skills/alice/`，Hermes 開機 manifest sync 自動發到每個房間（含既有房間），
-  告訴 agent「有哪些套件、用 `tools-python` 不要用裸 `python3`、怎麼加新套件」
+  告訴 agent「有哪些套件、用 `tools-python` 不要用裸 `python3`、怎麼加新套件」。
+  **注意：這份 skill 當時只寫在本文件，從未進 git 也沒烤進 image**，2026-09-14 才真的補上
+  （見 `docs/troubleshooting.md` 2.9），同時加了對內建 `ocr-and-documents` skill 的
+  build-time 修補，兩層一起保證 agent 知道要用 `tools-python`
 - `tests/test_hermes_shared_node_deps.py` — 防呆：每個 MCP 的 package.json 依賴
   必須以相同 specifier 出現在共用 package.json（取代原本的人工同步註解）
 
@@ -129,3 +132,22 @@ through」，`env:` 值支援 `${VAR}` 內插（從含 `~/.hermes/.env` 的環�
 2. **既有測試房間**（U_LOCAL_TEST、U_TIMEOUT_TEST）：已依 clean-cut 決定刪除其
    `plugins/`、`config.yaml`（它們沒有 `mcp/`），下次收到訊息會用新樣板重 seed。
 3. 尚未 git commit（依專案規範，等明確指示）。
+
+## 2026-09-15 更新：官方 skill 的環境獨立成 `/opt/skills/.venv`
+
+2026-09-14 的 PDF 事故（`docs/troubleshooting.md` 2.9）暴露一個設計缺口：上面的設計把
+第三方套件搬進 `/opt/tools/.venv`，但**Hermes 官方 bundled skill 的文件全寫 `python`／
+`pip install`**，而上游 image 給 terminal 的 `python` 是沒有 pip、externally-managed 的
+Debian 系統 Python——官方 skill 一需要第三方套件就死，agent 也不知道要改用
+`tools-python`。決定改成三個環境各自獨立，邊界以「誰寫的」劃分：
+
+| 環境 | 誰用 | 套件從哪來 |
+|---|---|---|
+| `/opt/hermes/.venv` | Hermes 本體 | 上游封死，我們只加 pyyaml |
+| `/opt/skills/.venv`（新，`python`／`pip` 在 PATH 最前） | 官方 bundled skill | `skills-requirements.txt` 預裝 + agent runtime `pip install`（容器本地） |
+| `/opt/tools/.venv`（`tools-python`，不在 PATH） | 我們自己的 plugin／MCP | `pyproject.toml` + `uv.lock` |
+
+套件會重複（pymupdf 兩邊各一份），這是分開環境的固定成本，換來的是出問題時一眼分得清
+是官方 skill 的環境還是我們的。`alice/runtime-env` skill 這次真的進 git 並烤進 image，
+內容改成說明這三欄。之前（v2 image）用 `sed` 在 build 時改上游 `ocr-and-documents/SKILL.md`
+的做法已移除——官方 skill 照原文跑就對了，不該去改它的文件。
