@@ -82,13 +82,15 @@ class Settings(BaseSettings):
     # tool-loop iterations of one request, not the context-window size — it
     # overestimates the live context and therefore fires early, which is the
     # safe direction. Do not "fix" this threshold assuming context-size
-    # semantics; keep it well below Hermes's own compression trigger. Calibrated
-    # against live measurement: a single simple turn in a FRESH session already
-    # reports ~27k prompt_tokens in this deployment (huge Hermes system prompt +
-    # skills index, summed over iterations), so a routine 2-3-iteration tool
-    # turn would trip a 60k threshold with a near-empty transcript; 120000
-    # leaves that headroom.
-    SESSION_ROTATE_PROMPT_TOKENS: int = 120000
+    # semantics; keep it well ABOVE Hermes's own compression trigger (floored
+    # at 75% of the LLM backend's context window) so compression gets a chance
+    # to fire first. Calibrated against live measurement: a single simple turn
+    # in a FRESH session already reports ~27k prompt_tokens in this deployment
+    # (huge Hermes system prompt + skills index, summed over iterations), so a
+    # routine 2-3-iteration tool turn would trip a 60k threshold with a
+    # near-empty transcript. 2026-09-15: LLM backend window doubled to 262144
+    # (compression trigger ~197k), so this doubled in lockstep to 240000.
+    SESSION_ROTATE_PROMPT_TOKENS: int = 240000
 
     @model_validator(mode="after")
     def _validate_host_mode_paths(self) -> Settings:
