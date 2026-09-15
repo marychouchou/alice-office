@@ -361,11 +361,11 @@ manifest sync 自動發到每個房間、跳過房間手改過的副本）。目
 
 MCP server 原始碼放在 `src/hermes/mcp/<name>/`（目前只有 `secretary/`）。**每個房間
 第一次建立 container 時，會各自從這裡 seed 一份自己的、可自由編輯的副本**到
-`data/<room_id>/mcp/<name>/`（見 `container_manager.py` 的 `_ensure_mcp_seed`）——
+`data/<room_id>/mcp/<name>/`（見 `room_seed.py` 的 `ensure_mcp_seed`）——
 之後房間之間互不影響，改一個房間的副本不會動到其他房間。這是 stdio MCP（Hermes
 gateway 直接 spawn `node server.mjs` 子進程），每個房間各自一份 process，靠
 `SECRETARY_LINE_USER_ID` = `room_id`（見 `src/hermes/mcp/secretary/mcp.manifest.yaml`）
-做房間隔離。`src/hermes/mcp/` 底下有幾個子目錄，`_ensure_mcp_seed` 就會幫每個新房間
+做房間隔離。`src/hermes/mcp/` 底下有幾個子目錄，`ensure_mcp_seed` 就會幫每個新房間
 各 seed 一份，`_format_mcp_section` 對每個房間 seed 出來的 MCP 各自產生一段
 `mcp_servers.<name>` 寫進 `config.yaml`。
 
@@ -425,7 +425,7 @@ id 等）都要自己在 `mcp.manifest.yaml` 的 `env:` 區塊明確宣告，就
 #### 每個 MCP 自己的密鑰
 
 `GOOGLE_MAPS_API_KEY` 這類 secretary MCP 專屬密鑰**不走這個 repo 的 `.env` /
-router `Settings`**：房間第一次建立時，`_ensure_mcp_seed` 會把
+router `Settings`**：房間第一次建立時，`ensure_mcp_seed` 會把
 `src/hermes/mcp/secretary/.env.example` 複製成該房間自己的
 `data/<room_id>/mcp/secretary/.env`——`server.mjs` 啟動時用 Node 內建的
 `process.loadEnvFile()` 自己讀。之後要改哪個房間的密鑰，直接編輯那個房間自己的
@@ -450,7 +450,7 @@ SECRETARY_LINE_USER_ID=test_room npx @modelcontextprotocol/inspector node server
 
 **Level 1（透過 Hermes 容器驗證，改房間自己的副本）**：
 
-1. 確保測試房間容器已存在過一次（`_ensure_mcp_seed` 才會把 MCP 樣板 seed 進
+1. 確保測試房間容器已存在過一次（`ensure_mcp_seed` 才會把 MCP 樣板 seed 進
    `data/<room_id>/mcp/<name>/`）：`uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST`
 2. 直接改該房間自己的副本，例如 `data/U_LOCAL_TEST/mcp/secretary/tools/todo.mjs`——
    **不要改 `src/hermes/mcp/` 底下的樣板**，那份只在房間第一次建立時生效一次
@@ -482,7 +482,7 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v2 .
 `src/hermes/plugin/local-tools/` 是一套 Hermes standalone plugin（台灣薪資計算、法規查詢、工程計算機、長期記憶、AI 生態系索引、OCR、瀏覽器自動化），**每個房間第一次建立 container 時自動 seed 為預設工具**。運作方式：
 
 - **原始碼**：房間第一次建立時，從 `src/hermes/plugin/local-tools/` seed 一份到該房間自己的
-  `data/<room_id>/plugins/local-tools/`（見 `container_manager.py` 的 `_ensure_plugin_seed`）——
+  `data/<room_id>/plugins/local-tools/`（見 `room_seed.py` 的 `ensure_plugin_seed`）——
   跟 MCP 一樣是 write-once：之後改 repo 樣板不會反映到已存在的房間，房間可以自由編輯
   自己的副本
 - **啟用**：每個新房間的 `config.yaml` 模板自動寫入 `plugins.enabled: [local-tools]`
@@ -545,7 +545,7 @@ python3 src/hermes/plugin/local-tools/scripts/hr/alice-payroll-engine.py <實際
 
 **Level 1（驗證 Hermes 真的呼叫得到 tool，改房間自己的副本）**：
 
-1. 確保測試房間容器已存在過一次（`_ensure_plugin_seed` 才會把 plugin 樣板 seed 進
+1. 確保測試房間容器已存在過一次（`ensure_plugin_seed` 才會把 plugin 樣板 seed 進
    `data/<room_id>/plugins/local-tools/`）
 2. 直接改該房間自己的副本，例如 `data/U_LOCAL_TEST/plugins/local-tools/tools.py`——
    **不要改 `src/hermes/plugin/` 底下的樣板**，那份只在房間第一次建立時生效一次
@@ -615,7 +615,7 @@ data/_google/gcp-oauth.keys.installed.json  ← Desktop (Installed) client（種
 
 之後每個房間會在自己第一次接觸 Google OAuth 時（seed 時序細節見
 `docs/google-workspace-integration-summary.md`），由
-`container_manager.ensure_google_seed` 自動從這裡複製一份到
+`room_seed.ensure_google_seed` 自動從這裡複製一份到
 `data/<room_id>/google/`——**不需要、也不應該**手動幫每個房間各放一次：
 
 ```
@@ -685,7 +685,7 @@ key 當成 `room_id` 傳給 `Settings.room_google_dir()`，在 Linux（case-sens
   建立的房間，之後補上 `GOOGLE_OAUTH_PUBLIC_URL` 跟 credentials 也不會自動補掛，
   需要 `docker rm -f hermes_<room_id>` 重建。
 - **write-once 對 Google MCP 一樣適用**：`gmail`／`drive`／`google-calendar` 三個
-  manifest 都有 `requires_google_oauth: true`，`_ensure_mcp_seed` 只在
+  manifest 都有 `requires_google_oauth: true`，`ensure_mcp_seed` 只在
   `Settings.google_oauth_enabled` 為真時才會 seed 它們——在停用狀態下建立的房間，
   即使之後啟用了 Google 整合，也不會回頭幫它補 seed，一樣要重建房間。
 - **`rm -rf data/<room_id>` 會把這個房間的 Google 授權一併清空**：因為

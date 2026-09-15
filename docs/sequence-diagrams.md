@@ -257,9 +257,10 @@ sequenceDiagram
 
 ## 7. Container 冷啟動（第一次訊息進某房間）
 
-第一則訊息落進一個還沒有 container 的房間時，seed（`config.yaml`／`mcp`／
-`plugins`）在 `docker run` **之前**完成——因為 `config.yaml` 的渲染要讀
-剛 seed 出來的 MCP manifest。
+第一則訊息落進一個還沒有 container 的房間時，seed（`SOUL.md`／`config.yaml`／
+`mcp`／`plugins`）在 `docker run` **之前**完成——因為 `config.yaml` 的渲染要讀
+剛 seed 出來的 MCP manifest，且 `SOUL.md` 一旦晚於 `docker run`，Hermes 會自己
+先生一份預設版、之後就永遠蓋不掉（write-once）。
 
 ```mermaid
 sequenceDiagram
@@ -270,7 +271,7 @@ sequenceDiagram
 
     R->>D: containers.get("hermes_" + room_key)
     D-->>R: NotFound
-    R->>R: _ensure_data_dir / _ensure_mcp_seed / _ensure_plugin_seed /<br/>_ensure_config_yaml / ensure_google_seed（write-once seed；<br/>google 部分視部署是否啟用 Google OAuth，未啟用則 no-op）
+    R->>R: _ensure_data_dir / room_seed.ensure_soul_seed /<br/>room_seed.ensure_mcp_seed / room_seed.ensure_plugin_seed /<br/>_ensure_config_yaml / room_seed.ensure_google_seed（write-once seed；<br/>google 部分視部署是否啟用 Google OAuth，未啟用則 no-op）
     R->>D: docker run（image、volume /opt/data、network、<br/>env: API_SERVER_KEY 等，command: gateway run）
     D->>H: 建立並啟動容器
     loop 每秒一次，最多 60 秒

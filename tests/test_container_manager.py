@@ -12,12 +12,10 @@ from alice_office_router.container_manager import (
     CONTAINER_GOOGLE_DIR,
     _build_volume_config,
     _ensure_config_yaml,
-    _ensure_mcp_seed,
-    _ensure_plugin_seed,
     _wait_until_ready,
-    ensure_google_seed,
     get_or_create_container,
 )
+from alice_office_router.room_seed import ensure_mcp_seed
 
 SETTINGS_IN_DOCKER = Settings(
     LINE_CHANNEL_SECRET="test_secret",
@@ -179,8 +177,9 @@ def test_missing_container_is_created_with_hermes_env() -> None:
         patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
         patch("alice_office_router.container_manager._wait_until_ready"),
         patch("alice_office_router.container_manager._ensure_data_dir"),
-        patch("alice_office_router.container_manager._ensure_mcp_seed"),
-        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager.ensure_soul_seed"),
+        patch("alice_office_router.container_manager.ensure_mcp_seed"),
+        patch("alice_office_router.container_manager.ensure_plugin_seed"),
         patch("alice_office_router.container_manager._ensure_config_yaml"),
     ):
         url = get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
@@ -212,8 +211,9 @@ def test_created_container_is_labelled_and_its_log_is_capped() -> None:
         patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
         patch("alice_office_router.container_manager._wait_until_ready"),
         patch("alice_office_router.container_manager._ensure_data_dir"),
-        patch("alice_office_router.container_manager._ensure_mcp_seed"),
-        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager.ensure_soul_seed"),
+        patch("alice_office_router.container_manager.ensure_mcp_seed"),
+        patch("alice_office_router.container_manager.ensure_plugin_seed"),
         patch("alice_office_router.container_manager._ensure_config_yaml"),
     ):
         get_or_create_container("line_U1234", SETTINGS_IN_DOCKER)
@@ -237,8 +237,9 @@ def test_missing_container_publishes_port_on_host() -> None:
         patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
         patch("alice_office_router.container_manager._wait_until_ready"),
         patch("alice_office_router.container_manager._ensure_data_dir"),
-        patch("alice_office_router.container_manager._ensure_mcp_seed"),
-        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager.ensure_soul_seed"),
+        patch("alice_office_router.container_manager.ensure_mcp_seed"),
+        patch("alice_office_router.container_manager.ensure_plugin_seed"),
         patch("alice_office_router.container_manager._ensure_config_yaml"),
         patch("alice_office_router.container_manager._find_free_port", return_value=54321),
     ):
@@ -249,67 +250,38 @@ def test_missing_container_publishes_port_on_host() -> None:
     assert call_kwargs["ports"] == {"8642/tcp": 54321}
 
 
-def test_ensure_mcp_seed_copies_template_and_seeds_dotenv(tmp_path: Path) -> None:
-    """A template's source + .env.example are copied into the room's own mcp/ dir."""
-    templates_dir = tmp_path / "templates"
-    mcp_dir = _write_mcp_template(templates_dir, "secretary", "command: node\nargs: [server.mjs]\n")
-    (mcp_dir / ".env.example").write_text("GOOGLE_MAPS_API_KEY=\n", encoding="utf-8")
-    settings = Settings(
-        LINE_CHANNEL_SECRET="test_secret",
-        LINE_CHANNEL_ACCESS_TOKEN="test_token",
-        DATA_DIR=tmp_path / "data",
-        HOST_DATA_DIR=tmp_path / "data",
-        HERMES_TEMPLATES_DIR=templates_dir,
-        HERMES_API_SERVER_KEY="test_api_server_key",
-    )
+def test_create_container_seeds_soul_before_run() -> None:
+    """ensure_soul_seed must land before containers.run — see its call site comment.
 
-    _ensure_mcp_seed("room_AAA", settings)
+    Hermes writes its own default SOUL.md on first boot if the file is
+    absent, and never overwrites it afterward, so seeding after the
+    container has already started would never take effect.
+    """
+    mock_container = _make_running_container()
+    mock_client = MagicMock()
+    mock_client.containers.get.side_effect = docker.errors.NotFound("not found")
+    mock_client.containers.run.return_value = mock_container
+    call_order: list[str] = []
 
-    seeded = settings.DATA_DIR / "room_AAA" / "mcp" / "secretary"
-    assert (seeded / "server.mjs").exists()
-    assert (seeded / "mcp.manifest.yaml").exists()
-    assert (seeded / ".env").read_text(encoding="utf-8") == "GOOGLE_MAPS_API_KEY=\n"
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready"),
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch(
+            "alice_office_router.container_manager.ensure_soul_seed",
+            side_effect=lambda *a, **kw: call_order.append("soul"),
+        ),
+        patch("alice_office_router.container_manager.ensure_mcp_seed"),
+        patch("alice_office_router.container_manager.ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        mock_client.containers.run.side_effect = lambda **kw: (
+            call_order.append("run"),
+            mock_container,
+        )[1]
+        get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
 
-
-def test_ensure_mcp_seed_does_not_overwrite_existing(tmp_path: Path) -> None:
-    """Write-once: a room's own edits to its seeded MCP survive a second seed call."""
-    templates_dir = tmp_path / "templates"
-    _write_mcp_template(templates_dir, "secretary", "command: node\nargs: [server.mjs]\n")
-    settings = Settings(
-        LINE_CHANNEL_SECRET="test_secret",
-        LINE_CHANNEL_ACCESS_TOKEN="test_token",
-        DATA_DIR=tmp_path / "data",
-        HOST_DATA_DIR=tmp_path / "data",
-        HERMES_TEMPLATES_DIR=templates_dir,
-        HERMES_API_SERVER_KEY="test_api_server_key",
-    )
-    _ensure_mcp_seed("room_AAA", settings)
-    seeded_file = settings.DATA_DIR / "room_AAA" / "mcp" / "secretary" / "server.mjs"
-    seeded_file.write_text("// room edit\n", encoding="utf-8")
-
-    _ensure_mcp_seed("room_AAA", settings)
-
-    assert seeded_file.read_text(encoding="utf-8") == "// room edit\n"
-
-
-def test_ensure_plugin_seed_copies_template(tmp_path: Path) -> None:
-    """A plugin template's source is copied into the room's own plugins/ dir."""
-    templates_dir = tmp_path / "templates"
-    plugin_dir = templates_dir / "plugin" / "local-tools"
-    plugin_dir.mkdir(parents=True)
-    (plugin_dir / "tools.py").write_text("# placeholder\n", encoding="utf-8")
-    settings = Settings(
-        LINE_CHANNEL_SECRET="test_secret",
-        LINE_CHANNEL_ACCESS_TOKEN="test_token",
-        DATA_DIR=tmp_path / "data",
-        HOST_DATA_DIR=tmp_path / "data",
-        HERMES_TEMPLATES_DIR=templates_dir,
-        HERMES_API_SERVER_KEY="test_api_server_key",
-    )
-
-    _ensure_plugin_seed("room_AAA", settings)
-
-    assert (settings.DATA_DIR / "room_AAA" / "plugins" / "local-tools" / "tools.py").exists()
+    assert call_order == ["soul", "run"]
 
 
 def test_ensure_config_yaml_writes_provider_block(tmp_path: Path) -> None:
@@ -392,7 +364,7 @@ tools:
         LLM_MODEL="qwen3-next",
     )
 
-    _ensure_mcp_seed("room_AAA", settings)
+    ensure_mcp_seed("room_AAA", settings)
     _ensure_config_yaml("room_AAA", settings)
 
     written = (settings.DATA_DIR / "room_AAA" / "config.yaml").read_text(encoding="utf-8")
@@ -494,8 +466,9 @@ def test_container_removed_between_get_and_start_is_recreated() -> None:
         patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
         patch("alice_office_router.container_manager._wait_until_ready") as mock_wait,
         patch("alice_office_router.container_manager._ensure_data_dir"),
-        patch("alice_office_router.container_manager._ensure_mcp_seed"),
-        patch("alice_office_router.container_manager._ensure_plugin_seed"),
+        patch("alice_office_router.container_manager.ensure_soul_seed"),
+        patch("alice_office_router.container_manager.ensure_mcp_seed"),
+        patch("alice_office_router.container_manager.ensure_plugin_seed"),
         patch("alice_office_router.container_manager._ensure_config_yaml"),
     ):
         url = get_or_create_container("room_AAA", SETTINGS_IN_DOCKER)
@@ -582,7 +555,7 @@ def test_account_key_substitution_lowercases_room_id(tmp_path: Path) -> None:
     settings = _settings_with_google(tmp_path, enabled=True)
     _write_config_template(settings.HERMES_TEMPLATES_DIR)
 
-    _ensure_mcp_seed("U_ROOM_ABC", settings)
+    ensure_mcp_seed("U_ROOM_ABC", settings)
     _ensure_config_yaml("U_ROOM_ABC", settings)
 
     written = (settings.DATA_DIR / "U_ROOM_ABC" / "config.yaml").read_text(encoding="utf-8")
@@ -603,44 +576,11 @@ def test_requires_google_oauth_key_not_in_rendered_mcp_section(tmp_path: Path) -
     settings = _settings_with_google(tmp_path, enabled=True)
     _write_config_template(settings.HERMES_TEMPLATES_DIR)
 
-    _ensure_mcp_seed("room_AAA", settings)
+    ensure_mcp_seed("room_AAA", settings)
     _ensure_config_yaml("room_AAA", settings)
 
     written = (settings.DATA_DIR / "room_AAA" / "config.yaml").read_text(encoding="utf-8")
     assert "requires_google_oauth" not in written
-
-
-def test_google_gated_templates_skipped_when_disabled(tmp_path: Path) -> None:
-    """A template with requires_google_oauth: true is not seeded when Google OAuth is disabled."""
-    templates_dir = tmp_path / "templates"
-    _write_mcp_template(
-        templates_dir,
-        "gmail",
-        "command: /opt/tools/.venv/bin/python3\nargs: [server.py]\nrequires_google_oauth: true\n",
-    )
-    _write_mcp_template(templates_dir, "secretary", "command: node\nargs: [server.mjs]\n")
-    settings = _settings_with_google(tmp_path, enabled=False)
-
-    _ensure_mcp_seed("room_AAA", settings)
-
-    seeded_root = settings.DATA_DIR / "room_AAA" / "mcp"
-    assert not (seeded_root / "gmail").exists()
-    assert (seeded_root / "secretary").exists()
-
-
-def test_google_gated_templates_seeded_when_enabled(tmp_path: Path) -> None:
-    """A template with requires_google_oauth: true IS seeded when Google OAuth is enabled."""
-    templates_dir = tmp_path / "templates"
-    _write_mcp_template(
-        templates_dir,
-        "gmail",
-        "command: /opt/tools/.venv/bin/python3\nargs: [server.py]\nrequires_google_oauth: true\n",
-    )
-    settings = _settings_with_google(tmp_path, enabled=True)
-
-    _ensure_mcp_seed("room_AAA", settings)
-
-    assert (settings.DATA_DIR / "room_AAA" / "mcp" / "gmail").exists()
 
 
 def test_volume_config_adds_google_mount_only_when_enabled(tmp_path: Path) -> None:
@@ -661,39 +601,3 @@ def test_volume_config_adds_google_mount_only_when_enabled(tmp_path: Path) -> No
     assert disabled_host_dir not in disabled_volumes
 
 
-def test_ensure_google_seed_copies_deployment_creds_into_room_dir(tmp_path: Path) -> None:
-    """ensure_google_seed copies both credential files into this room's own directory, once."""
-    settings = _settings_with_google(tmp_path, enabled=True)
-    settings.google_installed_creds_path.parent.mkdir(parents=True, exist_ok=True)
-    settings.google_installed_creds_path.write_text(
-        '{"installed": {"client_id": "x", "client_secret": "y"}}', encoding="utf-8"
-    )
-
-    ensure_google_seed("room_AAA", settings)
-
-    room_dir = settings.room_google_dir("room_AAA")
-    assert (room_dir / "gcp-oauth.keys.json").read_text(encoding="utf-8") == (
-        settings.google_web_creds_path.read_text(encoding="utf-8")
-    )
-    assert (room_dir / "gcp-oauth.keys.installed.json").exists()
-
-
-def test_ensure_google_seed_does_not_overwrite_existing_room_copy(tmp_path: Path) -> None:
-    """A room's own credential copy, once seeded, is never overwritten by a later call."""
-    settings = _settings_with_google(tmp_path, enabled=True)
-    room_creds = settings.room_google_web_creds_path("room_AAA")
-    room_creds.parent.mkdir(parents=True, exist_ok=True)
-    room_creds.write_text('{"web": {"client_id": "room-own-edit"}}', encoding="utf-8")
-
-    ensure_google_seed("room_AAA", settings)
-
-    assert "room-own-edit" in room_creds.read_text(encoding="utf-8")
-
-
-def test_ensure_google_seed_noop_when_disabled(tmp_path: Path) -> None:
-    """ensure_google_seed does nothing when this deployment has no Google OAuth configured."""
-    settings = _settings_with_google(tmp_path, enabled=False)
-
-    ensure_google_seed("room_AAA", settings)
-
-    assert not settings.room_google_dir("room_AAA").exists()

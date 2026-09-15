@@ -59,13 +59,15 @@ class Settings(BaseSettings):
     LLM_MODEL: str = ""
     # Router-local path (like DATA_DIR — the router's own filesystem view,
     # NOT a host path for Docker volume mounting) to this repo's src/hermes/
-    # directory. Holds mcp/<name>/ and plugin/<name>/ source templates —
-    # _ensure_mcp_seed / _ensure_plugin_seed copy each one into a room's
-    # data dir (data/<room_id>/mcp/<name>/, data/<room_id>/plugins/<name>/)
-    # the first time that room's container is created, then never touch it
-    # again — the room's copy is the room's own to edit from then on. Also
-    # holds config.template.yml (see _ensure_config_yaml), which unlike
-    # those is a str.format() template rather than something copied verbatim.
+    # directory. Holds mcp/<name>/ and plugin/<name>/ source templates, and
+    # SOUL.md (the agent's persona) — room_seed.ensure_mcp_seed /
+    # ensure_plugin_seed / ensure_soul_seed copy each one into a room's data
+    # dir (data/<room_id>/mcp/<name>/, data/<room_id>/plugins/<name>/,
+    # data/<room_id>/SOUL.md) the first time that room's container is
+    # created, then never touch it again — the room's copy is the room's own
+    # to edit from then on. Also holds config.template.yml (see
+    # container_manager._ensure_config_yaml), which unlike those is a
+    # str.format() template rather than something copied verbatim.
     # In Docker mode, docker-compose.yml mounts ./src/hermes here read-only.
     # Host-dev mode must point this at the repo's actual src/hermes path.
     HERMES_TEMPLATES_DIR: Path = _DOCKER_DEFAULT_HERMES_TEMPLATES_DIR
@@ -189,7 +191,7 @@ class Settings(BaseSettings):
         Returns:
             DATA_DIR / "_google" — where the operator drops both GCP client
             credential JSON files once per deployment. Never read directly by
-            a room's MCPs; container_manager.ensure_google_seed copies these
+            a room's MCPs; room_seed.ensure_google_seed copies these
             into each room's own room_google_dir the first time that room
             touches Google OAuth (see its docstring for why write-once-per-
             room, not a shared mount, is used).

@@ -42,8 +42,9 @@ KNOWN_LOG_FILES = (
 )
 
 # 房間初始化流程會 write-once 寫出的關鍵檔案/目錄（見 container_manager.py 的
-# _ensure_config_yaml / _ensure_mcp_seed / _ensure_plugin_seed / ensure_google_seed）。
-KEY_PATHS = ("config.yaml", "mcp", "plugins", "google/tokens.json")
+# _ensure_config_yaml，與 room_seed.py 的 ensure_mcp_seed / ensure_plugin_seed /
+# ensure_soul_seed / ensure_google_seed）。
+KEY_PATHS = ("config.yaml", "SOUL.md", "mcp", "plugins", "google/tokens.json")
 
 DEFAULT_DOCKER_LOG_LINES = 20
 DEFAULT_FILE_LOG_LINES = 10

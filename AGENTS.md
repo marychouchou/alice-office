@@ -78,12 +78,14 @@ LINE Platform → POST /webhooks/line（LineAdapter）→ core.process_inbound �
   到達所有房間。image 層放不了 context file（`.hermes.md`／`AGENTS.md`）：gateway 模式
   的 context 目錄是 `TERMINAL_CWD`＝`HOME`＝`/opt/data`，也就是房間自己的資料夾。
 - 這個 repo 只負責 write-once 的初始化：`config.yaml`（`_ensure_config_yaml`）、
-  MCP／plugin 原始碼（`_ensure_mcp_seed` / `_ensure_plugin_seed`，從
-  `src/hermes/{mcp,plugin}/` seed 到 `data/<room_id>/{mcp,plugins}/`）——都只在房間
-  第一次建立時寫一次，之後永不覆蓋，讓房間可以自由編輯自己的副本；改 repo 樣板只影響
-  之後新建立的房間。除此之外 `data/<room_id>/` 底下其他所有東西都是 Hermes 執行期
-  自己長出來的。
-- **沒有熱載入**：改 `config.yaml`／skills／mcp／plugins 都要
+  MCP／plugin 原始碼（`room_seed.ensure_mcp_seed` / `ensure_plugin_seed`，從
+  `src/hermes/{mcp,plugin}/` seed 到 `data/<room_id>/{mcp,plugins}/`）、agent 的
+  人設（`room_seed.ensure_soul_seed`，從 `src/hermes/SOUL.md` seed 到
+  `data/<room_id>/SOUL.md`——即容器內 `$HERMES_HOME/SOUL.md`，Hermes 自己 prompt
+  疊層裡優先度最高的「agent identity」層）——都只在房間第一次建立時寫一次，之後
+  永不覆蓋，讓房間可以自由編輯自己的副本；改 repo 樣板只影響之後新建立的房間。
+  除此之外 `data/<room_id>/` 底下其他所有東西都是 Hermes 執行期自己長出來的。
+- **沒有熱載入**：改 `config.yaml`／skills／mcp／plugins／`SOUL.md` 都要
   `docker restart hermes_<room_id>` 才會生效。
 - MCP 是 Node ESM，依賴解析靠從檔案位置往上找 `node_modules`（ESM 不吃
   `NODE_PATH`），所以共用依賴烤在 image 的 `/opt/node_modules`，不放進各房間自己的
@@ -168,7 +170,8 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 | LINE wire format（event 結構、訊息型別解析、簽章、送訊長度/則數限制） | `src/alice_office_router/channels/line/` |
 | 新通訊通道（webhook 解析、驗簽、送訊） | `src/alice_office_router/channels/<name>/`，core 只認 `InboundMessage` |
 | container 生命週期（建立/啟動/健康等待/URL 解析） | `container_manager.py`——**docker SDK 只允許在這個檔案 import** |
-| 房間 write-once seed（複製 template 到 `data/<room_id>/`） | 目前在 `container_manager.py`；要新增 seed 種類時，先把 seed 函式群抽成 `room_seed.py` 再加 |
+| 房間 write-once seed（複製 template 到 `data/<room_id>/`） | `room_seed.py`；新增 seed 種類＝加一個 `ensure_<x>_seed(room_id, config)` 並在 `container_manager._create_container` 登記呼叫順序 |
+| agent 的人設／自我認知（是誰、語氣、行為原則） | `src/hermes/SOUL.md`（write-once seed 到每房間 `data/<room_id>/SOUL.md`＝Hermes identity 層），**不是** `group_context.py` 的 `*_SYSTEM_PROMPT`（那只管回覆形狀）也不是 skill |
 | 「這則訊息該不該進 agent」的 gate 判斷（如 Google OAuth gate） | 獨立模組提供回傳 status 的純函式（比照 `google_oauth.check_google_authorization`），router 只呼叫、不寫判斷內容 |
 | 對 Hermes agent 的 HTTP 協定 | `hermes_client.py` |
 | 環境變數與路徑推導 | `config.py` 的 Settings |

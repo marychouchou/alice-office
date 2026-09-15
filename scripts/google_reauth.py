@@ -6,7 +6,7 @@ consent screen using the Desktop/Installed OAuth client credentials, and
 stores the resulting token in that room's own tokens.json under
 data/<room_id>/google/ — the same per-room file the router's /oauth/callback
 route and that room's gmail/drive/google-calendar MCP read from (see
-alice_office_router.container_manager.ensure_google_seed; each room's
+alice_office_router.room_seed.ensure_google_seed; each room's
 Google data is isolated, not shared across rooms).
 
 Usage:
@@ -158,7 +158,7 @@ def exchange_code(code: str, creds: dict[str, str]) -> dict[str, object]:
 def ensure_room_credentials_copy(tokens_path: Path, credentials_path: Path) -> None:
     """Copy the Desktop/Installed credentials file into a room's own google/ dir, once.
 
-    Mirrors container_manager.ensure_google_seed's write-once semantics: a
+    Mirrors room_seed.ensure_google_seed's write-once semantics: a
     room's calendar MCP reads its own per-room mount, not any shared
     location, so this room needs its own copy of the credentials file
     alongside its tokens.json for token refresh to work after this script
