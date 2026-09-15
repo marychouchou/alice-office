@@ -31,6 +31,24 @@ class Settings(BaseSettings):
     # Shared bearer secret between the router and every Hermes agent
     # container's api_server platform (sets API_SERVER_KEY in the container).
     HERMES_API_SERVER_KEY: str
+    # Maximum SILENCE (seconds) between bytes of one agent turn before the agent
+    # is considered dead. The router asks for a streamed response, and Hermes
+    # writes a `: keepalive` comment after every 30s of inactivity — including
+    # while a tool runs — so liveness is "bytes keep arriving", not "the turn
+    # finished in time". This is what a hung container trips, usually within
+    # minutes; a legitimately slow turn never does, however long it thinks.
+    HERMES_IDLE_TIMEOUT_SECONDS: float = 120.0
+    # Absolute ceiling (seconds) on ONE agent turn, a safety valve for a stream
+    # that keeps emitting keepalives forever. Normally never reached: liveness
+    # is judged by HERMES_IDLE_TIMEOUT_SECONDS above, and a turn is a whole tool
+    # loop, so pure-reasoning or many-tool turns legitimately run for many
+    # minutes. The webhook itself already returned 200 and the turn runs in a
+    # background task, so raising this does not affect LINE's own webhook
+    # deadline. On expiry (either budget) the router stops waiting and sends the
+    # user the fixed timeout notice (core.AGENT_TIMEOUT_NOTICE) — the agent is
+    # not interrupted, so that turn's answer still lands in the room's Hermes
+    # session.
+    HERMES_REQUEST_TIMEOUT_SECONDS: float = 3600.0
     # Set False when router runs on the host (not inside Docker).
     # Containers will publish port 8642 to a random host port so the host
     # can reach them via localhost instead of Docker-internal DNS.
@@ -86,13 +104,15 @@ class Settings(BaseSettings):
     # tool-loop iterations of one request, not the context-window size — it
     # overestimates the live context and therefore fires early, which is the
     # safe direction. Do not "fix" this threshold assuming context-size
-    # semantics; keep it well below Hermes's own compression trigger. Calibrated
-    # against live measurement: a single simple turn in a FRESH session already
-    # reports ~27k prompt_tokens in this deployment (huge Hermes system prompt +
-    # skills index, summed over iterations), so a routine 2-3-iteration tool
-    # turn would trip a 60k threshold with a near-empty transcript; 120000
-    # leaves that headroom.
-    SESSION_ROTATE_PROMPT_TOKENS: int = 120000
+    # semantics; keep it well ABOVE Hermes's own compression trigger (floored
+    # at 75% of the LLM backend's context window) so compression gets a chance
+    # to fire first. Calibrated against live measurement: a single simple turn
+    # in a FRESH session already reports ~27k prompt_tokens in this deployment
+    # (huge Hermes system prompt + skills index, summed over iterations), so a
+    # routine 2-3-iteration tool turn would trip a 60k threshold with a
+    # near-empty transcript. 2026-09-15: LLM backend window doubled to 262144
+    # (compression trigger ~197k), so this doubled in lockstep to 240000.
+    SESSION_ROTATE_PROMPT_TOKENS: int = 240000
     # Minimum level every logger in the router process emits (see
     # logging_setup.configure_logging). Noisy third-party loggers (docker,
     # httpx, ...) stay pinned at WARNING regardless, so DEBUG stays readable.
