@@ -245,7 +245,9 @@ flowchart TD
   照常可用，但 inbound 訊息一律不因未授權被擋（等同 gate 永遠回 `ok`）。
 - Gate 啟用時，每則訊息進 agent 前先跑 `check_google_authorization`，三態：
   - **blocked**：沒有 token，或 access token 過期且無 refresh token → 只回授權
-    連結，不呼叫 agent；
+    連結，不呼叫 agent；同時在背景建立房間目錄與容器（暖機），授權後的下一則不再
+    吃冷啟動。取捨：任何傳過一則訊息的房間（含從未授權的）都會擁有一個常駐容器，
+    gate 不再是容器數量的上限——容器的資源上限／閒置回收是待辦；
   - **notice**：有 token 但缺 Drive scope → 照常呼叫 agent，並多推播一則重新授權
     提示（calendar／gmail 仍可用）；
   - **ok**：scope 齊全 → 正常呼叫 agent。
@@ -353,7 +355,7 @@ flowchart TD
 ### 效能
 
 - 新房間容器冷啟動 30–60 秒（s6 supervision + skill sync），`/health` 輪詢間隔
-  1 秒、最多 60 秒逾時。
+  1 秒、最多 60 秒逾時。gate `blocked` 時冷啟動在背景進行，不佔授權提示的回覆時間。
 - 對 Hermes agent 的單次請求走 SSE streaming，以「靜默多久」而非「總共多久」判定 agent
   是否還活著：靜默上限預設 120 秒（`HERMES_IDLE_TIMEOUT_SECONDS`），絕對上限預設 3600 秒
   （`HERMES_REQUEST_TIMEOUT_SECONDS`，正常不會踩到）；任一條逾時都回覆固定提示而非靜默。

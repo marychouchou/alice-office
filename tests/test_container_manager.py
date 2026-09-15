@@ -135,7 +135,10 @@ def test_running_container_returns_docker_url() -> None:
 
     assert url == EXPECTED_URL_DOCKER
     mock_container.start.assert_not_called()
-    mock_wait.assert_not_called()
+    # "running" is not readiness: a container another caller just created is
+    # running before its api_server answers, so every resolution waits (one
+    # GET when already healthy).
+    mock_wait.assert_called_once_with(EXPECTED_URL_DOCKER)
 
 
 def test_running_container_returns_host_url() -> None:
@@ -143,10 +146,14 @@ def test_running_container_returns_host_url() -> None:
     mock_container = _make_running_container(host_port="54321")
     mock_client = _make_mock_client(mock_container)
 
-    with patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client):
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready") as mock_wait,
+    ):
         url = get_or_create_container("room_AAA", SETTINGS_ON_HOST)
 
     assert url == EXPECTED_URL_HOST
+    mock_wait.assert_called_once_with(EXPECTED_URL_HOST)
 
 
 def test_stopped_container_is_restarted() -> None:
@@ -599,5 +606,3 @@ def test_volume_config_adds_google_mount_only_when_enabled(tmp_path: Path) -> No
     }
     disabled_host_dir = str(disabled_settings.room_google_host_dir("room_AAA"))
     assert disabled_host_dir not in disabled_volumes
-
-

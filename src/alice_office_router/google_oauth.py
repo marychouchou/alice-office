@@ -229,9 +229,11 @@ async def oauth_start(
         raise HTTPException(status_code=400, detail="Google OAuth not configured")
 
     # This may be this room's very first contact with the filesystem: the
-    # gate blocks a new room before get_or_create_container ever runs (see
-    # core.process_inbound), so data/<room_id>/google/ might not exist
-    # yet. ensure_google_seed is idempotent — a no-op if already seeded.
+    # gate-blocked turn only *starts* get_or_create_container in the
+    # background (see core._warm_container), and that warm-up may not have
+    # reached data/<room_id>/google/ yet — or may have failed — by the time
+    # the user clicks the link. ensure_google_seed is idempotent — a no-op if
+    # already seeded.
     ensure_google_seed(user_id, config)
     client_id, _ = _load_web_credentials(config, user_id)
 

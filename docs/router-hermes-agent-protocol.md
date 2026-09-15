@@ -28,16 +28,12 @@ API 供 log 使用，不影響對話本身。
 flowchart TD
     A["get_or_create_container(room_id)"] --> B["docker.client.containers.get('hermes_' + room_id)"]
     B -- NotFound --> C["_create_container()\ndocker run <HERMES_IMAGE>\ncommand: gateway run\nvolume: HOST_DATA_DIR/room_id → /opt/data\nnetwork: HERMES_NETWORK\nenv: API_SERVER_KEY, API_SERVER_HOST=0.0.0.0, LLM_API_KEY"]
-    C --> D[needs_wait = True]
+    C --> G[_get_container_url]
     B -- 找到但 status != running --> E[container.start]
-    E --> D
-    B -- 找到且 running --> F[needs_wait = False]
-    D --> G[_get_container_url]
-    F --> G
-    G --> H{needs_wait?}
-    H -- 是 --> I["輪詢 GET url/health\n每秒一次，最多 60 秒"]
-    H -- 否 --> J[回傳 URL]
-    I -- 200 --> J
+    E --> G
+    B -- 找到且 running --> G
+    G --> I["輪詢 GET url/health\n每秒一次，最多 60 秒\n（已就緒的第一次就回）"]
+    I -- 200 --> J[回傳 URL]
     I -- 逾時 --> K[raise RuntimeError]
 ```
 
@@ -57,9 +53,11 @@ flowchart TD
 - **啟動指令是 `gateway run`**：只啟用 Hermes 內建的 `api_server` platform，不
   啟用內建的 LINE adapter（Hermes 原生支援 20 種 platform adapter，這裡刻意只開
   一種）。
-- 首次建立或從 stopped 重啟時才需要輪詢 `/health`（真實 Hermes image 要跑完 s6
-  supervision、skill sync、gateway startup，比先前的 mock 慢很多）；已在
-  running 的既有 container 直接回傳 URL，不必等待。
+- 三條路徑都會輪詢 `/health` 再回傳 URL（真實 Hermes image 要跑完 s6
+  supervision、skill sync、gateway startup，比先前的 mock 慢很多）。2026-09-15 起
+  不再對「已 running」跳過等待：gate 擋下時的背景暖機（`core._warm_container`）和
+  operator `docker restart` 都會讓 container 先 running、api_server 晚一步才起來。
+  已就緒的 container 第一次 poll 就回，穩態成本是每則一次 GET。
 
 ## 核心請求：`ask_hermes_agent()`
 
@@ -198,12 +196,10 @@ sequenceDiagram
     else container 已停止
         D->>H: container.start()
     end
-    opt 剛建立或剛重啟（needs_wait）
-        loop 每秒一次，最多 60 秒
-            R->>H: GET /health
-        end
-        H-->>R: 200 OK（ready）
+    loop 每秒一次，最多 60 秒（已就緒的第一次就回）
+        R->>H: GET /health
     end
+    H-->>R: 200 OK（ready）
     D-->>R: container URL（Docker DNS 或 localhost:port）
 
     Note over R,H: 核心請求（SSE streaming）

@@ -169,8 +169,9 @@ sequenceDiagram
 ## 5. Google OAuth gate 三態（ok／notice／blocked）對訊息流程的影響
 
 `check_google_authorization` 每則要進 agent 的訊息都跑一次。**重點：`blocked`
-時完全不呼叫 agent**——這一步在 observe 短路與手動 reset 之後、`_reply_for`
-之前執行。三態判斷本身的邏輯圖見 README「訊息授權判斷流程」，這裡補一張真正的
+時完全不呼叫 agent，但會在背景啟動容器暖機（`core._warm_container`），不等它完成
+就回授權連結**——這樣授權後的下一則訊息落在已就緒的容器上，不用再吃 30–60 秒
+冷啟動。這一步在 observe 短路與手動 reset 之後、`_reply_for` 之前執行。三態判斷本身的邏輯圖見 README「訊息授權判斷流程」，這裡補一張真正的
 時序版本。
 
 ```mermaid
@@ -185,7 +186,8 @@ sequenceDiagram
     R->>OA: check_google_authorization(room_key)
     alt tokens.json 不存在，或過期且無 refresh_token
         OA-->>R: ("blocked", 授權連結文案)
-        Note over R,H: 完全不呼叫 agent
+        R-)H: 背景 get_or_create_container（暖機，不等待）
+        Note over R,H: 不呼叫 agent
         R-->>U: 只回授權連結
     else 有 token 但缺 Drive scope
         OA-->>R: ("notice", 重新授權提示)
@@ -257,7 +259,9 @@ sequenceDiagram
 
 ## 7. Container 冷啟動（第一次訊息進某房間）
 
-第一則訊息落進一個還沒有 container 的房間時，seed（`SOUL.md`／`config.yaml`／
+第一則訊息落進一個還沒有 container 的房間時（gate 啟用的部署裡，這通常就是被
+`blocked` 擋下的那一則——冷啟動在背景跑，第一個 chat completion 是授權後的下一則；
+見 §5），seed（`SOUL.md`／`config.yaml`／
 `mcp`／`plugins`）在 `docker run` **之前**完成——因為 `config.yaml` 的渲染要讀
 剛 seed 出來的 MCP manifest，且 `SOUL.md` 一旦晚於 `docker run`，Hermes 會自己
 先生一份預設版、之後就永遠蓋不掉（write-once）。

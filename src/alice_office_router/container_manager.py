@@ -321,8 +321,31 @@ def _ensure_config_yaml(room_id: str, config: Settings) -> None:
     logger.info(f"Wrote default config.yaml for room [{room_id}]")
 
 
+def _probe_health(client: httpx.Client, url: str) -> str | None:
+    """Probe a Hermes agent's health endpoint once.
+
+    Args:
+        client: The HTTP client to poll with.
+        url: Base URL of the Hermes agent container.
+
+    Returns:
+        None when the endpoint answered 200; otherwise a short, content-free
+        reason ("ConnectError", "status 503") the caller logs and folds into
+        its timeout error, so an operator can tell "nothing listening yet"
+        from "listening but unhealthy".
+    """
+    try:
+        response = client.get(f"{url}/health")
+    except httpx.HTTPError as exc:
+        return type(exc).__name__
+    return None if response.status_code == 200 else f"status {response.status_code}"
+
+
 def _wait_until_ready(url: str, timeout: float = _READY_TIMEOUT_SECONDS) -> None:
     """Poll a Hermes agent's health endpoint until it responds or times out.
+
+    A container that is already healthy answers on the first poll, so calling
+    this on every resolution costs one HTTP GET, not a wait.
 
     Args:
         url: Base URL of the Hermes agent container.
@@ -333,14 +356,20 @@ def _wait_until_ready(url: str, timeout: float = _READY_TIMEOUT_SECONDS) -> None
     """
     deadline = time.monotonic() + timeout
     with httpx.Client(timeout=5.0) as client:
+        reason = _probe_health(client, url)
+        if reason is None:
+            return
+        # Only a container that is actually booting (or broken) gets past the
+        # first probe, so this line stays per-start, not per-turn.
+        logger.info(f"Waiting for Hermes agent at {url} to become ready ({reason})...")
         while time.monotonic() < deadline:
-            try:
-                if client.get(f"{url}/health").status_code == 200:
-                    return
-            except httpx.HTTPError:
-                pass
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
-    raise RuntimeError(f"Hermes agent at {url} did not become ready within {timeout}s")
+            reason = _probe_health(client, url)
+            if reason is None:
+                return
+    raise RuntimeError(
+        f"Hermes agent at {url} did not become ready within {timeout}s (last: {reason})"
+    )
 
 
 def _get_container_url(
@@ -410,7 +439,8 @@ def _create_container(
     ensure_plugin_seed(room_id, config)
     _ensure_config_yaml(room_id, config)
     # No-ops (already seeded) if this room reached ensure_google_seed earlier
-    # via /oauth/start — see its docstring for why that ordering happens.
+    # via /oauth/start — a gate-blocked turn only *starts* this container in
+    # the background, so the user may click the auth link before it exists.
     ensure_google_seed(room_id, config)
 
     ports: dict[str, int] | None = None
@@ -447,7 +477,7 @@ def _resolve_container(
     container_name: str,
     room_id: str,
     config: Settings,
-) -> tuple[docker.models.containers.Container, bool]:
+) -> docker.models.containers.Container:
     """Get the room's container, starting or creating it when it isn't running.
 
     Split out of get_or_create_container so that function stays within the
@@ -461,8 +491,8 @@ def _resolve_container(
         config: Application settings.
 
     Returns:
-        The running Container, and whether it was just started/created (so the
-        caller must wait for its api_server health check).
+        The running Container. The caller always waits for its api_server
+        health check afterwards, whichever path produced it.
 
     Raises:
         docker.errors.APIError: If a Docker API call fails.
@@ -480,11 +510,11 @@ def _resolve_container(
             logger.info(f"Container {container_name} is stopped; restarting.")
             container.start()
             container.reload()
-            return container, True
+            return container
         logger.debug(f"Container {container_name} already running.")
-        return container, False
+        return container
     except docker.errors.NotFound:
-        return _create_container(client, container_name, room_id, config), True
+        return _create_container(client, container_name, room_id, config)
     except docker.errors.APIError as exc:
         logger.error(f"Docker API error for container {container_name}: {exc}")
         raise
@@ -496,9 +526,16 @@ def get_or_create_container(room_id: str, config: Settings) -> str:
     If the container does not exist, it is created and started automatically.
     If the container exists but is stopped, it is restarted. Uses a module-level
     lock to prevent race conditions during concurrent requests for the same room.
-    When a container was just created or restarted, blocks until its api_server
-    health check responds before returning, since the Hermes gateway takes
-    longer to boot than a simple process start.
+    Always blocks until the api_server health check responds before returning:
+    the Hermes gateway takes longer to boot than a simple process start, and a
+    container that is "running" is not proof of readiness — one another caller
+    just created (core's gate-blocked warm-up runs outside the room lock), or
+    one an operator just `docker restart`ed to apply a config change, shows as
+    running long before it answers. A healthy container answers the first
+    poll, so the steady-state cost is one HTTP GET per turn. The accepted
+    trade-off: a running container whose api_server is permanently down now
+    costs the full timeout before the turn fails, where it used to fail on the
+    first connection — the room hears the same failure notice either way.
 
     Args:
         room_id: Unique identifier for the chatroom (used for container name and data dir).
@@ -517,10 +554,8 @@ def get_or_create_container(room_id: str, config: Settings) -> str:
     with bound_contextvars(container=container_name):
         with _lock:
             client: docker.DockerClient = docker.from_env()
-            container, needs_wait = _resolve_container(client, container_name, room_id, config)
+            container = _resolve_container(client, container_name, room_id, config)
 
         url = _get_container_url(container, config)
-        if needs_wait:
-            logger.info(f"Waiting for {container_name} to become ready...")
-            _wait_until_ready(url)
+        _wait_until_ready(url)
         return url
