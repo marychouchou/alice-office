@@ -79,6 +79,47 @@ ENV PATH="${PATH}:/opt/node_modules/.bin"
 # here too.
 COPY src/hermes/runtime/profile-tools.sh /etc/profile.d/90-alice-tools.sh
 
+# ── Python: bundled-skill venv (/opt/skills/.venv) ─────────────────────────
+# Three Python environments, kept apart on purpose so a failure points at
+# exactly one owner:
+#
+#   /opt/hermes/.venv  Hermes itself. Sealed by upstream (read-only /opt/hermes,
+#                      HERMES_DISABLE_LAZY_INSTALLS=1); we only add pyyaml.
+#   /opt/skills/.venv  What Hermes's own bundled skills run in. It is the
+#                      `python`/`pip` on the terminal PATH (ENV below +
+#                      profile-tools.sh for login shells), so a skill's docs
+#                      work verbatim: `python scripts/x.py`, `pip install x`.
+#                      Upstream's image hands skills the Debian system python,
+#                      which has no pip and is externally-managed, so those
+#                      docs could never work there (2026-09-14: the agent
+#                      couldn't read a PDF because `python` had no pymupdf).
+#                      Pre-baked: skills-requirements.txt only — packages a
+#                      bundled skill's own SKILL.md asks for and we rely on.
+#                      Everything else the agent installs at runtime with
+#                      plain `pip install`; that lands here too, container-
+#                      local, gone on recreate (promote it to the requirements
+#                      file to keep it). Made world-writable for that reason:
+#                      the gateway runs as the `hermes` user, whose UID is
+#                      remapped at boot, so no build-time chown can target it.
+#   /opt/tools/.venv   Our own plugin scripts / MCPs (tools-python, above).
+#                      Bundled skills never touch it; it is not on PATH.
+COPY src/hermes/runtime/skills-requirements.txt /opt/skills/requirements.txt
+RUN python3 -m venv /opt/skills/.venv \
+    && /opt/skills/.venv/bin/pip install --no-cache-dir -r /opt/skills/requirements.txt \
+    && chmod -R a+rwX /opt/skills/.venv
+ENV PATH="/opt/skills/.venv/bin:${PATH}"
+
+# ── Our own skill: tell the agent which environment is which ───────────────
+# Baked under /opt/hermes/skills/alice/ — Hermes's boot-time manifest sync
+# (tools/skills_sync.py) copies every bundled SKILL.md into each room's
+# /opt/data/skills/, new AND existing rooms alike, and leaves room-edited
+# copies alone. Bundled skills are the only image-level thing that reaches
+# every room without touching write-once seeds. (A context file such as
+# .hermes.md/AGENTS.md is NOT an option at image level: in gateway mode Hermes
+# reads it from TERMINAL_CWD, which the image's main-wrapper.sh pins to
+# HOME=/opt/data — the room's own data dir.)
+COPY src/hermes/skill/ /opt/hermes/skills/
+
 # ── Shared MCP runtime dependencies (locked) ───────────────────────────────
 # Node.js is already in the Hermes base image (v22 for browser automation).
 # Every MCP server template under src/hermes/mcp/<name>/ is ESM
@@ -101,10 +142,17 @@ RUN cd /opt && npm ci --omit=dev
 # httpx/requests for the gmail/drive Python MCP servers), Hermes's own venv
 # still has yaml, and the shared MCP runtime deps (MCP SDK + zod +
 # @cocal/google-calendar-mcp, incl. its CLI bin) are installed where ESM's
-# node_modules walk-up (or PATH, for the calendar CLI) will find them.
+# node_modules walk-up (or PATH, for the calendar CLI) will find them. Also
+# that the three Python environments are what they claim: a login shell's
+# `python`/`pip` is the bundled-skill venv with its pre-baked packages, the
+# tools venv does NOT see those packages (separation is real), and our skill
+# is in place.
 RUN which geckodriver firefox node npm tools-python \
     && tools-python -c "import sympy, fitz, selenium, mcp, httpx, requests, sys; assert sys.prefix == '/opt/tools/.venv', sys.prefix" \
     && /opt/hermes/.venv/bin/python3 -c "import yaml" \
+    && bash -lc 'python -c "import pymupdf, pymupdf4llm, sys; assert sys.prefix == \"/opt/skills/.venv\", sys.prefix" && test "$(command -v pip)" = /opt/skills/.venv/bin/pip' \
+    && ! tools-python -c "import pymupdf4llm" 2>/dev/null \
+    && test -f /opt/hermes/skills/alice/runtime-env/SKILL.md \
     && test -d /opt/node_modules/@modelcontextprotocol/sdk \
     && test -d /opt/node_modules/zod \
     && test -d /opt/node_modules/@cocal/google-calendar-mcp \

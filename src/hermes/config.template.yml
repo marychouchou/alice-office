@@ -1,6 +1,19 @@
 model:
   default: {model}
   provider: custom
+  # Hermes cannot read this window from the provider (a LiteLLM proxy whose
+  # /model/info reports no max_input_tokens), so it falls back to a hardcoded
+  # 131,072 for any "qwen" model — half the real window (max_model_len
+  # 262,144, verified 2026-09-15 by probing the endpoint). With the wrong
+  # figure Hermes compressed every second call at ~88K. State it explicitly.
+  context_length: 262144
+  # Output cap per request. Hermes otherwise reserves half the context window
+  # as output budget on EVERY request, so a prompt of ~131K tokens already
+  # fails with "context length exceeded" — long before Hermes's own
+  # compression (floored at 75% of the window, ~197K) could ever run. 32K is
+  # enough for a 13 KB Markdown write_file in one call (16K truncated it) and
+  # still leaves ~230K for the prompt.
+  max_tokens: 32768
 providers:
   custom:
     base_url: {base_url}
@@ -8,8 +21,23 @@ providers:
     default_model: {model}
     models:
       - {model}
+    # Sent verbatim in the request body. Turns off qwen3's thinking mode: one
+    # thinking-heavy call produced 64K reasoning tokens, and Hermes replays
+    # reasoning_content into every later call of the turn, so a single turn
+    # ran 13+ minutes and then overflowed the context. Remove this block for a
+    # deployment whose model/provider ignores it or where thinking is wanted.
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
 {plugins_section}
 {mcp_section}
 tools:
   tool_search:
     threshold_pct: 20
+# Dangerous-command approvals: nobody can answer an approval prompt on the
+# api_server path (LINE users never see it), so "manual" turns every flagged
+# command — `python -c`, `pip install`, execute_code — into a dead end the
+# agent burns several calls on. "smart" lets the auxiliary model auto-approve
+# the obviously harmless ones and still blocks genuinely destructive ones.
+approvals:
+  mode: smart
