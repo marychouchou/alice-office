@@ -11,7 +11,10 @@ The channel-free core never sees any of this; it only receives an
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
@@ -19,7 +22,11 @@ from linebot.v3.messaging.exceptions import ApiException
 from structlog.contextvars import bound_contextvars
 
 from alice_office_router.channels.base import InboundMessage
-from alice_office_router.channels.line.client import push_line_message, reply_line_message
+from alice_office_router.channels.line.client import (
+    push_line_message,
+    reply_line_message,
+    show_loading_animation,
+)
 from alice_office_router.channels.line.dedup import EventDeduplicator
 from alice_office_router.channels.line.events import Event, WebhookBody, resolve_inbound_text
 from alice_office_router.channels.line.profiles import resolve_sender_name
@@ -38,6 +45,14 @@ _GROUP_JOIN_GREETING = (
     "需要我幫忙時，請 @我，或用設定好的呼叫詞開頭跟我說話；"
     "其他訊息我會安靜聽著、當作背景脈絡，不會插話。"
 )
+
+# LINE's loading indicator runs for at most 60 s and only in 1:1 chats
+# (https://developers.line.biz/en/docs/messaging-api/use-loading-indicator/),
+# so covering a multi-minute agent turn means re-issuing it just before each
+# one lapses. The refresh interval sits under the duration so the animation
+# never visibly blinks out between calls.
+_LOADING_ANIMATION_SECONDS = 60
+_LOADING_REFRESH_INTERVAL = 50.0
 
 
 class LineAdapter:
@@ -361,11 +376,67 @@ class LineAdapter:
         if event_id:
             context["event_id"] = event_id
         with bound_contextvars(**context):
-            result = await process_inbound(msg, config)
+            # The animation runs only while we wait; the reply pushed right
+            # after clears it (LINE drops it on the next message we send).
+            async with self._loading_animation(room_key, config, enabled=not is_group):
+                result = await process_inbound(msg, config)
             delivered = await self._deliver_texts(
                 self._native_id(room_key), result.texts, reply_token, config
             )
             record_turn(result.envelope.model_copy(update={"delivered": delivered}), config)
+
+    @asynccontextmanager
+    async def _loading_animation(
+        self, room_key: str, config: Settings, *, enabled: bool
+    ) -> AsyncIterator[None]:
+        """Hold LINE's native loading animation up for the duration of the block.
+
+        An agent turn routinely takes tens of seconds to several minutes, during
+        which a 1:1 user would otherwise see nothing at all. One LINE animation
+        lasts 60 s at most, so a companion task re-issues it until the block
+        exits. Everything here is cosmetic: `show_loading_animation` swallows its
+        own failures, and the block's body runs either way.
+
+        Args:
+            room_key: Channel-prefixed room key, stripped to the bare LINE user id.
+            config: Application settings (for the channel access token).
+            enabled: False for group/multi-person rooms, which LINE's loading
+                indicator does not support — then this is a plain no-op.
+
+        Yields:
+            None — with the animation running for a 1:1 chat, nothing otherwise.
+        """
+        if not enabled:
+            yield
+            return
+
+        native_id = self._native_id(room_key)
+        token = config.LINE_CHANNEL_ACCESS_TOKEN
+        await show_loading_animation(native_id, token, _LOADING_ANIMATION_SECONDS)
+        refresher = asyncio.create_task(self._refresh_loading_animation(native_id, token))
+        try:
+            yield
+        finally:
+            refresher.cancel()
+            with suppress(asyncio.CancelledError):
+                await refresher
+
+    @staticmethod
+    async def _refresh_loading_animation(native_id: str, channel_access_token: str) -> None:
+        """Re-issue the loading animation just before each one lapses.
+
+        Runs as a companion task that `_loading_animation` cancels once the
+        agent turn is done.
+
+        Args:
+            native_id: Bare LINE user id of the 1:1 chat.
+            channel_access_token: LINE channel access token for authentication.
+        """
+        while True:
+            await asyncio.sleep(_LOADING_REFRESH_INTERVAL)
+            await show_loading_animation(
+                native_id, channel_access_token, _LOADING_ANIMATION_SECONDS
+            )
 
     async def _deliver_texts(
         self, native_id: str, texts: list[str], reply_token: str | None, config: Settings

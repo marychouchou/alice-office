@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac as hmac_mod
 import json
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -89,6 +91,13 @@ def override_settings_dep() -> None:
     app.dependency_overrides[get_settings] = _test_settings
     yield  # type: ignore[misc]
     app.dependency_overrides.clear()
+
+
+@pytest.fixture(autouse=True)
+def stub_loading_animation() -> Iterator[AsyncMock]:
+    """Keep the cosmetic 1:1 loading indicator off the network in every test."""
+    with patch(f"{_ADAPTER}.show_loading_animation", new=AsyncMock()) as mock_show:
+        yield mock_show
 
 
 # ---------------------------------------------------------------------------
@@ -639,3 +648,77 @@ class TestTurnEnvelopeRecording:
             )
 
         assert mock_record.call_args.args[0].delivered is False
+
+
+# ---------------------------------------------------------------------------
+# LineAdapter._loading_animation — LINE's 1:1 loading indicator while we wait
+# ---------------------------------------------------------------------------
+
+
+class TestLoadingAnimation:
+    async def test_one_to_one_starts_animation_before_the_reply_lands(
+        self, stub_loading_animation: AsyncMock
+    ) -> None:
+        """A 1:1 turn shows the indicator first, then pushes the reply."""
+        order: list[str] = []
+        stub_loading_animation.side_effect = lambda *_args, **_kwargs: order.append("loading")
+        mock_push = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("push"))
+
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"])),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=mock_push),
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        assert order == ["loading", "push"]
+        # Bare LINE user id (prefix stripped), 60 s — LINE's maximum.
+        stub_loading_animation.assert_awaited_with("room_AAA", TEST_TOKEN, 60)
+
+    async def test_group_message_never_shows_the_animation(
+        self, stub_loading_animation: AsyncMock
+    ) -> None:
+        """LINE only supports the loading indicator in one-on-one chats."""
+        with (
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["哈囉"], room_key="line_C1")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()),
+        ):
+            await LineAdapter()._process_and_reply(
+                "line_C1", "@bot 哈囉", _settings(), None, is_group=True
+            )
+
+        stub_loading_animation.assert_not_called()
+
+    async def test_slow_turn_refreshes_the_animation(self) -> None:
+        """A turn outliving one animation gets it re-issued until core returns."""
+        refreshed = asyncio.Event()
+        calls: list[str] = []
+
+        async def _fake_loading(native_id: str, token: str, seconds: int = 60) -> None:
+            calls.append(native_id)
+            if len(calls) >= 2:
+                refreshed.set()
+
+        async def _fake_process(msg: InboundMessage, config: Settings) -> InboundResult:
+            await asyncio.wait_for(refreshed.wait(), timeout=5)
+            return _core_result(["哈囉"])
+
+        with (
+            patch(f"{_ADAPTER}._LOADING_REFRESH_INTERVAL", 0.01),
+            patch(f"{_ADAPTER}.show_loading_animation", new=_fake_loading),
+            patch(f"{_ADAPTER}.process_inbound", new=_fake_process),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()),
+        ):
+            await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
+
+        assert len(calls) >= 2
+        assert set(calls) == {"room_AAA"}
+        # The refresher is cancelled with the turn, so the count stops growing.
+        settled = len(calls)
+        await asyncio.sleep(0.05)
+        assert len(calls) == settled

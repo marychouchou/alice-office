@@ -9,6 +9,7 @@ from linebot.v3.messaging import (
     Configuration,
     PushMessageRequest,
     ReplyMessageRequest,
+    ShowLoadingAnimationRequest,
     TextMessage,
 )
 
@@ -96,3 +97,35 @@ async def download_line_content(message_id: str, channel_access_token: str) -> b
         blob_api = AsyncMessagingApiBlob(api_client)
         content = await blob_api.get_message_content(message_id)
     return bytes(content)
+
+
+async def show_loading_animation(
+    user_id: str, channel_access_token: str, seconds: int = 60
+) -> None:
+    """Show LINE's native loading animation in a one-on-one chat.
+
+    POSTs to `/v2/bot/chat/loading/start`
+    (https://developers.line.biz/en/docs/messaging-api/use-loading-indicator/).
+    The animation clears itself once `seconds` elapse or the bot sends any
+    message, whichever comes first; re-issuing it while one is running just
+    overrides the remaining time. LINE only supports this in 1:1 chats —
+    group and multi-person rooms must never be passed here.
+
+    Purely cosmetic, so every failure (API rejection, network error) is
+    logged at warning level and swallowed: a missing animation must never
+    take down the reply the caller is actually waiting for.
+
+    Args:
+        user_id: Bare LINE user ID of the 1:1 chat (no channel prefix).
+        channel_access_token: LINE channel access token for authentication.
+        seconds: How long to show it; LINE accepts 5-60 in multiples of 5.
+    """
+    configuration = Configuration(access_token=channel_access_token)
+    try:
+        async with AsyncApiClient(configuration) as api_client:
+            messaging_api = AsyncMessagingApi(api_client)
+            await messaging_api.show_loading_animation(
+                ShowLoadingAnimationRequest(chatId=user_id, loadingSeconds=seconds)
+            )
+    except Exception as exc:
+        logger.warning(f"Failed to show LINE loading animation for room {user_id}: {exc}")
