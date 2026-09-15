@@ -289,14 +289,55 @@ async def test_blocked_twice_warms_once_while_in_flight(
         ) as mock_get_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
     ):
-        await process_inbound(_msg(), settings)
-        await asyncio.sleep(0)  # let the first warm-up task start its thread
-        await process_inbound(_msg(), settings)
-        assert len(warmups) == 1
-        release.set()
-        await _settle_warmups()
+        try:
+            await process_inbound(_msg(), settings)
+            await process_inbound(_msg(), settings)
+            assert len(warmups) == 1
+        finally:
+            # Release the parked thread and settle inside the patch even when
+            # the assertion fails, so no task outlives the mock.
+            release.set()
+            await _settle_warmups()
 
     assert mock_get_container.call_count == 1
+
+
+async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
+    warmups: dict[str, asyncio.Task[None]], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Shutdown cancels the tracked warm-ups and says so; the thread finishes on its own."""
+    from alice_office_router.core import cancel_warmups, process_inbound
+
+    settings = _settings()
+    release = threading.Event()
+
+    def _slow_container(room_key: str, config: Settings) -> str:
+        release.wait(2)
+        return "http://hermes_line_room_AAA:8642"
+
+    with (
+        patch(
+            "alice_office_router.core.check_google_authorization",
+            return_value=("blocked", _BLOCKED_MSG),
+        ),
+        patch("alice_office_router.core.get_or_create_container", side_effect=_slow_container),
+        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
+        caplog.at_level(logging.INFO, logger="alice_office_router.core"),
+    ):
+        try:
+            await process_inbound(_msg(), settings)
+            task = warmups["line_room_AAA"]
+            # A task cancelled before its first step never enters the
+            # coroutine (so nothing logs); let it reach the to_thread await.
+            await asyncio.sleep(0)
+            cancel_warmups()
+            await asyncio.wait([task])
+        finally:
+            release.set()
+
+    assert task.cancelled()
+    assert any("cancelled at shutdown" in record.getMessage() for record in caplog.records)
+    assert warmups == {}
 
 
 async def test_blocked_warmup_retries_after_previous_finished(

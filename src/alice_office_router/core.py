@@ -161,7 +161,14 @@ async def _run_warmup(room_key: str, config: Settings) -> None:
     """
     try:
         await asyncio.to_thread(get_or_create_container, room_key, config)
+    except asyncio.CancelledError:
+        # Shutdown (cancel_warmups). The worker thread cannot be interrupted,
+        # so the docker call runs to completion on its own; the container it
+        # produces is found, not recreated, by the next resolution.
+        logger.info(f"Container warm-up for room {room_key} cancelled at shutdown")
+        raise
     except Exception as exc:
+        # Same guard as _ask_agent's container step (its twin; keep in sync).
         reason = _describe_error("container", exc)
         logger.error(f"Container warm-up failed for room {room_key}: {reason}")
         return
@@ -182,11 +189,26 @@ def _warm_container(room_key: str, config: Settings) -> None:
         room_key: The room whose container to start.
         config: Application settings.
     """
-    if room_key in _warmups:
+    # `done()` rather than membership: a finished task stays registered until
+    # its pop callback runs on the next loop iteration, and a blocked message
+    # landing in that window must still get its retry.
+    existing = _warmups.get(room_key)
+    if existing is not None and not existing.done():
         return
     task = asyncio.create_task(_run_warmup(room_key, config), name=f"warmup:{room_key}")
     _warmups[room_key] = task
     task.add_done_callback(lambda _done: _warmups.pop(room_key, None))
+
+
+def cancel_warmups() -> None:
+    """Cancel every in-flight container warm-up (called at lifespan shutdown).
+
+    Makes the abandoned warm-ups visible in the log instead of leaving them
+    to the runner's silent teardown. The worker threads themselves finish on
+    their own (see _run_warmup).
+    """
+    for task in list(_warmups.values()):
+        task.cancel()
 
 
 @dataclass(frozen=True)
@@ -371,6 +393,7 @@ async def _ask_agent(
         # thread holds it — neither should stall every other room's turn.
         target_url = await asyncio.to_thread(get_or_create_container, room_key, config)
     except Exception as exc:
+        # Same guard as _run_warmup's (its twin; keep in sync).
         reason = _describe_error("container", exc)
         logger.error(f"Failed to get/create container for room {room_key}: {reason}")
         return AgentTurn(outcome="agent_failed", text=AGENT_FAILURE_NOTICE, error=reason)

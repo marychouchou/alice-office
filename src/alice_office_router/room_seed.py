@@ -17,7 +17,9 @@ here would create a circular import).
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Final
 
@@ -205,6 +207,31 @@ def ensure_soul_seed(room_id: str, config: Settings) -> None:
     logger.info(f"Seeded SOUL.md into room [{room_id}]")
 
 
+def _copy_atomically(src: Path, dest: Path) -> None:
+    """Copy `src` to `dest` so that `dest` is never observable half-written.
+
+    ensure_google_seed can run concurrently from a container warm-up worker
+    thread and from /oauth/start on the event loop, and the latter reads the
+    file straight after seeding; a plain copyfile truncates `dest` first, so
+    that read could see an empty file. Writing to a temp file in the same
+    directory and renaming over `dest` makes each writer's result appear
+    whole, and two racing writers simply install identical content.
+
+    Args:
+        src: The file to copy.
+        dest: Where to put it; its parent directory must exist.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as tmp, src.open("rb") as source:
+            shutil.copyfileobj(source, tmp)
+        tmp_path.replace(dest)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def ensure_google_seed(room_id: str, config: Settings) -> None:
     """Copy this deployment's GCP OAuth client credentials into a room, once.
 
@@ -240,5 +267,5 @@ def ensure_google_seed(room_id: str, config: Settings) -> None:
     for src in (config.google_web_creds_path, config.google_installed_creds_path):
         dest = dest_dir / src.name
         if src.exists() and not dest.exists():
-            shutil.copyfile(src, dest)
+            _copy_atomically(src, dest)
             logger.info(f"Seeded Google credential [{src.name}] into room [{room_id}]")

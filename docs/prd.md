@@ -246,7 +246,8 @@ flowchart TD
 - Gate 啟用時，每則訊息進 agent 前先跑 `check_google_authorization`，三態：
   - **blocked**：沒有 token，或 access token 過期且無 refresh token → 只回授權
     連結，不呼叫 agent；同時在背景建立房間目錄與容器（暖機），授權後的下一則不再
-    吃冷啟動；
+    吃冷啟動。取捨：任何傳過一則訊息的房間（含從未授權的）都會擁有一個常駐容器，
+    gate 不再是容器數量的上限——容器的資源上限／閒置回收是待辦；
   - **notice**：有 token 但缺 Drive scope → 照常呼叫 agent，並多推播一則重新授權
     提示（calendar／gmail 仍可用）；
   - **ok**：scope 齊全 → 正常呼叫 agent。

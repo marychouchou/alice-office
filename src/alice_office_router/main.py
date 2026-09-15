@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from alice_office_router.channels import enabled_adapters
 from alice_office_router.config import get_settings
+from alice_office_router.core import cancel_warmups
 from alice_office_router.google_oauth import oauth_router
 from alice_office_router.logging_setup import RequestContextMiddleware, configure_logging
 
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Alice Office Router starting up.")
     get_settings()  # fail fast on misconfiguration (see Settings validators)
     yield
+    cancel_warmups()
     logger.info("Alice Office Router shutting down.")
 
 

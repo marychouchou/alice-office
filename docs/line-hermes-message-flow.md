@@ -142,16 +142,12 @@ flowchart LR
 flowchart TD
     A["get_or_create_container(room_id)"] --> B["docker.client.containers.get('hermes_' + room_id)"]
     B -- NotFound --> C["_create_container()\ndocker run nousresearch/hermes-agent\ncommand: gateway run\nvolume: /opt/data\nnetwork: hermes_global_net"]
-    C --> D[needs_wait = True]
+    C --> G[_get_container_url]
     B -- 找到但 status != running --> E[container.start]
-    E --> D
-    B -- 找到且 running --> F[needs_wait = False]
-    D --> G[_get_container_url]
-    F --> G
-    G --> H{needs_wait?}
-    H -- 是 --> I["輪詢 GET {url}/health\n每秒一次，最多 60 秒"]
-    H -- 否 --> J[回傳 URL]
-    I -- 200 --> J
+    E --> G
+    B -- 找到且 running --> G
+    G --> I["輪詢 GET {url}/health\n每秒一次，最多 60 秒\n（已就緒的第一次就回）"]
+    I -- 200 --> J[回傳 URL]
     I -- 逾時 --> K[raise RuntimeError]
 ```
 
@@ -164,8 +160,9 @@ flowchart TD
 - 首次建立時也會呼叫 `_ensure_config_yaml()`，若房間目錄下還沒有 `config.yaml` 且
   `LLM_BASE_URL`/`LLM_MODEL` 已設定，就寫入預設的 provider 設定，讓新房間不需要人工介入即可開始
   回答問題。
-- 首次建立或從 stopped 重啟時才需要輪詢 `/health`；已在 running 狀態的既有 container
-  直接回傳 URL，不需等待。
+- 三條路徑都會輪詢 `/health` 再回傳 URL（2026-09-15 起）：「running」不等於就緒——
+  gate 擋下時的背景暖機、或 operator `docker restart` 完的 container，都會先 running
+  一段時間才起 api_server。已就緒的 container 第一次 poll 就回，穩態成本是每則一次 GET。
 - URL 依 `ROUTER_IN_DOCKER` 決定：router 在 Docker 內時用 container name 走內部 DNS
   （`http://hermes_<room_id>:8642`）；router 跑在 host（本機開發）時改讀動態發布的
   host port（`http://localhost:<port>`）。

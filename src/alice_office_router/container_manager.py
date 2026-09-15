@@ -321,21 +321,24 @@ def _ensure_config_yaml(room_id: str, config: Settings) -> None:
     logger.info(f"Wrote default config.yaml for room [{room_id}]")
 
 
-def _is_healthy(client: httpx.Client, url: str) -> bool:
-    """Report whether a Hermes agent's health endpoint answers 200 right now.
+def _probe_health(client: httpx.Client, url: str) -> str | None:
+    """Probe a Hermes agent's health endpoint once.
 
     Args:
         client: The HTTP client to poll with.
         url: Base URL of the Hermes agent container.
 
     Returns:
-        True on a 200 response; False on any other status or transport error
-        (the caller keeps polling until its deadline).
+        None when the endpoint answered 200; otherwise a short, content-free
+        reason ("ConnectError", "status 503") the caller logs and folds into
+        its timeout error, so an operator can tell "nothing listening yet"
+        from "listening but unhealthy".
     """
     try:
-        return client.get(f"{url}/health").status_code == 200
-    except httpx.HTTPError:
-        return False
+        response = client.get(f"{url}/health")
+    except httpx.HTTPError as exc:
+        return type(exc).__name__
+    return None if response.status_code == 200 else f"status {response.status_code}"
 
 
 def _wait_until_ready(url: str, timeout: float = _READY_TIMEOUT_SECONDS) -> None:
@@ -352,18 +355,21 @@ def _wait_until_ready(url: str, timeout: float = _READY_TIMEOUT_SECONDS) -> None
         RuntimeError: If the agent does not become healthy within the timeout.
     """
     deadline = time.monotonic() + timeout
-    waited = False
     with httpx.Client(timeout=5.0) as client:
+        reason = _probe_health(client, url)
+        if reason is None:
+            return
+        # Only a container that is actually booting (or broken) gets past the
+        # first probe, so this line stays per-start, not per-turn.
+        logger.info(f"Waiting for Hermes agent at {url} to become ready ({reason})...")
         while time.monotonic() < deadline:
-            if _is_healthy(client, url):
-                return
-            if not waited:
-                # Only a container that is actually booting reaches this line
-                # (a healthy one returned above), so the log stays per-start.
-                logger.info(f"Waiting for Hermes agent at {url} to become ready...")
-                waited = True
             time.sleep(_READY_POLL_INTERVAL_SECONDS)
-    raise RuntimeError(f"Hermes agent at {url} did not become ready within {timeout}s")
+            reason = _probe_health(client, url)
+            if reason is None:
+                return
+    raise RuntimeError(
+        f"Hermes agent at {url} did not become ready within {timeout}s (last: {reason})"
+    )
 
 
 def _get_container_url(
@@ -522,10 +528,14 @@ def get_or_create_container(room_id: str, config: Settings) -> str:
     lock to prevent race conditions during concurrent requests for the same room.
     Always blocks until the api_server health check responds before returning:
     the Hermes gateway takes longer to boot than a simple process start, and a
-    container another caller just created (core's gate-blocked warm-up runs
-    outside the room lock) shows as "running" long before it answers — so
-    "already running" is not proof of readiness. A healthy container answers
-    the first poll, so the steady-state cost is one HTTP GET per turn.
+    container that is "running" is not proof of readiness — one another caller
+    just created (core's gate-blocked warm-up runs outside the room lock), or
+    one an operator just `docker restart`ed to apply a config change, shows as
+    running long before it answers. A healthy container answers the first
+    poll, so the steady-state cost is one HTTP GET per turn. The accepted
+    trade-off: a running container whose api_server is permanently down now
+    costs the full timeout before the turn fails, where it used to fail on the
+    first connection — the room hears the same failure notice either way.
 
     Args:
         room_id: Unique identifier for the chatroom (used for container name and data dir).
