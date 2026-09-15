@@ -355,7 +355,7 @@ Skill 是純檔案，格式照 `data/<room>/skills/` 裡的現成範例
 要讓**所有房間（含之後新建的）**都拿到的 skill，放進 `src/hermes/skill/<category>/<name>/`
 並 rebuild image（`Dockerfile.hermes` 會 COPY 到 `/opt/hermes/skills/`，Hermes 開機的
 manifest sync 自動發到每個房間、跳過房間手改過的副本）。目前只有 `alice/runtime-env`
-（告訴 agent 用 `tools-python`、使用者檔案在 `/opt/data/incoming/`）。
+（告訴 agent 三個 Python 環境各是誰的、使用者檔案在 `/opt/data/incoming/`）。
 
 ### C. Plugin / MCP
 
@@ -526,6 +526,11 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
 到這個 venv；login shell（`/etc/profile.d/90-alice-tools.sh`）也會 export 同一個
 變數，並把 `/opt/node_modules/.bin` 加進 PATH，`/usr/local/bin/tools-python` 是
 指向這個 venv 直譯器的 wrapper script，可在容器內任何 shell 直接呼叫。
+
+**這個 venv 只給我們自己寫的東西用。** Hermes 官方 bundled skill 跑在另一個獨立的
+`/opt/skills/.venv`（terminal 裡的 `python`／`pip` 就是它，官方 skill 文件照原文能跑），
+預裝清單在 `src/hermes/runtime/skills-requirements.txt`，其餘由 agent runtime
+`pip install`（容器本地）。三個環境的分工見 `AGENTS.md`「Hermes Container Model」。
 
 ##### 測試 plugins 修改
 
@@ -825,9 +830,10 @@ alice-office-router/
 │   │   └── google-calendar/      # thin registration，實際 server 是烤進 image 的 npm 套件
 │   ├── plugin/
 │   │   └── local-tools/         # 台灣薪資/法規/數學/記憶/OCR/瀏覽器 工具包
-│   ├── runtime/                 # 共用 Python 工具環境（烤進 image 的 /opt/tools/.venv）
-│   │   ├── pyproject.toml       # third-party 套件清單（sympy/pymupdf/selenium）
+│   ├── runtime/                 # 烤進 image 的 Python 環境定義
+│   │   ├── pyproject.toml       # 自家 plugin/MCP 套件清單 → /opt/tools/.venv（tools-python）
 │   │   ├── uv.lock              # 對應鎖版檔（image build 用 uv sync --locked）
+│   │   ├── skills-requirements.txt # 官方 bundled skill 預裝套件 → /opt/skills/.venv（python/pip）
 │   │   └── profile-tools.sh     # login shell 用，export TOOLS_PYTHON + PATH
 ├── scripts/
 │   └── test_webhook.py          # 手動 end-to-end 測試腳本

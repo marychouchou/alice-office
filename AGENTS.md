@@ -73,6 +73,10 @@ LINE Platform → POST /webhooks/line（LineAdapter）→ core.process_inbound �
   不是這個 repo 寫的。`skills/` 每次開機會做 manifest-based sync（`.bundled_manifest`
   記錄來源 hash），把 image 內建 skill 複製進來但跳過使用者已改過的——房間可以直接
   編輯 `data/<room_id>/skills/<name>/SKILL.md` 客製化，不會被下次開機蓋掉。
+  `src/hermes/skill/` 是這個 repo 自己烤進 image `/opt/hermes/skills/` 的 skill
+  （目前 `alice/runtime-env`，告訴 agent 三個 Python 環境各是誰的），靠同一個 sync
+  到達所有房間。image 層放不了 context file（`.hermes.md`／`AGENTS.md`）：gateway 模式
+  的 context 目錄是 `TERMINAL_CWD`＝`HOME`＝`/opt/data`，也就是房間自己的資料夾。
 - 這個 repo 只負責 write-once 的初始化：`config.yaml`（`_ensure_config_yaml`）、
   MCP／plugin 原始碼（`_ensure_mcp_seed` / `_ensure_plugin_seed`，從
   `src/hermes/{mcp,plugin}/` seed 到 `data/<room_id>/{mcp,plugins}/`）——都只在房間
@@ -84,11 +88,18 @@ LINE Platform → POST /webhooks/line（LineAdapter）→ core.process_inbound �
 - MCP 是 Node ESM，依賴解析靠從檔案位置往上找 `node_modules`（ESM 不吃
   `NODE_PATH`），所以共用依賴烤在 image 的 `/opt/node_modules`，不放進各房間自己的
   `mcp/<name>/` 底下（見 `Dockerfile.hermes`）。
-- Python 第三方套件（sympy／pymupdf／selenium）跟 hermes-agent 自己的 venv 隔離，烤在
-  獨立的 `/opt/tools/.venv`（由 `src/hermes/runtime/pyproject.toml` + `uv.lock` 驅動）：
-  plugin 進程用 `TOOLS_PYTHON` 環境變數解析到這個 venv，skill 的 terminal session 用
-  `tools-python` 指令；`/opt/hermes/.venv`（hermes-agent 自己的 venv）只留 `pyyaml`
-  給 in-process 的 plugin 層（`tools.py` 讀 `config.yaml`）用。
+- **容器裡有三個 Python 環境，刻意分開，出問題才分得清是誰的**（`Dockerfile.hermes`）：
+  - `/opt/hermes/.venv`：hermes-agent 自己的，上游封死（唯讀、`HERMES_DISABLE_LAZY_INSTALLS=1`），
+    我們只加 `pyyaml` 給 in-process 的 plugin 層（`tools.py` 讀 `config.yaml`）用。
+  - `/opt/skills/.venv`：**Hermes 官方 bundled skill** 跑的環境，就是 terminal 裡的
+    `python`／`pip`（PATH 最前面），官方 skill 文件寫的 `python scripts/x.py`、`pip install x`
+    照原文就能跑。預裝只有 `src/hermes/runtime/skills-requirements.txt` 列的（官方 skill
+    文件自己要求、我們確定會用的），其餘 agent runtime `pip install` 現裝——只活在該容器，
+    重建即消失，要長久就升格進清單。上游 image 給 skill 的是沒 pip 的系統 Python，
+    `pip install` 本來就跑不動，這是分出這個 venv 的原因。
+  - `/opt/tools/.venv`：**我們自己的** plugin script／MCP 的環境（`src/hermes/runtime/pyproject.toml`
+    + `uv.lock`），plugin 進程用 `TOOLS_PYTHON`、shell 用 `tools-python` 指令，不在 PATH 上，
+    官方 skill 碰不到它。
 
 ## Commands
 
@@ -161,6 +172,8 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 | 對 Hermes agent 的 HTTP 協定 | `hermes_client.py` |
 | 環境變數與路徑推導 | `config.py` 的 Settings |
 | 新的 agent 能力（工具） | `src/hermes/mcp/<name>/` 或 `src/hermes/plugin/` 的 template，不是 router 的功能 |
+| agent 在每個房間都該知道的環境事實（用哪個 Python、檔案在哪） | `src/hermes/skill/alice/runtime-env/SKILL.md`（烤進 image，見 `Dockerfile.hermes`），不是 config.yaml 也不是 plugin |
+| 官方 bundled skill 需要預裝的 Python 套件 | `src/hermes/runtime/skills-requirements.txt`（→ `/opt/skills/.venv`）；**自家** plugin／MCP 的套件才進 `pyproject.toml`（→ `/opt/tools/.venv`），兩邊不混 |
 
 docker SDK 隔離用最小範例釘死：
 

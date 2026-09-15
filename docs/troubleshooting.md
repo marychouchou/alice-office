@@ -138,13 +138,17 @@ router 的 JSON 行有）；`request_id`、`event_id`、`sender_id` 一律留在
 5. 確認 agent 真的收到請求：`docker logs --tail 50 hermes_<room_id>` 或
    `tail data/<room_id>/logs/agent.log`，找 `/v1/chat/completions`。完全沒有 →
    `ask_hermes_agent` 這次 HTTP call 可能還沒發出或連線失敗，回頭看 router log 的
-   `Hermes agent request failed for room`。
+   `Hermes agent request failed for room`／`Hermes agent request timed out for room`
+   （逾時見 2.10 節）。
 6. 有收到請求但 agent 側報錯：看 `data/<room_id>/logs/errors.log`（WARNING 以上）
    跟 `agent.log` 該次 `session=` 附近的行——`agent.conversation_loop` 會記錄
    `API call #N` 與 `Turn ended`，`Turn ended` 沒出現代表這次 turn 卡住或還在跑。
 7. 確認回覆真的送回 LINE：router log 找 `LINE reply token rejected ... falling
    back to push`（正常）或 `Failed to push LINE reply for room`（真的失敗，通常是
    `LINE_CHANNEL_ACCESS_TOKEN` 或假的 room_id）。
+
+> 1:1 聊天會顯示 LINE 載入動畫直到回覆送出，群組沒有；動畫失敗只記 warning
+> （`Failed to show LINE loading animation for room`）不影響回覆。
 
 用 `uv run python scripts/debug_room.py <room_id>` 可以一次印出第 3、5、6 步要看
 的東西（容器狀態、docker logs、每個 log 檔的 tail），省掉手動下這幾個指令。
@@ -325,31 +329,96 @@ Authorization → `401`、錯 bearer → `401`、壞 `room_key` → `422`、空�
 
 ### 2.9 Agent 說「無法讀取 PDF」／`pymupdf 未安裝`／`OCR 服務連線失敗`
 
-pymupdf 只裝在 `/opt/tools/.venv`（`tools-python`），Hermes 自己的 venv 沒有。症狀來源
-（2026-09-14 Oregon 實例）：agent 照內建 `ocr-and-documents` skill 寫的
-`python scripts/extract_pymupdf.py` 跑，用到 Hermes venv → `ModuleNotFoundError`；接著
-想 `pip install` 又被安全掃描卡成 `pending_approval`（api_server 模式沒有人能核准）。
+容器裡有三個 Python（見 AGENTS.md「Hermes Container Model」）：Hermes 本體的
+`/opt/hermes/.venv`、官方 bundled skill 用的 `/opt/skills/.venv`（terminal 裡的
+`python`／`pip`）、我們自家工具用的 `/opt/tools/.venv`（`tools-python`）。症狀來源
+（2026-09-14 Oregon 實例，舊 image `v1`／`v2`）：當時還沒有 `/opt/skills/.venv`，terminal
+的 `python` 是沒有 pip 的系統 Python，agent 照官方 `ocr-and-documents` skill 跑
+`python scripts/extract_pymupdf.py` → `ModuleNotFoundError`；想 `pip install` 又被安全掃描
+卡成 `pending_approval`（api_server 模式沒有人能核准，見 `approvals.mode`）。
 
-image 現在烤了三層提示（`Dockerfile.hermes`「Tell the agent about the environment」段）：
-`/opt/hermes/skills/alice/runtime-env`、build 時把內建 `ocr-and-documents/SKILL.md`
-的 `python` 改成 `tools-python` + 絕對路徑、`/opt/hermes/.hermes.md` 進 system prompt。
-排查：
+`v3` 起 image 內建 `/opt/skills/.venv`（預裝 `skills-requirements.txt`，含 pymupdf）與
+`alice/runtime-env` skill（Hermes 開機 sync 進每個房間）。排查：
 
 ```bash
-# 1. 房間用的 image 有沒有這三樣（舊 image 都沒有）
-docker exec hermes_<room_id> sh -c 'test -f /opt/hermes/.hermes.md && ls /opt/hermes/skills/alice/runtime-env && grep -c tools-python /opt/hermes/skills/productivity/ocr-and-documents/SKILL.md'
+# 1. 房間用的 image 有沒有這兩樣（v3 之前的 image 都沒有）
+docker exec hermes_<room_id> bash -lc 'command -v python pip; python -c "import pymupdf, sys; print(sys.prefix)"; ls /opt/hermes/skills/alice/runtime-env'
+#    預期：/opt/skills/.venv/bin/python、/opt/skills/.venv/bin/pip、印出 /opt/skills/.venv
 # 2. 房間副本有沒有 sync 到（Hermes 開機 manifest sync；房間手改過的 skill 會被跳過，屬預期）
-docker exec hermes_<room_id> sh -c 'ls /opt/data/skills/alice/runtime-env; grep -c tools-python /opt/data/skills/productivity/ocr-and-documents/SKILL.md'
-# 3. 直接驗證抽文字這條路本身是通的
-docker exec hermes_<room_id> tools-python /opt/data/skills/productivity/ocr-and-documents/scripts/extract_pymupdf.py "/opt/data/incoming/<檔名>.pdf" --pages 0
+docker exec hermes_<room_id> ls /opt/data/skills/alice/runtime-env
+# 3. 直接驗證抽文字這條路本身是通的（跟官方 skill 文件一樣用 python）
+docker exec hermes_<room_id> bash -lc 'python /opt/data/skills/productivity/ocr-and-documents/scripts/extract_pymupdf.py "/opt/data/incoming/<檔名>.pdf" --pages 0'
 ```
 
-沒有 1 → bump `HERMES_IMAGE` 到含這段的 image，`docker rm -f hermes_<room_id>` 讓房間用新
+沒有 1 → bump `HERMES_IMAGE` 到 v3 以上，`docker rm -f hermes_<room_id>` 讓房間用新
 image 重建（`data/<room_id>/` 不動）。有 1 沒 2 → `docker restart` 觸發一次 sync。
+官方 skill 要的套件不在預裝清單 → agent 會自己 `pip install`（容器本地、重建消失）；
+常用的就加進 `skills-requirements.txt` 重 build。**自家** plugin 的套件缺了是另一個環境的事，
+看 `src/hermes/runtime/pyproject.toml` 與 `tools-python -c "import …"`。
 
-`local-tools` plugin 的 `image_ocr` 工具是另一條路，目前指向不存在的
-`auxiliary.vision.base_url`（預設 127.0.0.1:8001），所以「OCR 服務連線失敗」是預期的、可忽略；
-主模型本身看得懂圖片，圖片走 Hermes 內建 `vision_analyze` 即可。
+PDF／圖片一律靠 `local-tools` 的 `image_ocr` 工具呼叫，**沒有自動注入**（2026-09-15 移除
+`pre_llm_call` hook：hook 注入的內容不會進 session 持久化，下一輪就消失，模型卻會憑印象
+編造內容）——所以「agent 說讀不到檔案」要先確認它真的呼叫了 `image_ocr`（見 2.2 節的
+`tool_executor` log）。
+
+### 2.10 使用者說沒收到回覆，log 是 `agent_failed` / `ReadTimeout` / `TimeoutError`
+
+`agent_failed` 代表這一輪沒把 agent 的答案送回房間。看 envelope 的 `error` 分類：
+
+Router 是用 SSE streaming 呼叫 agent 的，Hermes 每靜默 30 秒會送一次 `: keepalive`，所以
+逾時有兩條、意義完全不同（改完任一個都要重啟 router：`docker compose up -d webhook_router`）：
+
+- `agent: ReadTimeout`（**idle／靜默逾時**，router log 會寫 `hit the idle timeout ... after
+  120.0s`）→ 連 keepalive 都沒進來，**agent 或容器八成卡死了**，不是「算太久」。先照 2.1 節
+  第 3～6 步看容器還在不在、`agent.log` 最後停在哪；真的是某類工具會長時間凍住整個進程
+  才調大 `HERMES_IDLE_TIMEOUT_SECONDS`（`.env`，預設 120 秒）。
+- `agent: TimeoutError`（**ceiling／絕對上限**，router log 會寫 `hit the ceiling timeout ...
+  after 3600.0s`）→ agent 一路都活著（keepalive 有來），只是整輪真的跑超過一小時。正常
+  不該踩到；要讓這種超長任務跑完就調大 `HERMES_REQUEST_TIMEOUT_SECONDS`（`.env`，預設
+  3600 秒），也順便看看是不是 prompt 把它推進了無盡的工具迴圈。
+- 兩種逾時 **agent 本身都不會被中斷**：那一輪的答案仍然寫進房間的 Hermes session，所以請
+  使用者「再問一次」很便宜，模型接得上前一輪的脈絡。
+- `agent: ValueError: Hermes agent failed: ...` → agent 自己回報該輪失敗（結束 chunk 的
+  `hermes.failed`），冒號後面就是它給的原因；往 `data/<room_id>/logs/errors.log` 對時間找。
+- 其他（`container: ...`、HTTP 4xx/5xx、`ValidationError`）→ 照 2.1 節從第 3 步往下查。
+
+回覆被截斷（使用者說「講到一半就沒了」）不會變成 `agent_failed`：router 照送截到一半的
+文字，只在 router log 記一筆 `hermes_agent_truncated`（帶 `finish_reason="length"`），那是
+LLM 的 max tokens 設定問題，不是 router 的逾時。
+
+以上每一種使用者**都會**收到一則固定提示（逾時兩種走 `core.AGENT_TIMEOUT_NOTICE`，其餘走
+`AGENT_FAILURE_NOTICE`），不會是完全沒有回應；如果使用者連提示都沒收到，問題在送訊那一段，
+看 2.1 節第 7 步。
+
+同一房間的訊息會排隊（log `room_turn_queued`，欄位 `waited_ms`），上一輪跑很久時後面的
+訊息會等，看起來像「沒回」其實是還沒輪到。
+
+```bash
+uv run python scripts/conversations.py stats --since 7d      # agent_failed 占比
+grep -E 'ReadTimeout|TimeoutError' data/_conversations/<room_key>.jsonl | tail
+docker compose logs webhook_router | grep -E 'idle timeout|ceiling timeout|hermes_agent_truncated'
+```
+
+### 2.11 使用者收到「系統暫時無法回應」，envelope error 是 `Context length exceeded`
+
+Hermes 每次請求預設預留視窗一半當輸出（131K 視窗就是 65,536），prompt 到 65K 就撞
+`ContextWindowExceededError`，而 Hermes 自動壓縮在小視窗下最低 75% 才觸發，永遠來不及。
+qwen3 的思考模式會讓一次呼叫吐出數萬 reasoning token，且 Hermes 會把它回傳給同一輪之後
+每次呼叫，所以幾次工具呼叫後就滿了（2026-09-15 實例：第一輪 64,873 個輸出 token，第六次
+呼叫 65,537 + 65,536 > 131,072）。`src/hermes/config.template.yml` 對新房間已預設三件事：
+
+- `model.context_length: 262144`：provider 是 LiteLLM proxy，`/model/info` 不回報視窗大小，Hermes
+  對 qwen 會寫死 131,072（真實 `max_model_len` 是 262,144，用超大 `max_tokens` 打一次端點就能從
+  錯誤訊息讀到）。少一半視窗的後果是每兩次呼叫就壓縮一次、原地打轉。
+- `model.max_tokens: 32768`：輸出預留 32K（一次寫 13 KB Markdown 的 `write_file` 要 16K 以上），
+  prompt 可長到約 230K，壓縮（197K）先觸發。
+- `providers.custom.extra_body.chat_template_kwargs.enable_thinking: false`：關掉思考模式。
+- `approvals.mode: smart`：被誤判的 `python -c`／`execute_code` 由輔助模型自動放行，
+  不再讓 agent 為了驗算多燒三四次呼叫。
+
+既有房間要自己改 `config.yaml`（write-once）再 `docker restart`。跨輪的保險是 router 的
+`SESSION_ROTATE_PROMPT_TOKENS`（預設 120000，高於 Hermes 壓縮點；想讓 router 先換 epoch
+帶交接摘要，調到 80000 左右）。該輪的 session 已塞滿時，下一句先 `/new`。
 
 ## 3. 指令速查表
 

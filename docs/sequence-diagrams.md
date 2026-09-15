@@ -30,9 +30,11 @@ sequenceDiagram
     R-->>LP: 200 {"status":"ok"}
     Note over R,H: 以下在背景任務中執行
     R->>C: process_inbound(InboundMessage)
+    C->>C: 取得該房間的 turn lock（同房間前一輪還在跑就排隊）
     C->>C: check_google_authorization → ok
     C->>C: get_or_create_container(room_key)
-    C->>H: POST /v1/chat/completions<br/>X-Hermes-Session-Id: session_id_for(room_key, epoch)
+    C->>H: POST /v1/chat/completions（stream: true，SSE）<br/>X-Hermes-Session-Id: session_id_for(room_key, epoch)<br/>system=DIRECT_SYSTEM_PROMPT
+    Note over C,H: 回覆以 SSE 串流接收：閒置逾時 HERMES_IDLE_TIMEOUT_SECONDS（Hermes 每 30 秒送 keepalive）、絕對上限 HERMES_REQUEST_TIMEOUT_SECONDS；詳見 router-hermes-agent-protocol.md
     H-->>C: 回覆文字 + usage.prompt_tokens
     C-->>R: [reply]
     R->>R: 去 Markdown + split_for_line
@@ -47,6 +49,11 @@ sequenceDiagram
 細節（envelope 解析、多 event 批次、媒體同步下載、錯誤處理總表）見
 `docs/line-hermes-message-flow.md`；router↔container 協定欄位見
 `docs/router-hermes-agent-protocol.md`。
+
+> 「取得該房間的 turn lock」沒有單獨畫一條 lane：它是 `core._route` 裡一個 process-local
+> 的 per-room `asyncio.Lock`，同房間的第二則訊息在這裡排隊（FIFO，不丟訊息，等到時記一筆
+> `room_turn_queued` log），不同房間互不影響。`system=DIRECT_SYSTEM_PROMPT` 是部署層對
+> 1:1 回覆形狀的規範（精簡、大任務分段交付），見 `docs/prd.md` FR-01。
 
 ---
 
@@ -113,7 +120,7 @@ sequenceDiagram
     C->>GC: peek_observed(room_key)
     GC-->>C: 先前累積的背景訊息（可能為空）
     C->>C: build_group_prompt(observed, msg)<br/>[name|id] 標籤 + 背景區塊
-    C->>H: POST /v1/chat/completions<br/>system=GROUP_SYSTEM_PROMPT
+    C->>H: POST /v1/chat/completions（stream: true，SSE）<br/>system=GROUP_SYSTEM_PROMPT
     H-->>C: 回覆文字
     C->>GC: clear_observed(peeked)（依 timestamp cutoff，非位置；<br/>agent 成功回覆就清，不論是否 silence）
     alt 回覆是 silence token（NO_REPLY 等）
@@ -238,7 +245,7 @@ sequenceDiagram
             R->>H: 對剛退役 session（epoch N 的 id）索取 ≤300 字交接摘要
             H-->>R: 摘要（失敗則放棄，乾淨開新 epoch）
         end
-        R->>H: POST /v1/chat/completions<br/>X-Hermes-Session-Id: session_id_for(room_key, epoch)<br/>有摘要時前置注入 user message
+        R->>H: POST /v1/chat/completions（stream: true）<br/>X-Hermes-Session-Id: session_id_for(room_key, epoch)<br/>有摘要時前置注入 user message
         H-->>R: 回覆 + usage.prompt_tokens
         R->>S: complete_turn：記 token 水位（epoch CAS）
         R-->>U: 回覆（使用者對輪替本身無感）
@@ -270,7 +277,7 @@ sequenceDiagram
         R->>H: GET /health
     end
     H-->>R: 200 OK（ready）
-    R->>H: POST /v1/chat/completions（第一個真正的 chat completion）
+    R->>H: POST /v1/chat/completions（第一個真正的 chat completion，stream: true）
     H-->>R: 回覆
 ```
 

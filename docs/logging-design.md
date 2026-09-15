@@ -166,7 +166,7 @@ Router 的 `room_key` 刻意**不**當 Loki label 而是留在 JSON 行內：一
 | `event_id` | LINE `webhookEventId`（`adapter.py:136` 已取出） | `LineAdapter._dispatch_event`，每個 event 進入時 bind，離開時 unbind |
 | `room_key` | `InboundMessage.room_key` | `core.process_inbound` 開頭 bind（`bound_contextvars` context manager，離開自動還原） |
 | `container` | `hermes_<room_id>` | `container_manager.get_or_create_container` 內部 |
-| `duration_ms` | 對 Hermes agent HTTP 呼叫耗時 | `hermes_client.py` 呼叫完成那一行 log 的 `extra`／kwargs |
+| `duration_ms` | 對 Hermes agent HTTP 呼叫耗時 | `hermes_client.py` 呼叫完成那一行 log（`event="hermes_agent_call"`）的 kwargs，同一行還帶 `session_id`／`status`／`chunks`（收到幾個 SSE chunk）／`finish_reason`／`prompt_tokens` |
 
 背景任務（群組訊息的 `_schedule_group_message`、join greeting）從 request 分出去時
 contextvars 會被 `asyncio.create_task` 自動複製，所以 `request_id` 仍會跟過去；但要在
@@ -417,7 +417,7 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 | `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
 | `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
 | `gate_status`, `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
-| `delivered` | adapter 送回 LINE 是否成功——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
+| `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `core.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
 
 `process_inbound` 拆成 `_route` + 薄包裝的做法不變；只是發出點移到 adapter，讓
 `delivered` 能一次寫進去而不是事後補一行 error log。

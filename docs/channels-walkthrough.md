@@ -213,6 +213,22 @@ Hermes agent 一次呼叫可能跑幾十秒到幾分鐘，但 LINE 期待 webhoo
 （否則重送）。所以 handler 先回 200，真正的「問 agent → 送回覆」在 FastAPI
 background task 裡跑。這也解釋了 dedup 為什麼重要——回 200 前的任何延遲都可能觸發重送。
 
+這幾十秒到幾分鐘裡使用者原本什麼都看不到，所以 `_process_and_reply` 在呼叫
+`process_inbound` 前先包一層 `_loading_animation`（只有 1:1，`is_group=False`）：
+
+```python
+async with self._loading_animation(room_key, config, enabled=not is_group):
+    result = await process_inbound(msg, config)
+```
+
+它先送一次 `client.show_loading_animation`（`POST /v2/bot/chat/loading/start`，
+[官方文件](https://developers.line.biz/en/docs/messaging-api/use-loading-indicator/)），
+再開一個 companion asyncio task 每 50 秒補送一次——LINE 一次動畫最多 60 秒，而且
+只支援一對一聊天，群組／多人房間送了也沒用，所以走 `enabled=False` 直接 no-op。
+`async with` 結束時 refresher 會被 cancel，接著送出的回覆本身也會讓動畫消失。
+整條路徑純屬視覺效果：`show_loading_animation` 自己吞掉所有例外只記 warning，
+動畫失敗不影響回覆。
+
 ---
 
 ## Step 5：channel-free 核心（`core.py`）
