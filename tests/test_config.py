@@ -56,6 +56,25 @@ def test_host_mode_accepts_overridden_paths() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Agent request budget
+# ---------------------------------------------------------------------------
+
+
+def test_hermes_request_timeout_defaults_to_one_hour() -> None:
+    """The absolute ceiling is a safety valve, not the normal liveness test."""
+    settings = Settings(**_REQUIRED)  # type: ignore[arg-type]
+
+    assert settings.HERMES_REQUEST_TIMEOUT_SECONDS == 3600.0
+
+
+def test_hermes_idle_timeout_defaults_to_two_minutes() -> None:
+    """Liveness is silence-based: 120s covers several missed 30s keepalives."""
+    settings = Settings(**_REQUIRED)  # type: ignore[arg-type]
+
+    assert settings.HERMES_IDLE_TIMEOUT_SECONDS == 120.0
+
+
+# ---------------------------------------------------------------------------
 # Group-chat settings + path helper
 # ---------------------------------------------------------------------------
 
