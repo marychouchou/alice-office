@@ -5,6 +5,10 @@
 # Rules:
 # - One line per package, pinned, with the bundled skill whose own SKILL.md
 #   asks for it. This file is the record of what we promise official skills.
+# - Exception: this venv is also where the built-in `execute_code` tool runs
+#   the model's Python (PATH's `python`, see Dockerfile.hermes), not tied to
+#   any one bundled skill's SKILL.md — packages pre-baked for that sandbox are
+#   marked with their purpose instead of a skill name.
 # - Anything NOT listed here the agent installs itself at runtime with plain
 #   `pip install` (as the skill docs say). That install is container-local and
 #   disappears on container recreate — promote it here to keep it.
@@ -13,3 +17,5 @@
 
 pymupdf==1.28.2        # productivity/ocr-and-documents — scripts/extract_pymupdf.py
 pymupdf4llm==1.28.2    # productivity/ocr-and-documents — --markdown mode
+numpy==2.5.3           # execute_code sandbox — numeric/array computation
+sympy==1.14.0          # execute_code sandbox — exact/symbolic math (matches /opt/tools/.venv pin)

@@ -96,7 +96,8 @@ LINE Platform → POST /webhooks/line（LineAdapter）→ core.process_inbound �
     照原文就能跑。預裝只有 `src/hermes/runtime/skills-requirements.txt` 列的（官方 skill
     文件自己要求、我們確定會用的），其餘 agent runtime `pip install` 現裝——只活在該容器，
     重建即消失，要長久就升格進清單。上游 image 給 skill 的是沒 pip 的系統 Python，
-    `pip install` 本來就跑不動，這是分出這個 venv 的原因。
+    `pip install` 本來就跑不動，這是分出這個 venv 的原因。也是 `execute_code` 的直譯器
+    （靠 `VIRTUAL_ENV`，不是 PATH）。
   - `/opt/tools/.venv`：**我們自己的** plugin script／MCP 的環境（`src/hermes/runtime/pyproject.toml`
     + `uv.lock`），plugin 進程用 `TOOLS_PYTHON`、shell 用 `tools-python` 指令，不在 PATH 上，
     官方 skill 碰不到它。
