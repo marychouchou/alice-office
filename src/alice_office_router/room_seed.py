@@ -219,11 +219,11 @@ def ensure_google_seed(room_id: str, config: Settings) -> None:
 
     Called from both container_manager._create_container (so a fresh
     container's bind mount has something to see) and
-    google_oauth.oauth_start: a room's very first message is gated *before*
-    its container/data dir would otherwise be created (see
-    core.process_inbound running the gate ahead of
-    container_manager.get_or_create_container), so the OAuth routes must be
-    able to seed a room's google/ dir on demand, not only at
+    google_oauth.oauth_start: a room's very first message is usually gated,
+    and the gate-blocked turn only *starts* the container in the background
+    (core._warm_container) — the user can click the auth link before that
+    warm-up has created the data dir, or after it failed — so the OAuth
+    routes must be able to seed a room's google/ dir on demand, not only at
     container-creation time.
 
     No-op when this deployment has no Google OAuth configured.

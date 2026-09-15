@@ -86,7 +86,7 @@ flowchart TD
     Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"Google 整合已啟用？"}
     Enabled -- "否" --> Ok1["ok：直接放行"]
     Enabled -- "是" --> HasToken{"有 token？"}
-    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent"]
+    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent、背景暖機容器"]
     HasToken -- "有" --> Expired{"過期且無 refresh_token？"}
     Expired -- "是" --> Blocked
     Expired -- "否" --> Scopes{"scope 齊全？<br/>(calendar/gmail.modify/drive)"}
@@ -107,7 +107,7 @@ flowchart TD
 
 - `ruff` / `mypy --strict` / `pytest`（112 tests，含新增 23 個）
 - image `alice-hermes-agent:v3` build + smoke test
-- Docker E2E：無 token → gate 擋下、容器不建立；`/oauth/start` 302 帶正確參數、錯誤路徑 400；寫入 token 後 → 容器建立、`/opt/google-workspace` 掛載正確、四個 MCP（gmail/drive/google-calendar/secretary）全部 `✓ enabled`、以 uid 10000 實測 calendar 讀到 token、gmail stdio tools/list 回 8 個工具、agent 回覆 200
+- Docker E2E：無 token → gate 擋下（agent 不呼叫），容器在背景暖機建立（2026-09-15 起；原本是不建立）；`/oauth/start` 302 帶正確參數、錯誤路徑 400；寫入 token 後 → 容器建立、`/opt/google-workspace` 掛載正確、四個 MCP（gmail/drive/google-calendar/secretary）全部 `✓ enabled`、以 uid 10000 實測 calendar 讀到 token、gmail stdio tools/list 回 8 個工具、agent 回覆 200
 
 ## Agent 如何透過 MCP 操作 Calendar / Gmail / Drive
 

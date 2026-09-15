@@ -190,7 +190,7 @@ flowchart TB
   line_adapter -- "InboundMessage" --> core
   api_adapter -- "InboundMessage" --> core
   core -- "check_google_authorization(room_key)<br/>→ blocked / notice / ok" --> oauth
-  core -- "get_or_create_container(room_key)<br/>→ 容器 URL" --> cm
+  core -- "get_or_create_container(room_key)<br/>→ 容器 URL（gate blocked 時背景暖機）" --> cm
   core -- "peek/record/clear observed buffer、<br/>組 prompt、判斷 silence" --> group_ctx
   core -- "check_reset_command／reset_session（手動重置）、<br/>begin_turn／complete_turn（自動輪替、epoch 讀寫）" --> sess_hyg
   core -- "ask_hermes_agent(url, session_id, text)" --> hc

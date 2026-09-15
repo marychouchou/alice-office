@@ -54,7 +54,10 @@ JSON 物件（`docker compose logs --no-log-prefix webhook_router | jq .`），�
 
 `container_manager.py` 另外會記錄 `Creating new container for room`、
 `Seeded template [...] into ...`、`Container ... created.`、
-`Waiting for ... to become ready...`、`Docker API error for container ...`。
+`Waiting for Hermes agent at ... to become ready...`（只在容器真的還沒就緒時出現）、
+`Docker API error for container ...`。gate 擋下時的背景暖機由 `core.py` 記錄
+`Container warm for room ...`（INFO）／`Container warm-up failed for room ...`
+（ERROR，使用者不會收到通知，下一則訊息走正常路徑再試）。
 
 注意：`line_webhook` 本身在簽章驗證通過、events 解析完之後**沒有**額外印一行
 「收到 webhook」——訊號是每個 request 一行的 `"event":"http_request"`（帶

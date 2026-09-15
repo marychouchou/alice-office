@@ -650,7 +650,7 @@ flowchart TD
     Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"google_oauth_enabled<br/>且 GOOGLE_OAUTH_GATE？"}
     Enabled -- "否" --> Ok1["ok：直接放行"]
     Enabled -- "是" --> HasToken{"這個房間自己的<br/>tokens.json 有 token？"}
-    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent"]
+    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent、背景暖機容器"]
     HasToken -- "有" --> Expired{"access_token 過期？"}
     Expired -- "是且無 refresh_token" --> Blocked
     Expired -- "否，或有 refresh_token" --> Scopes{"scope 包含<br/>calendar/gmail.modify/drive？"}

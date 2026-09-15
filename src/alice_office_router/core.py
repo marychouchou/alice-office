@@ -74,6 +74,17 @@ struct_logger = structlog.stdlib.get_logger(__name__)
 # number of rooms, which already costs a container each.
 _room_locks: dict[str, asyncio.Lock] = {}
 
+# In-flight container warm-ups, one per room. A gate-"blocked" turn starts the
+# room's container here so the message the user sends after authorizing lands
+# on a warm one instead of paying the 30–60 s cold start; the auth reply itself
+# is not delayed. Keyed by room so a second blocked message while the first
+# warm-up is still running reuses it instead of spawning another thread. The
+# entry is dropped when the task finishes (success or failure), so a later
+# blocked message retries a warm-up that failed — deduplication is in-flight
+# only, never "once ever". Holding the Task also keeps it from being garbage
+# collected mid-flight. Process-local, like `_room_locks`.
+_warmups: dict[str, asyncio.Task[None]] = {}
+
 
 # Cap on the free-text half of an error string. `error` rides the log stream off
 # the host into Loki, where message content must never go (conversation_log's
@@ -133,6 +144,49 @@ def _describe_error(origin: str, exc: Exception) -> str:
         return f"{origin}: {name} ({exc.error_count()} error(s) at {fields})"
     detail = str(exc)[:_ERROR_DETAIL_MAX_CHARS].strip()
     return f"{origin}: {name}: {detail}" if detail else f"{origin}: {name}"
+
+
+async def _run_warmup(room_key: str, config: Settings) -> None:
+    """Body of one warm-up: resolve the room's container off-loop, log the outcome.
+
+    The broad catch mirrors `_ask_agent`'s guard around the same call: docker's
+    exception types cannot be imported here (container_manager is the only
+    module allowed to), and whatever went wrong must end in a log line, never
+    an unobserved task exception. The user is not told — the next real message
+    walks the normal path and surfaces AGENT_FAILURE_NOTICE if it still fails.
+
+    Args:
+        room_key: The room whose container to start.
+        config: Application settings.
+    """
+    try:
+        await asyncio.to_thread(get_or_create_container, room_key, config)
+    except Exception as exc:
+        reason = _describe_error("container", exc)
+        logger.error(f"Container warm-up failed for room {room_key}: {reason}")
+        return
+    logger.info(f"Container warm for room {room_key}")
+
+
+def _warm_container(room_key: str, config: Settings) -> None:
+    """Start the room's container in the background, deduplicated per room.
+
+    Returns immediately; the caller replies without waiting. No extra log
+    context needs binding: `asyncio.create_task` copies the current
+    contextvars (process_inbound's `room_key`, the adapter's request fields)
+    and `asyncio.to_thread` carries them into the worker thread, so every line
+    the warm-up logs — including container_manager's own `container=` — is
+    already tagged with the room.
+
+    Args:
+        room_key: The room whose container to start.
+        config: Application settings.
+    """
+    if room_key in _warmups:
+        return
+    task = asyncio.create_task(_run_warmup(room_key, config), name=f"warmup:{room_key}")
+    _warmups[room_key] = task
+    task.add_done_callback(lambda _done: _warmups.pop(room_key, None))
 
 
 @dataclass(frozen=True)
@@ -312,7 +366,10 @@ async def _ask_agent(
         rotation flag, latency and token count the envelope records.
     """
     try:
-        target_url = get_or_create_container(room_key, config)
+        # Off-loop: the call blocks up to _READY_TIMEOUT_SECONDS on a cold
+        # room, and may wait on container_manager's lock while a warm-up
+        # thread holds it — neither should stall every other room's turn.
+        target_url = await asyncio.to_thread(get_or_create_container, room_key, config)
     except Exception as exc:
         reason = _describe_error("container", exc)
         logger.error(f"Failed to get/create container for room {room_key}: {reason}")
@@ -482,6 +539,10 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
 
     status, message = check_google_authorization(msg.room_key, config)
     if status == "blocked" and message is not None:
+        # The room's first message is usually the blocked one, so this is
+        # where the container's cold start would otherwise land on the
+        # post-authorization message: start it now, reply without waiting.
+        _warm_container(msg.room_key, config)
         return RouteResult(texts=[message], outcome="blocked", gate_status=status)
 
     texts: list[str] = []
@@ -593,7 +654,8 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> InboundResul
         message is only observed and returns nothing; a manual reset command
         rotates the room's session and returns only the fixed confirmation
         (agent not called); gate "blocked" returns only the authorization
-        message (agent not called); "notice" returns the notice followed by the
+        message (agent not called) and starts the room's container in the
+        background; "notice" returns the notice followed by the
         agent reply; "ok" returns just the agent reply. A container/agent
         failure delivers a fixed notice in place of the reply (the timeout
         wording when the router stopped waiting), so the room is never answered

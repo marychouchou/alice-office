@@ -243,7 +243,8 @@ texts = await process_inbound(msg, config)   # ← 從這行起，世界裡沒�
 `process_inbound`（`core.py:54`）只有三步：
 
 1. **Google OAuth gate**：`check_google_authorization(room_key)` 回傳三態——
-   `blocked`（只回授權訊息，不問 agent）／`notice`（提示 + 照常問 agent）／`ok`；
+   `blocked`（只回授權訊息，不問 agent，但背景先把容器暖起來）／`notice`（提示 +
+   照常問 agent）／`ok`；
 2. **容器解析**：`get_or_create_container(room_key)` 拿到（必要時建立）
    `hermes_<room_key>` 容器的 URL；
 3. **問 agent**：`ask_hermes_agent(url, room_key, text)`。
