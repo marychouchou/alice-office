@@ -143,6 +143,13 @@ class TurnEnvelope(BaseModel):
             was made.
         prompt_tokens: The reply's reported prompt_tokens (see AgentReply's
             caveat — a sum across tool-loop iterations, not a context size).
+        tool_calls: How many tool calls Hermes made answering this turn, or
+            None when no call was made or the count could not be read (a
+            bracket diff of GET /api/sessions/{id}, see hermes_client).
+        api_calls: How many internal LLM API calls this turn made, same
+            caveats as tool_calls. Together the two turn a "why did this
+            take 15 minutes" question into numbers this line already answers
+            (docs/router-hermes-agent-protocol.md).
         error: Short reason string when the turn failed; None otherwise.
         delivered: Whether the channel actually sent the reply — True/False, or
             None when there was nothing to deliver (observed, silence, a failed
@@ -168,6 +175,8 @@ class TurnEnvelope(BaseModel):
     rotated: bool = False
     agent_duration_ms: float | None = None
     prompt_tokens: int | None = None
+    tool_calls: int | None = None
+    api_calls: int | None = None
     error: str | None = None
     delivered: bool | None = None
 

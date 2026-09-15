@@ -11,10 +11,12 @@ container，以及 container 內的 Hermes Agent 怎麼收、怎麼回。內容�
 
 ## 一句話總結
 
-Router 與 Hermes container 之間**只有一種**溝通管道：HTTP，`POST
-/v1/chat/completions`（Hermes 內建的 OpenAI-compatible `api_server`
-platform）。純文字進、純文字出；container 完全不知道 LINE 的存在，也拿不到任何
-LINE 憑證。
+Router 與 Hermes container 之間走同一個 HTTP 介面：Hermes 內建的
+OpenAI-compatible `api_server` platform。主線是 `POST /v1/chat/completions`——
+純文字進、純文字出；container 完全不知道 LINE 的存在，也拿不到任何 LINE
+憑證。同一個介面上還有一條輔助線 `GET /api/sessions/{session_id}`
+（2026-09-15 加入，見下方「輔助請求」），只用來讀這一輪打了幾次工具／幾次 LLM
+API 供 log 使用，不影響對話本身。
 
 ## 前置步驟：Router 怎麼找到 container 的位址
 
@@ -117,6 +119,36 @@ Body:
   - `prompt_tokens` 取自結束 chunk 的 `usage.prompt_tokens`（缺 `usage` 或回報 <=0 →
     正規化為 `None`，0 是 server「沒統計」的預設），供 session 輪替的 token 水位判斷用
     （累計語意警語見 `docs/session-hygiene.md`）。
+  - `tool_calls`／`api_calls`（2026-09-15 加入）：這一輪 Hermes 內部的工具呼叫次數／LLM
+    API 呼叫次數，供 `docs/logging-design.md` 的 `hermes_agent_call` log 事件與
+    turn envelope 使用（動機：診斷「一輪考卷從 3 分鐘拖到 15 分鐘」這類重試風暴，不用
+    SSH 進容器翻 `logs/agent.log`）。`/v1/chat/completions` 的 `usage` 只有 OpenAI 的
+    token 三件組，不帶這兩個數字——見下方「輔助請求」。
+
+### 輔助請求：`GET /api/sessions/{session_id}`（供 `tool_calls`／`api_calls` 取差值）
+
+`ask_hermes_agent` 在自己的 POST 之前、之後各打一次這個端點（同一個 Bearer token，
+`hermes_client._fetch_session_counts`），把回應的 `session.tool_call_count`／
+`session.api_call_count` 前後相減，當作這一輪的貢獻（`hermes_client._count_delta`）：
+
+- 這兩個數字是**整個 session 的累計值**，不是單輪——`GET /api/sessions/{id}` 是 Hermes
+  唯一公開它們的地方，所以只能用前後取差值的方式還原單輪貢獻。
+- 呼叫前的 session 若還不存在（新 epoch 的第一輪，Hermes 要等第一次
+  `/v1/chat/completions` 才會建立該 session）→ 404，視為基準 0（不是「未知」）。
+- 任一次讀取失敗（逾時、非 2xx、回應格式不符）→ 兩個欄位一律 `None`，代表「不知道」而
+  非「這一輪打了 0 次」；這條輔助請求的逾時獨立設定（10 秒），從不借用這一輪自己的
+  idle／ceiling 預算，讀取失敗也從不讓這一輪的主要回覆跟著失敗（fail-soft）。
+- `session_id` 可能帶 `#`（輪替後的 epoch 後綴），組 URL 時必須 percent-encode
+  （`urllib.parse.quote(session_id, safe="")`），否則會被當成 URL fragment 整段砍掉。
+
+**已知取捨（未做）**：Hermes 內部工具失敗時只在容器內
+`logs/agent.log`／`errors.log` 印一行
+`WARNING agent.tool_executor: Tool X returned error`（`agent/tool_executor.py` 的
+`_detect_tool_failure`），`state.db` 與 `/api/sessions` 都沒有對應的「這次呼叫是否失敗」
+欄位；chat completions 的 SSE `hermes.tool.progress` 事件也不帶錯誤旗標（那個欄位只接進
+`/v1/runs` 的事件回呼，我們用的 `/v1/chat/completions` 沒有接這條線）。要拿到
+「這一輪工具呼叫失敗幾次」目前只剩 tail 這行 log 一條路，見 `docs/logging-design.md`
+§5.1 的同一則補充。
 
 ### 媒體訊息不走這條 API body
 
@@ -208,8 +240,10 @@ sequenceDiagram
 
 ## 關鍵設計要點
 
-- **單一協定**：router↔container 只有 `/v1/chat/completions` 這一條路，沒有
-  其他 API 或直接的 IPC。
+- **單一介面，兩條路**：router↔container 只走 Hermes 的 `api_server` platform，
+  沒有其他 API 或直接的 IPC。對話走 `/v1/chat/completions`；`GET
+  /api/sessions/{session_id}` 是唯讀的輔助線，只供 log 用的呼叫計數，從不影響
+  對話或失敗時的使用者回覆（fail-soft，見「輔助請求」）。
 - **隔離靠 container，不靠協定**：協定本身（Bearer + session header）很單純，
   真正的房間隔離來自「一個 room_id 一個 Docker container」這個更外層的設計。
 - **container 對 LINE 零知情**：不傳憑證、不傳 LINE 專屬欄位，agent 收到的只是
