@@ -122,6 +122,16 @@ router 的 JSON 行有）；`request_id`、`event_id`、`sender_id` 一律留在
 
 ### 2.1 傳訊息沒回應（端到端）
 
+0. **host 模式先排除 dev server 自己在 reload**：`fastapi dev` 預設監看整個 repo，
+   `data/` 也在裡面，Hermes 容器每分鐘寫一次 `cron/ticker_heartbeat`、agent 產出的
+   `.py`／`.md` 也落在房間目錄，每次寫入都觸發 reload。uvicorn reload 的關機是「停收
+   新請求、等 in-flight 的那輪 agent 對話結束才退出」，所以症狀很特別：`curl
+   localhost:8000/docs` 卡住不回（不是 connection refused），但 `data/<room_id>/logs/
+   agent.log` 顯示 agent 還在正常打 LLM。確認方式：`ps -o command= -p $(pgrep -f
+   "fastapi dev" | head -1)` 看指令有沒有 `--reload-dir src`；`pgrep -P <該 pid>`
+   列出的 worker PID 如果隔一分鐘就換，就是它。解法：改用
+   `uv run fastapi dev src/alice_office_router/main.py --reload-dir src` 重啟
+   （2026-09-15 實際踩到：一輪 20 分鐘的考卷作答期間，所有 LINE 訊息都被丟掉）。
 1. 確認訊息真的打到 router：`docker compose logs --tail 50 webhook_router`（或
    host 模式看 terminal），找 `POST /webhook`。完全沒出現 → 問題在 LINE 平台／
    ngrok／domain，不是這個 repo 的問題。出現但是 `400` → LINE 簽章驗證失敗
