@@ -2,6 +2,34 @@
 
 LINE OA 多租戶 Webhook 路由器。接收來自 LINE 平台的 Webhook，依據聊天室 ID 動態建立隔離的 Docker 容器（真實的 [Hermes Agent](https://github.com/NousResearch/hermes-agent)），把訊息轉發給對應容器的 LLM 大腦，再由 router 自己把回覆推播回 LINE。
 
+## 目錄
+
+- [架構概覽](#架構概覽)
+- [LINE 訊息類型支援](#line-訊息類型支援)
+- [部署模式](#部署模式)
+  - [選配：集中式 log（Loki）](#選配集中式-logloki)
+- [環境需求](#環境需求)
+- [快速開始](#快速開始)
+  - [1. 安裝依賴](#1-安裝依賴)
+  - [2. 設定環境變數](#2-設定環境變數)
+  - [3. 建立 Docker 網路、準備 Hermes image](#3-建立-docker-網路準備-hermes-image)
+  - [4. 啟動 router、建立測試房間](#4-啟動-router建立測試房間)
+  - [5. 日常開發迴圈](#5-日常開發迴圈)
+  - [接真的 LINE（端到端驗收才需要）](#接真的-line端到端驗收才需要)
+  - [用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)
+- [開發工作流程](#開發工作流程)
+  - [三條開發線](#三條開發線)
+  - [A. Router feature](#a-router-feature)
+  - [B. Hermes skill](#b-hermes-skill)
+  - [C. Plugin / MCP](#c-plugin--mcp)
+  - [驗證層級（由快到慢）](#驗證層級由快到慢)
+- [Google Workspace 整合](#google-workspace-整合)
+- [疑難排解](#疑難排解)
+- [指令速查](#指令速查)
+- [專案結構](#專案結構)
+- [環境變數說明](#環境變數說明)
+- [安全性](#安全性)
+
 ## 架構概覽
 
 Router 擁有 LINE 進出的全部責任（驗簽、收訊息、push 回覆）；Hermes container 完全不碰 LINE，只透過內建的 `api_server` platform（OpenAI-compatible API）被動回答問題。
@@ -64,7 +92,7 @@ sequenceDiagram
     LINE->>User: 顯示回覆
 ```
 
-完整訊息流程（去重、背景任務、錯誤處理）見 `docs/line-hermes-message-flow.md`；router↔container 協定細節見 `docs/router-hermes-agent-protocol.md`；為何不用 Hermes 內建 LINE gateway、兩者能力對照見 `docs/hermes-agent-line-gateway-comparison.md`。
+完整訊息流程（去重、背景任務、錯誤處理）見 [`docs/line-hermes-message-flow.md`](docs/line-hermes-message-flow.md)；router↔container 協定細節見 [`docs/router-hermes-agent-protocol.md`](docs/router-hermes-agent-protocol.md)；為何不用 Hermes 內建 LINE gateway、兩者能力對照見 [`docs/hermes-agent-line-gateway-comparison.md`](docs/hermes-agent-line-gateway-comparison.md)。
 
 ## LINE 訊息類型支援
 
@@ -83,7 +111,7 @@ Router 會處理整個 webhook body 裡的**所有** event（不只第一個）�
 - **長文自動分段 + Markdown 去除**：LLM 回覆會先去除 LINE 無法渲染的 Markdown 語法（保留連結可點擊），再依 LINE 單則 bubble 5000 字上限智慧分段（最多 5 則/次）。
 - **Webhook 事件去重**：LINE 的 webhook 是 at-least-once 語意，可能重送同一個 event；router 用 `webhookEventId` 做 in-memory 去重，避免同一則訊息被回覆兩次。
 
-以上邏輯 1:1 參考自 Hermes Agent 內建 LINE adapter 的演算法（詳見 `docs/hermes-agent-line-gateway-comparison.md`），但因為架構不同（router 與 container 分離、只透過 `api_server` + 共用 volume 溝通），媒體處理走的是「檔案落地 + 文字通知」而非 Hermes 內建的多模態 API 路徑。
+以上邏輯 1:1 參考自 Hermes Agent 內建 LINE adapter 的演算法（詳見 [`docs/hermes-agent-line-gateway-comparison.md`](docs/hermes-agent-line-gateway-comparison.md)），但因為架構不同（router 與 container 分離、只透過 `api_server` + 共用 volume 溝通），媒體處理走的是「檔案落地 + 文字通知」而非 Hermes 內建的多模態 API 路徑。
 
 Outbound 媒體（agent 主動產生圖片/語音/影片送回 LINE）與 slow-LLM postback 按鈕尚未實作，見同一份文件的
 「未做（Phase 2）」項目。
@@ -144,11 +172,11 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@<host>
 關掉就是 `docker compose -f docker-compose.yml -f deploy/logging/docker-compose.logging.yml
 stop alloy loki grafana`——router 不受影響，它從頭到尾不知道這個堆疊存在。
 成本約 480 MB RAM（實測 Alloy 65 / Loki 107 / Grafana 310 MB）。常用 LogQL 查詢見
-`docs/troubleshooting.md` 第 1 節，設計與方案比較見 `docs/logging-design.md`。
+[`docs/troubleshooting.md`](docs/troubleshooting.md) 第 1 節，設計與方案比較見 [`docs/logging-design.md`](docs/logging-design.md)。
 
 > Alloy 用 `HOST_DATA_DIR` 把 `data/` 以唯讀掛進 `/rooms` 讀每房間的
 > `logs/*.log`，所以 `HOST_DATA_DIR` 必須跟 router 用的是同一個目錄
-> （見 `docs/env-data-paths.md`）；host 模式（`ROUTER_IN_DOCKER=false`）的 router
+> （見 [`docs/env-data-paths.md`](docs/env-data-paths.md)）；host 模式（`ROUTER_IN_DOCKER=false`）的 router
 > 直接跑在主機上、沒有 Docker label，它的 stdout **不會**被收進去，這是預期行為。
 
 ## 環境需求
@@ -196,7 +224,7 @@ LLM_MODEL=change-me
 > 成跟 `HOST_DATA_DIR`／repo 的 `src/hermes` 一樣的絕對路徑，否則 router 會嘗試在宿主機上
 > 建立不存在的預設路徑（`/app/data`、`/app/hermes-templates`）而建房間失敗；忘了覆寫時
 > `Settings` 的 `model_validator` 會在 app 啟動當下直接 fail-fast，不用等到建房間才發現。
-> 這幾個變數的關係與為什麼要分開，見 `docs/env-data-paths.md`。
+> 這幾個變數的關係與為什麼要分開，見 [`docs/env-data-paths.md`](docs/env-data-paths.md)。
 > `HERMES_API_SERVER_KEY` 是 router 與每個 Hermes 容器共用的密鑰。
 > `LLM_*` 是共用的 LLM 後端設定，會自動寫入每個新房間的 `config.yaml`。
 
@@ -212,7 +240,7 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .   # 含 plugin + MC
 > 趕時間可以跳過 build，先 `docker pull nousresearch/hermes-agent:<pinned-tag>`（Docker Hub
 > 公開 image，免權限）填進 `HERMES_IMAGE`——local-tools 的 4 個 stdlib 工具能動，但
 > math／OCR／webdriver 與 secretary-mcp（缺 `/opt/node_modules`）不行，差別見
-> 「[預裝 Plugin](#預裝-pluginlocal-tools)」。
+> [`docs/mcp-plugin-development.md`](docs/mcp-plugin-development.md)「預裝 Plugin（local-tools）」。
 > 不論哪種，`HERMES_IMAGE` 都 **pin 版本 tag**，不要 `latest`——版本漂移是這個架構最容易踩的雷之一。
 
 ### 4. 啟動 router、建立測試房間
@@ -261,7 +289,7 @@ uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "呼叫 math
   每次寫入都會被當成「code 改了」觸發 reload。reload 時 uvicorn 先停收新請求、等手上那輪
   agent 對話跑完才真的重啟，於是這段時間 LINE 的 webhook 全部被丟掉，症狀是「訊息完全沒回應、
   `curl localhost:8000/docs` 也卡住」，而容器 `agent.log` 卻顯示 agent 還在跑（見
-  `docs/troubleshooting.md` 2.1）。
+  [`docs/troubleshooting.md`](docs/troubleshooting.md) 2.1）。
 - 改 **plugin / MCP**：改的是**測試房間自己的副本**（`data/<room_id>/{plugins,mcp}/`，不是
   `src/hermes/` 底下的樣板——樣板只在房間第一次建立時 seed 一次），watcher 自動 restart
   測試房間。更細的生效條件見「[C. Plugin / MCP](#c-plugin--mcp)」。
@@ -365,215 +393,11 @@ manifest sync 自動發到每個房間、跳過房間手改過的副本）。目
 
 ### C. Plugin / MCP
 
-MCP server 原始碼放在 `src/hermes/mcp/<name>/`（目前只有 `secretary/`）。**每個房間
-第一次建立 container 時，會各自從這裡 seed 一份自己的、可自由編輯的副本**到
-`data/<room_id>/mcp/<name>/`（見 `room_seed.py` 的 `ensure_mcp_seed`）——
-之後房間之間互不影響，改一個房間的副本不會動到其他房間。這是 stdio MCP（Hermes
-gateway 直接 spawn `node server.mjs` 子進程），每個房間各自一份 process，靠
-`SECRETARY_LINE_USER_ID` = `room_id`（見 `src/hermes/mcp/secretary/mcp.manifest.yaml`）
-做房間隔離。`src/hermes/mcp/` 底下有幾個子目錄，`ensure_mcp_seed` 就會幫每個新房間
-各 seed 一份，`_format_mcp_section` 對每個房間 seed 出來的 MCP 各自產生一段
-`mcp_servers.<name>` 寫進 `config.yaml`。
-
-> 如果某個 MCP 天生就該所有房間共用同一份、不需要各房間各自客製化（例如純無狀態的
-> 公用查詢服務），做成獨立的 HTTP/SSE sibling container、`config.yaml` 用
-> `http://<container-name>:<port>` 連線，仍然是更省資源的選項——這裡的 seed 機制
-> 是特別為了「每個房間需要能各自修改」這個需求設計的，不是唯一路徑。
-
-**write-once（frozen）**：seed 只在房間第一次建立時發生一次，之後永不覆蓋——跟
-`config.yaml` 的規則一樣，讓你放心手改房間自己的副本而不怕被蓋掉。代價是：改
-`src/hermes/mcp/<name>/` 的原始碼**只會影響之後新建立的房間**，已存在的房間要嘛
-自己去改它自己 `data/<room_id>/mcp/<name>/` 底下的那份，要嘛整個重建（見下方
-「測試 MCP 修改」）。
-
-> **開發時想把樣板一次推到所有已存在房間**（不逐房手改、也不整個重建）：
-> `uv run python scripts/dev_sync_src.py`——監看 `src/hermes/{mcp,plugin}/` 與
-> `config.template.yml`，變動時把樣板**強制覆蓋**每個房間的副本（含 config.yaml，
-> 只保留房間各自的 `mcp/<name>/.env`）再 restart 所有 running 容器。dev 專用、
-> **production 勿用**。跟 `watch_restart.py`（監看**單一房間自己的副本**）分工相反，
-> 兩者服務不同開發流，見腳本 docstring。
-
-MCP server 是 ESM（`"type": "module"`），依賴解析靠從檔案位置往上找 `node_modules`
-（ESM 不吃 `NODE_PATH`）。每個房間的副本落在 `/opt/data/mcp/<name>/`（被房間自己的
-bind mount 蓋住），所以共用的相依套件改烤在再上一層的 `/opt/node_modules`（見
-`Dockerfile.hermes`）——所有房間、所有 MCP 共用同一份，改依賴版本要重 build image；
-改 MCP 的程式邏輯只要房間自己 restart。
-
-依賴清單是宣告式＋鎖版的：`src/hermes/mcp/package.json`（所有 MCP template 依賴的
-聯集）+ 對應的 `src/hermes/mcp/package-lock.json`（`npm install --package-lock-only`
-產生，commit 進版控），image build 時用 `npm ci` 安裝，可重現。
-`tests/test_hermes_shared_node_deps.py` 會檢查每個 `src/hermes/mcp/<name>/package.json`
-的每個 dependency 都以相同版本字串出現在共用的 `package.json`，避免漏同步。
-
-#### 如果要寫 Python MCP server
-
-`/opt/tools/.venv`（`src/hermes/runtime/pyproject.toml` 管理的那個共用 venv）是給
-**plugin script／skill 臨時用**的，**不是**給 Python MCP server 用的共用環境。每個
-Python MCP 應該有自己專屬的 venv（自己的 `pyproject.toml` + `uv.lock`，image build
-時 sync 進自己的路徑，例如 `/opt/mcp-venvs/<name>/.venv`），`mcp.manifest.yaml` 的
-`command:` 直接指向該 venv 的直譯器絕對路徑（`/opt/mcp-venvs/<name>/.venv/bin/python3`），
-不要指向共用的 `tools-python`——這樣不同 MCP 之間的套件版本才不會互相牽制，跟現在
-每個 Node MCP 各自宣告 `package.json` 是同一個精神（Python 沒有 ESM walk-up那種可以
-安全共用的機制，沒必要硬共用）。
-
-另外要注意（[官方 MCP 文件](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp)：
-「For stdio servers, Hermes does not blindly pass your full shell environment.
-Only explicitly configured `env` plus a safe baseline are passed through.」，
-且在活的房間容器內 `docker exec` 讀真正在跑的 secretary MCP process 的
-`/proc/<pid>/environ` 也實測驗證過）：Hermes gateway spawn MCP subprocess 時，
-**預設只會繼承一小組安全基底環境變數**（實測為 `HOME`／`PATH` 這幾個），不是繼承
-整個環境。`command:` 能找到執行檔是因為 `PATH` 有繼承（`/opt/node_modules/.bin`、
-`/usr/local/bin` 都在裡面），但除此之外任何這個 MCP 需要的環境變數（API key、room
-id 等）都要自己在 `mcp.manifest.yaml` 的 `env:` 區塊明確宣告，就像 `secretary`
-宣告 `SECRETARY_LINE_USER_ID` 那樣——不能假設會從容器繼承到。`env:` 的值支援
-`${VAR}` 內插語法，於 server 連線當下從環境變數（含 `~/.hermes/.env`）解析。
-
-#### 每個 MCP 自己的密鑰
-
-`GOOGLE_MAPS_API_KEY` 這類 secretary MCP 專屬密鑰**不走這個 repo 的 `.env` /
-router `Settings`**：房間第一次建立時，`ensure_mcp_seed` 會把
-`src/hermes/mcp/secretary/.env.example` 複製成該房間自己的
-`data/<room_id>/mcp/secretary/.env`——`server.mjs` 啟動時用 Node 內建的
-`process.loadEnvFile()` 自己讀。之後要改哪個房間的密鑰，直接編輯那個房間自己的
-`.env` 檔（`docker restart` 生效），不影響其他房間，也不用改這個 repo 任何地方。
-router 完全不會碰到這個檔案的內容。
-
-`.dockerignore` 排除了所有層級的 `.env`（`**/.env`），所以就算 `src/hermes/mcp/`
-底下某個開發者的本機 checkout 不小心留了真的 `.env`，也不會被 `Dockerfile.hermes`
-烤進 image、不會意外流入 image layer。
-
-#### 測試 MCP 修改
-
-**Level 0（最快，不碰 Docker/Hermes）**——用官方 MCP inspector 直接對某個 MCP 樣板
-打 stdio protocol：
-
-```bash
-cd src/hermes/mcp/secretary && npm install   # 第一次要裝依賴（僅供本機獨立測試用）
-SECRETARY_LINE_USER_ID=test_room npx @modelcontextprotocol/inspector node server.mjs
-```
-
-開瀏覽器 UI，可直接呼叫個別 tool、驗 schema、看回傳值，不用經過 Hermes。
-
-**Level 1（透過 Hermes 容器驗證，改房間自己的副本）**：
-
-1. 確保測試房間容器已存在過一次（`ensure_mcp_seed` 才會把 MCP 樣板 seed 進
-   `data/<room_id>/mcp/<name>/`）：`uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST`
-2. 直接改該房間自己的副本，例如 `data/U_LOCAL_TEST/mcp/secretary/tools/todo.mjs`——
-   **不要改 `src/hermes/mcp/` 底下的樣板**，那份只在房間第一次建立時生效一次
-3. `docker restart hermes_<room_id>` 讓 Hermes gateway 重新 spawn MCP server process，
-   讀到新程式碼——這步可以用 `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST`
-   自動化，存檔即觸發
-4. `uv run python scripts/test_webhook.py` 送會觸發該 tool 的訊息（例如「幫我加一筆待辦」），
-   `docker logs hermes_<room_id>` 找 `[secretary-mcp] ready; lineUserId=...` 確認 spawn 成功、有無報錯
-
-**要測「改了 repo 樣板之後全新房間長什麼樣」**：因為 write-once，既有測試房間看不到
-樣板改動——用一個新的 `--user-id`，或 `docker rm -f hermes_<room_id>` 並刪掉
-`data/<room_id>/{mcp,plugins,config.yaml}` 讓它下次重新從樣板 seed。
-
-**Level 2（完整驗證，套件有變動時必跑）**：改了某個 MCP 的 `package.json`
-（新增/升級依賴）時，因為共用的 `/opt/node_modules` 只在 image build 時安裝一次，
-流程是：
-
-1. 同步更新 `src/hermes/mcp/package.json`（所有 MCP 共用依賴的聯集）
-2. 重新產生 lockfile：`cd src/hermes/mcp && npm install --package-lock-only`
-3. 重 build image、bump `HERMES_IMAGE`、重建房間容器：
-
-```bash
-docker build -f Dockerfile.hermes -t alice-hermes-agent:v2 .
-# .env 改 HERMES_IMAGE=alice-hermes-agent:v2，docker rm -f 測試房間容器重建
-```
-
-#### 預裝 Plugin（local-tools）
-
-`src/hermes/plugin/local-tools/` 是一套 Hermes standalone plugin（台灣薪資計算、法規查詢、工程計算機、長期記憶、AI 生態系索引、OCR、瀏覽器自動化），**每個房間第一次建立 container 時自動 seed 為預設工具**。運作方式：
-
-- **原始碼**：房間第一次建立時，從 `src/hermes/plugin/local-tools/` seed 一份到該房間自己的
-  `data/<room_id>/plugins/local-tools/`（見 `room_seed.py` 的 `ensure_plugin_seed`）——
-  跟 MCP 一樣是 write-once：之後改 repo 樣板不會反映到已存在的房間，房間可以自由編輯
-  自己的副本
-- **啟用**：每個新房間的 `config.yaml` 模板自動寫入 `plugins.enabled: [local-tools]`
-- **執行資料**（SQLite、快取）：落在各房間的 `/opt/data/local-tools-data/`（房間隔離，
-  跟原始碼所在的 `/opt/data/plugins/local-tools/` 不同層）
-
-工具的 Python 依賴分為兩類：
-
-| 工具 | 依賴 | 上游 image 是否內建 |
-|------|------|---------------------|
-| hr / law / longmem / research | 純 stdlib | ✅ 直接可用 |
-| math | `sympy` | ❌ 需衍生 image |
-| image_ocr | `pymupdf` + 外部 Vision API | ❌ 需衍生 image + API server |
-| webdriver | `selenium` + geckodriver + Firefox | ❌ 需衍生 image（plugin 自動隱藏） |
-
-**Production 建法**——用 `Dockerfile.hermes` 建衍生 image 預裝 sympy + pymupdf +
-selenium（烤進獨立的 `/opt/tools/.venv`，跟 plugin 原始碼本身無關——原始碼一律是
-seed，從不烤進 image）：
-
-```bash
-docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .
-# .env 設 HERMES_IMAGE=alice-hermes-agent:v1
-```
-
-> 一般開發時用上游 `nousresearch/hermes-agent` 即可，4 個 stdlib 工具直接可用。
-
-只有當功能必須跑在 Hermes **進程內**（真 plugin，不是 MCP）才走衍生 image：
-`FROM nousresearch/hermes-agent:<pin>`，改 `HERMES_IMAGE` 逐房重建。
-這條路每次升級 Hermes 都要 rebase，成本高，沒必要不要走。
-
-**Python 依賴是宣告式＋鎖版的**：`src/hermes/runtime/pyproject.toml`（third-party
-套件清單）+ 對應的 `src/hermes/runtime/uv.lock`。跟 hermes-agent 自己的 venv
-（`/opt/hermes/.venv`，只放 `tools.py` 這個 in-process plugin 層需要的 `pyyaml`）
-完全隔離，不會被上游 Hermes base image 升級影響。加新依賴的流程：
-
-1. 編輯 `src/hermes/runtime/pyproject.toml`
-2. `cd src/hermes/runtime && uv lock` 重新產生 `uv.lock`，兩個檔都 commit
-3. 重 build image、bump `HERMES_IMAGE`、重建房間容器（同上 MCP 依賴的三步驟）
-
-容器內對應的執行環境是 `/opt/tools/.venv`：plugin 腳本用 `TOOLS_PYTHON` 環境變數解析
-到這個 venv；login shell（`/etc/profile.d/90-alice-tools.sh`）也會 export 同一個
-變數，並把 `/opt/node_modules/.bin` 加進 PATH，`/usr/local/bin/tools-python` 是
-指向這個 venv 直譯器的 wrapper script，可在容器內任何 shell 直接呼叫。
-
-**這個 venv 只給我們自己寫的東西用。** Hermes 官方 bundled skill 跑在另一個獨立的
-`/opt/skills/.venv`（terminal 裡的 `python`／`pip` 就是它，官方 skill 文件照原文能跑），
-預裝清單在 `src/hermes/runtime/skills-requirements.txt`，其餘由 agent runtime
-`pip install`（容器本地）。三個環境的分工見 `AGENTS.md`「Hermes Container Model」。
-
-##### 測試 plugins 修改
-
-**Level 0（最快，不碰 Docker/Hermes）**——每個 tool 是一支獨立可執行的 CLI script
-（`tools.py` 用 `subprocess.run([PYTHON, script, *argv])` 呼叫，吃 CLI args、吐 JSON stdout），
-可以直接跑，邏輯對不對這層就測得完：
-
-```bash
-python3 src/hermes/plugin/local-tools/scripts/hr/alice-payroll-engine.py --help
-python3 src/hermes/plugin/local-tools/scripts/hr/alice-payroll-engine.py <實際參數>
-```
-
-**Level 1（驗證 Hermes 真的呼叫得到 tool，改房間自己的副本）**：
-
-1. 確保測試房間容器已存在過一次（`ensure_plugin_seed` 才會把 plugin 樣板 seed 進
-   `data/<room_id>/plugins/local-tools/`）
-2. 直接改該房間自己的副本，例如 `data/U_LOCAL_TEST/plugins/local-tools/tools.py`——
-   **不要改 `src/hermes/plugin/` 底下的樣板**，那份只在房間第一次建立時生效一次
-3. `docker restart hermes_<room_id>`——新加的 tool 或改了 `plugin.yaml` / `schemas.py`
-   需要 restart 才生效；純改 script 內容其實每次呼叫都是重新 spawn subprocess，
-   通常不用重啟，但 restart 保險
-4. `uv run python scripts/test_webhook.py` 送一句會觸發該 tool 的訊息，看 agent 回覆
-5. 有問題就 `docker logs -f hermes_<room_id>` 看 stderr
-
-**不想每次手動打 restart？** `scripts/watch_restart.py` 會輪詢指定房間自己 seed 出來的
-`data/<room_id>/{mcp,plugins}/` 檔案異動，存檔自動 `docker restart hermes_<room_id>`：
-
-```bash
-uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
-```
-
-只是把「你自己打 restart」自動化，容器怎麼建立、seed 什麼都還是
-`container_manager.py` 那唯一一份邏輯決定的——不是另外養一份 compose service
-設定，不會有兩份設定漂移的風險。
-
-只有新增的 tool 需要新的 Python 套件（不在上游 image 也不在 `Dockerfile.hermes` 已裝清單裡）
-時，才需要重 build 衍生 image——單純改 script 邏輯完全不用。
+MCP server 原始碼放在 `src/hermes/mcp/<name>/`；plugin 原始碼放在
+`src/hermes/plugin/<name>/`。兩者都是房間第一次建立時 write-once seed 到
+`data/<room_id>/{mcp,plugins}/` 的自己副本，改 repo 樣板只影響之後新建立的房間；
+預裝的 `local-tools` plugin 也是走同一套機制。怎麼寫 Python MCP server、密鑰放哪、
+幾種測試 level、`local-tools` 的完整細節，見 [`docs/mcp-plugin-development.md`](docs/mcp-plugin-development.md)。
 
 ### 驗證層級（由快到慢）
 
@@ -592,125 +416,10 @@ process，token／憑證也逐房隔離（`data/<room_id>/google/`），房間�
 `rm -rf data/<room_id>` 會把該房間的 Google 授權一併清空，需重新授權（見下方
 「疑難排解」的完整重置流程）。
 
-**完整架構決策**（為何 oauth gate 是 router 邏輯而非 Hermes plugin、為何原本獨立的
-Flask OAuth server 併進了 router、憑證掛載路徑與 seed 時序的取捨）**見
-`docs/google-workspace-integration-summary.md`**；下面只列出實際設定與操作步驟。
-
-### GCP Console 設定摘要
-
-1. 建立/選擇 GCP 專案 → 啟用三個 API：**Google Calendar API**、**Gmail API**、
-   **Google Drive API**。
-2. 設定 OAuth 同意畫面（Consent screen）。
-3. 建立**兩個** OAuth 用戶端 ID（兩者用途不同，缺一不可）：
-   - **Web application**：Authorized redirect URIs 加入
-     `{GOOGLE_OAUTH_PUBLIC_URL}/oauth/callback`（LINE 使用者瀏覽器走的授權流程用，
-     router 的 `/oauth/start` `/oauth/callback` 兩個路由靠它）。
-   - **Desktop app（Installed）**：`@cocal/google-calendar-mcp` 跟
-     `scripts/google_reauth.py` 用它識別身份，走 localhost redirect，不需要在
-     GCP Console 額外設定 redirect URI。
-
-### 檔案放置
-
-兩份 credentials JSON 只需下載**一次**，放到部署層的種子來源（**不進版控**，`data/`
-本身已在 `.gitignore`）：
-
-```
-data/_google/gcp-oauth.keys.json            ← Web application client（種子來源，只放一次）
-data/_google/gcp-oauth.keys.installed.json  ← Desktop (Installed) client（種子來源，只放一次）
-```
-
-之後每個房間會在自己第一次接觸 Google OAuth 時（seed 時序細節見
-`docs/google-workspace-integration-summary.md`），由
-`room_seed.ensure_google_seed` 自動從這裡複製一份到
-`data/<room_id>/google/`——**不需要、也不應該**手動幫每個房間各放一次：
-
-```
-data/<room_id>/google/gcp-oauth.keys.json            ← 這個房間自己的副本（write-once）
-data/<room_id>/google/gcp-oauth.keys.installed.json  ← 這個房間自己的副本（write-once）
-data/<room_id>/google/tokens.json                    ← 執行期自動產生，不用手動放
-```
-
-> **Linux host 部署注意**：container 內的 MCP process 以 `hermes`（uid 10000）
-> 執行，且 token refresh 會**寫回** `tokens.json`，所以每個房間的
-> `data/<room_id>/google/` 都必須讓 uid 10000 可讀＋可寫（例如
-> `chown -R 10000 data/<room_id>/google` 或 `chmod 777 data/<room_id>/google`，
-> 新房間建立時記得補跑）。macOS 的 Docker Desktop 透過檔案共享層自動處理權限對映，
-> 不需要手動調。
-
-### 環境變數
-
-| 變數 | 說明 |
-|------|------|
-| `GOOGLE_OAUTH_PUBLIC_URL` | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝整個 Google 整合停用：oauth 路由回 400、新房間不 seed 這三個 MCP、訊息也不會被攔。 |
-| `GOOGLE_OAUTH_GATE` | 預設 `true`。設 `false` 時 oauth 路由照常運作，只是不擋任何房間的訊息（適合先把 MCP 跑起來、還沒想清楚要不要強制授權的階段）。 |
-
-`Settings.google_oauth_enabled`（`config.py`）同時檢查
-`GOOGLE_OAUTH_PUBLIC_URL` 非空**且** `data/_google/gcp-oauth.keys.json` 存在，兩者缺一都視為停用。
-
-### 訊息授權判斷流程
-
-`check_google_authorization` 每則訊息都會跑一次，`ok`／`notice`／`blocked` 三種結果對應不同行為：
-
-```mermaid
-flowchart TD
-    Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"google_oauth_enabled<br/>且 GOOGLE_OAUTH_GATE？"}
-    Enabled -- "否" --> Ok1["ok：直接放行"]
-    Enabled -- "是" --> HasToken{"這個房間自己的<br/>tokens.json 有 token？"}
-    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent、背景暖機容器"]
-    HasToken -- "有" --> Expired{"access_token 過期？"}
-    Expired -- "是且無 refresh_token" --> Blocked
-    Expired -- "否，或有 refresh_token" --> Scopes{"scope 包含<br/>calendar/gmail.modify/drive？"}
-    Scopes -- "缺 Drive scope" --> Notice["notice：推播重新授權提示<br/>仍呼叫 agent（calendar/gmail 可用）"]
-    Scopes -- "齊全" --> Ok2["ok：正常呼叫 agent"]
-```
-
-### lowercase 帳號 key（容易忽略、務必注意）
-
-`@cocal/google-calendar-mcp` 驗證 `GOOGLE_ACCOUNT_MODE` 必須符合
-`/^[a-z0-9_-]{1,64}$/`（只准小寫），但 LINE room id 開頭是大寫 `U`/`C`/`R`。
-因此整個 Google 整合統一用 **`room_id.lower()`** 當帳號 key（見
-`alice_office_router.google_oauth.account_key`）：這個房間自己的 `tokens.json`
-裡的 key、`/oauth/callback` 存 token、gate 檢查、三個 MCP manifest 的
-`{account_key}` 佔位符，全部都是同一個 lowercase key，不能有任何一處漏掉轉換，
-否則會出現「明明授權過但 gate 還是說沒授權」這種對不起來的情況。
-
-**跟上面不同的另一件事：`room_id` 本身（原始大小寫）決定資料夾位置，絕對不能被
-lowercase 污染。** `data/<room_id>/google/` 這個路徑用的是原始 `room_id`（跟
-`data/<room_id>/mcp`、`plugins` 同一個變數），只有寫進 `tokens.json`**裡面**的
-key 才轉小寫。`google_oauth._pending`（`/oauth/start` 到 `/oauth/callback` 之間
-暫存 state 的字典）刻意存原始 `room_id`、不是 `account_key`，就是為了讓
-`oauth_callback` 能正確找回這個房間的資料夾——如果哪裡不小心把 lowercase 過的
-key 當成 `room_id` 傳給 `Settings.room_google_dir()`，在 Linux（case-sensitive
-檔案系統）上會靜靜地建出另一個空資料夾，跟這個房間真正的 container 掛載的資料夾
-對不上。
-
-### 影響既有房間
-
-- **改 Google 相關設定要重建房間 container**：`_build_volume_config` 只在
-  container **建立**當下決定要不要掛這個房間的 `google/` 資料夾——先前用停用狀態
-  建立的房間，之後補上 `GOOGLE_OAUTH_PUBLIC_URL` 跟 credentials 也不會自動補掛，
-  需要 `docker rm -f hermes_<room_id>` 重建。
-- **write-once 對 Google MCP 一樣適用**：`gmail`／`drive`／`google-calendar` 三個
-  manifest 都有 `requires_google_oauth: true`，`ensure_mcp_seed` 只在
-  `Settings.google_oauth_enabled` 為真時才會 seed 它們——在停用狀態下建立的房間，
-  即使之後啟用了 Google 整合，也不會回頭幫它補 seed，一樣要重建房間。
-- **`rm -rf data/<room_id>` 會把這個房間的 Google 授權一併清空**：因為
-  `tokens.json` 跟該房間自己的憑證副本都在這個資料夾底下，這是刻意的設計（逐房隔離的
-  完整理由見 `docs/google-workspace-integration-summary.md`），不是遺漏。詳見下方
-  「疑難排解」的「完整重置一個房間」。
-
-### 本機開發：一次性授權
-
-有瀏覽器的開發機可以跳過走 LINE 授權，直接用腳本產生 token：
-
-```bash
-uv run python scripts/google_reauth.py U_LOCAL_TEST
-```
-
-會存進 `data/U_LOCAL_TEST/google/tokens.json`（`room_id` 保留原始大小寫當資料夾
-名，dict 裡的 key 才轉小寫），並把 `--credentials` 指到的 Desktop 憑證複製一份到
-同一個資料夾，讓這個房間的 container 掛載後找得到。詳細用法／路徑覆寫見
-`scripts/google_reauth.py --help`。
+GCP Console 設定、憑證檔案放置、環境變數、訊息授權判斷流程與容易忽略的坑，見
+[`docs/google-workspace-setup.md`](docs/google-workspace-setup.md)；**完整架構決策**（為何 oauth gate 是 router 邏輯
+而非 Hermes plugin、為何原本獨立的 Flask OAuth server 併進了 router、憑證掛載路徑與
+seed 時序的取捨）見 [`docs/google-workspace-integration-summary.md`](docs/google-workspace-integration-summary.md)。
 
 ## 疑難排解
 
@@ -787,7 +496,7 @@ uv run python scripts/google_reauth.py U_LOCAL_TEST
 | `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看**單一房間自己的副本**，存檔自動 restart 該房間 |
 | `uv run python scripts/dev_sync_src.py` | 監看 **repo 樣板**，變動時強制推到**所有已存在房間**再 restart（dev 專用，會覆蓋房間副本） |
 | `uv run python scripts/google_reauth.py <room_id>` | 本機一次性 Google 授權（見「Google Workspace 整合」） |
-| `uv run python scripts/debug_room.py <room_id>` | 印出單一房間的診斷快照（container 狀態、docker logs、各 log 檔 tail、關鍵檔案存在性，見 `docs/troubleshooting.md`） |
+| `uv run python scripts/debug_room.py <room_id>` | 印出單一房間的診斷快照（container 狀態、docker logs、各 log 檔 tail、關鍵檔案存在性，見 [`docs/troubleshooting.md`](docs/troubleshooting.md)） |
 
 提交前必跑：
 
@@ -870,7 +579,7 @@ alice-office-router/
 | `GOOGLE_OAUTH_PUBLIC_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝ Google Workspace 整合停用，見「[Google Workspace 整合](#google-workspace-整合)」 |
 | `GOOGLE_OAUTH_GATE` | | 預設 `true`。設 `false` 時 Google OAuth 路由照常運作，只是不擋任何房間的訊息 |
 | `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
-| `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 `docs/session-hygiene.md`「1. 手動指令」 |
+| `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 [`docs/session-hygiene.md`](docs/session-hygiene.md)「1. 手動指令」 |
 | `GROUP_OBSERVED_MAX_MESSAGES` | | 每個群組房間背景 buffer（`data/<room_id>/group_state/observed.jsonl`）最多保留幾則未點名訊息，超過丟最舊（預設 `50`；`0`＝不保留背景） |
 | `GRAFANA_ADMIN_PASSWORD` | | **唯一一個 router 不讀的變數**（不在 `Settings` 裡），只給 `docker compose` 做變數替換用：選配的集中式 log 堆疊裡 Grafana 的 admin 密碼。沒啟用那份 compose 就留空；啟用了卻沒設會直接讓 compose 失敗（不會靜默起一個 `admin/admin` 的 Grafana）。見「[選配：集中式 log（Loki）](#選配集中式-logloki)」 |
 

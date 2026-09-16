@@ -196,7 +196,7 @@ hermes -z "把這份 PDF /path/to/doc.pdf 用連結傳到 LINE"
 | 症狀 | 檢查方向 |
 |------|----------|
 | `hermes mcp list` 沒有出現 secretary | 看 `/tmp/hermes_gateway.log` 是否有 spawn 錯誤；確認 `args` 路徑正確；確認 `node -v` ≥ 18 |
-| Docker 部署下容器 log 出現 `MCP server 'secretary' ... Connection closed` / `Cannot find package '@modelcontextprotocol/sdk'` | 每個房間 seed 的只有 `server.mjs`／`tools`／`.env`（原始碼），依賴一律靠 ESM 從檔案位置往上找 `node_modules`、共用烤在 `/opt/node_modules`——如果 `HERMES_IMAGE` 還是原生 `nousresearch/hermes-agent`（沒 build 過 `Dockerfile.hermes` 衍生版），`/opt/node_modules` 根本不存在。用 `docker exec hermes_<room_id> node --version` 能跑但 `docker exec hermes_<room_id> ls /opt/node_modules` 找不到東西就是這個原因；照根目錄 README「Production 建法」build `Dockerfile.hermes` 並把 `.env` 的 `HERMES_IMAGE` 指過去即可 |
+| Docker 部署下容器 log 出現 `MCP server 'secretary' ... Connection closed` / `Cannot find package '@modelcontextprotocol/sdk'` | 每個房間 seed 的只有 `server.mjs`／`tools`／`.env`（原始碼），依賴一律靠 ESM 從檔案位置往上找 `node_modules`、共用烤在 `/opt/node_modules`——如果 `HERMES_IMAGE` 還是原生 `nousresearch/hermes-agent`（沒 build 過 `Dockerfile.hermes` 衍生版），`/opt/node_modules` 根本不存在。用 `docker exec hermes_<room_id> node --version` 能跑但 `docker exec hermes_<room_id> ls /opt/node_modules` 找不到東西就是這個原因；照 `docs/mcp-plugin-development.md`「Production 建法」build `Dockerfile.hermes` 並把 `.env` 的 `HERMES_IMAGE` 指過去即可 |
 | 工具有被呼叫但狀態檔沒寫入 | 確認 `~/.hermes/` 可寫入；目錄與檔案會自動建立 |
 | 模型都不呼叫這些工具 | 確認 `~/.hermes/config.yaml` 的 `toolsets` 有包含 `mcp-secretary` |
 | 地圖回 `GOOGLE_MAPS_API_KEY is not configured` | 確認本目錄 `.env` 有這個值，或在 `~/.profile` 設好環境變數；改完都要重啟 hermes gateway 行程（Docker 部署則是 `docker restart hermes_<room_id>`） |
