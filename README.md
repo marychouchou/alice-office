@@ -218,7 +218,7 @@ docker build -f Dockerfile.hermes -t alice-hermes-agent:v1 .   # 含 plugin + MC
 ### 4. 啟動 router、建立測試房間
 
 ```bash
-uv run fastapi dev src/alice_office_router/main.py        # terminal A，保持開著
+uv run fastapi dev src/alice_office_router/main.py --reload-dir src   # terminal A，保持開著
 uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "你好"   # terminal B
 ```
 
@@ -244,7 +244,7 @@ agent 的回覆去哪看：假 user id 推不回真的 LINE（router log 出現 
 
 ```bash
 # terminal A：router
-uv run fastapi dev src/alice_office_router/main.py
+uv run fastapi dev src/alice_office_router/main.py --reload-dir src
 
 # terminal B：watcher——監看測試房間自己 seed 出來的 mcp/plugins 副本，存檔自動 restart
 uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST
@@ -256,6 +256,12 @@ uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "呼叫 math
 ```
 
 - 改 **router code**（`src/alice_office_router/`）：`fastapi dev` 自己會 reload，不用動任何容器。
+  **`--reload-dir src` 不能省**：`fastapi dev` 預設監看整個 repo，而 `data/` 就在 repo 底下，
+  Hermes 容器每分鐘都往房間目錄寫檔（`cron/ticker_heartbeat`、agent 自己產出的 `.py`／`.md`），
+  每次寫入都會被當成「code 改了」觸發 reload。reload 時 uvicorn 先停收新請求、等手上那輪
+  agent 對話跑完才真的重啟，於是這段時間 LINE 的 webhook 全部被丟掉，症狀是「訊息完全沒回應、
+  `curl localhost:8000/docs` 也卡住」，而容器 `agent.log` 卻顯示 agent 還在跑（見
+  `docs/troubleshooting.md` 2.1）。
 - 改 **plugin / MCP**：改的是**測試房間自己的副本**（`data/<room_id>/{plugins,mcp}/`，不是
   `src/hermes/` 底下的樣板——樣板只在房間第一次建立時 seed 一次），watcher 自動 restart
   測試房間。更細的生效條件見「[C. Plugin / MCP](#c-plugin--mcp)」。
@@ -776,7 +782,7 @@ uv run python scripts/google_reauth.py U_LOCAL_TEST
 | `uv run mypy src/` | 型別檢查 |
 | `uv run ruff check .` | Lint |
 | `uv run ruff format .` | 格式化 |
-| `uv run fastapi dev src/alice_office_router/main.py` | 開發伺服器（host 模式） |
+| `uv run fastapi dev src/alice_office_router/main.py --reload-dir src` | 開發伺服器（host 模式；`--reload-dir src` 必帶，否則 `data/` 的寫入會不停觸發 reload） |
 | `uv run python scripts/test_webhook.py --user-id U_LOCAL_TEST --text "..."` | 模擬 LINE 訊息打整條路 |
 | `uv run python scripts/watch_restart.py --room-id U_LOCAL_TEST` | 監看**單一房間自己的副本**，存檔自動 restart 該房間 |
 | `uv run python scripts/dev_sync_src.py` | 監看 **repo 樣板**，變動時強制推到**所有已存在房間**再 restart（dev 專用，會覆蓋房間副本） |
