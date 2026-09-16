@@ -18,7 +18,13 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 class Settings(BaseSettings):
     """Application settings loaded from environment variables or .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # extra="ignore": .env also carries compose-only variables the router never
+    # reads (GRAFANA_ADMIN_PASSWORD, SEARXNG_SECRET — see .env.example). With
+    # pydantic-settings' default "forbid", any such key made every request 500
+    # with "Extra inputs are not permitted".
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     LINE_CHANNEL_SECRET: str
     LINE_CHANNEL_ACCESS_TOKEN: str

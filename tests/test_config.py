@@ -129,3 +129,21 @@ def test_searxng_url_defaults_to_disabled() -> None:
     settings = Settings(**_REQUIRED)  # type: ignore[arg-type]
 
     assert settings.SEARXNG_URL == ""
+
+
+def test_dotenv_keys_the_router_does_not_read_are_ignored(tmp_path: Path) -> None:
+    """Compose-only variables in .env (SEARXNG_SECRET, GRAFANA_ADMIN_PASSWORD) must not break Settings.
+
+    pydantic-settings defaults to extra="forbid" for dotenv keys, which turned
+    a documented "router never reads this" variable into a 500 on every request.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SEARXNG_SECRET=compose-only\nGRAFANA_ADMIN_PASSWORD=compose-only\nSEARXNG_URL=http://searxng:8080\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(**_REQUIRED, _env_file=env_file)  # type: ignore[arg-type, call-arg]
+
+    assert settings.SEARXNG_URL == "http://searxng:8080"
+    assert not hasattr(settings, "SEARXNG_SECRET")
