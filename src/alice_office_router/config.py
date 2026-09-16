@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = ""
     LLM_API_KEY: str = ""
     LLM_MODEL: str = ""
+    # Self-hosted SearXNG base URL forwarded into every Hermes agent container
+    # as SEARXNG_URL (deploy/searxng/). Hermes's built-in web_search tool only
+    # appears in the agent's tool list once some search provider is available,
+    # and auto-selects SearXNG when this env var is set — no per-room
+    # config.yaml change needed. Empty (default) = web_search stays hidden,
+    # exactly as before. Containers read env only at creation, so existing
+    # rooms need `docker rm -f hermes_<room_id>` to pick it up.
+    SEARXNG_URL: str = ""
     # Router-local path (like DATA_DIR — the router's own filesystem view,
     # NOT a host path for Docker volume mounting) to this repo's src/hermes/
     # directory. Holds mcp/<name>/ and plugin/<name>/ source templates, and

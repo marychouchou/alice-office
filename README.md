@@ -8,6 +8,7 @@ LINE OA 多租戶 Webhook 路由器。接收來自 LINE 平台的 Webhook，依�
 - [LINE 訊息類型支援](#line-訊息類型支援)
 - [部署模式](#部署模式)
   - [選配：集中式 log（Loki）](#選配集中式-logloki)
+  - [選配：自架 SearXNG 網頁搜尋](#選配自架-searxng-網頁搜尋)
 - [環境需求](#環境需求)
 - [快速開始](#快速開始)
   - [1. 安裝依賴](#1-安裝依賴)
@@ -173,6 +174,47 @@ ssh -N -L 3000:127.0.0.1:3000 <user>@<host>
 stop alloy loki grafana`——router 不受影響，它從頭到尾不知道這個堆疊存在。
 成本約 480 MB RAM（實測 Alloy 65 / Loki 107 / Grafana 310 MB）。常用 LogQL 查詢見
 [`docs/troubleshooting.md`](docs/troubleshooting.md) 第 1 節，設計與方案比較見 [`docs/logging-design.md`](docs/logging-design.md)。
+
+### 選配：自架 SearXNG 網頁搜尋
+
+預設**不開**。Hermes 內建的 `web_search` 工具要有一個搜尋 provider 才會出現在 agent 的
+工具清單裡；沒有 provider 時 agent 只剩瀏覽器工具，會拿沒有防偵測的 headless Chromium
+硬闖 Google/Bing 的搜尋頁，幾乎每次被 bot 驗證擋下——「查一個沒有固定網址的東西」
+（統編查公司名、查冷門商家）就是這樣失敗的；有固定 API 的查詢（天氣、股價）不受影響，
+agent 本來就用 `terminal` 直接打。
+
+`deploy/searxng/` 有一份現成的 [SearXNG](https://docs.searxng.org/)（免費、自架的
+metasearch），跟 router 同一台主機、**掛在 `hermes_global_net` 上**讓每個房間容器用容器
+名 `searxng` 打它（跟 Loki 相反：SearXNG 無狀態、不留任何房間資料，所以可以同網段）。
+router 只負責把 URL 當 env 轉傳進每個房間容器，Hermes 偵測到 `SEARXNG_URL` 就自動選它，
+不用改任何房間的 `config.yaml`、不用重烤 image：
+
+```bash
+# 1. .env 設兩個值：URL 給 router 轉傳，secret 只給 compose 用（router 不讀）
+echo "SEARXNG_URL=http://searxng:8080" >> .env
+echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> .env
+
+# 2. 在 repo 根目錄多疊一個 -f（主 compose 的行為完全不變）
+docker compose -f docker-compose.yml -f deploy/searxng/docker-compose.searxng.yml up -d
+#    全新主機用部署腳本的話：./scripts/deploy_host.sh --with-searxng
+
+# 3. 驗證：SearXNG 不對外開 port，從任一房間容器打它
+docker exec hermes_<room_id> curl -s 'http://searxng:8080/search?q=test&format=json' | head -c 300
+#    → 看到 {"query": "test", "results": [...]} 就通了（403 = settings.yml 少了 json format）
+```
+
+> **既有房間容器要重建一次**：容器 env 只在建立時寫入，這個版本之前建的
+> `hermes_<room_id>` 沒有 `SEARXNG_URL`，agent 的工具清單裡就不會有 `web_search`。
+> `docker rm -f hermes_<room_id>` 之後 router 會在下一則訊息進來時自動重建（`data/`
+> 不受影響，只中斷一次開機時間）。
+
+已知限制：SearXNG 只做搜尋，Hermes 同組的 `web_extract` 工具呼叫會回「search-only
+backend」錯誤，agent 讀結果頁要改用 `browser_navigate`（開一般網頁本來就正常，被擋的
+只有搜尋引擎的結果頁）。上游引擎偶爾會把 SearXNG 判成 bot（實測 DuckDuckGo 第一次就
+回 CAPTCHA，其他引擎正常），`deploy/searxng/settings.yml` 已先拿掉最兇的 Google；哪個
+引擎一直被擋看 `docker logs searxng`，排查見 [`docs/troubleshooting.md`](docs/troubleshooting.md) 2.12。
+關掉就是 `.env` 拿掉 `SEARXNG_URL` → 重啟 router → `docker rm -f` 各房間，再
+`docker compose -f docker-compose.yml -f deploy/searxng/docker-compose.searxng.yml stop searxng`。
 
 > Alloy 用 `HOST_DATA_DIR` 把 `data/` 以唯讀掛進 `/rooms` 讀每房間的
 > `logs/*.log`，所以 `HOST_DATA_DIR` 必須跟 router 用的是同一個目錄
@@ -581,7 +623,9 @@ alice-office-router/
 | `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
 | `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 [`docs/session-hygiene.md`](docs/session-hygiene.md)「1. 手動指令」 |
 | `GROUP_OBSERVED_MAX_MESSAGES` | | 每個群組房間背景 buffer（`data/<room_id>/group_state/observed.jsonl`）最多保留幾則未點名訊息，超過丟最舊（預設 `50`；`0`＝不保留背景） |
-| `GRAFANA_ADMIN_PASSWORD` | | **唯一一個 router 不讀的變數**（不在 `Settings` 裡），只給 `docker compose` 做變數替換用：選配的集中式 log 堆疊裡 Grafana 的 admin 密碼。沒啟用那份 compose 就留空；啟用了卻沒設會直接讓 compose 失敗（不會靜默起一個 `admin/admin` 的 Grafana）。見「[選配：集中式 log（Loki）](#選配集中式-logloki)」 |
+| `GRAFANA_ADMIN_PASSWORD` | | **router 不讀的變數**（不在 `Settings` 裡），只給 `docker compose` 做變數替換用：選配的集中式 log 堆疊裡 Grafana 的 admin 密碼。沒啟用那份 compose 就留空；啟用了卻沒設會直接讓 compose 失敗（不會靜默起一個 `admin/admin` 的 Grafana）。見「[選配：集中式 log（Loki）](#選配集中式-logloki)」 |
+| `SEARXNG_URL` | | 自架 SearXNG 的 base URL，router 原樣轉傳進每個房間容器的 env，Hermes 內建 `web_search` 偵測到就自動選它。留空（預設）＝`web_search` 不出現在 agent 工具清單，行為跟以前一樣；啟用填 `http://searxng:8080`。既有房間容器要 `docker rm -f` 重建才吃得到。見「[選配：自架 SearXNG 網頁搜尋](#選配自架-searxng-網頁搜尋)」 |
+| `SEARXNG_SECRET` | | 跟 `GRAFANA_ADMIN_PASSWORD` 同類：router 不讀，只給 `deploy/searxng/docker-compose.searxng.yml` 做變數替換（SearXNG 的 `secret_key`）。帶了那份 compose 卻沒設會直接讓 compose 失敗 |
 
 ## 安全性
 

@@ -115,7 +115,8 @@ def _build_container_env(config: Settings) -> dict[str, str]:
     communication and only talks to the agent through its api_server platform.
 
     Args:
-        config: Application settings with the api_server secret and LLM credentials.
+        config: Application settings with the api_server secret, LLM credentials
+            and the optional SearXNG URL for the agent's web_search tool.
 
     Returns:
         Dictionary of environment variable names to values.
@@ -128,6 +129,8 @@ def _build_container_env(config: Settings) -> dict[str, str]:
     }
     if config.LLM_API_KEY:
         env["LLM_API_KEY"] = config.LLM_API_KEY
+    if config.SEARXNG_URL:
+        env["SEARXNG_URL"] = config.SEARXNG_URL
     return env
 
 
