@@ -96,6 +96,18 @@ Body:
     自己的 `hermes: {completed, partial, failed, error, error_code}` 區塊。
   - 解析壞掉的 `data:` 行只跳過並記 warning（`hermes_agent_chunk_skipped`），不中止整輪
     ——一格壞掉的 frame 不值得賠掉整輪回覆。
+  - **多輪工具呼叫時，`finish_reason` 全程是 `null` 直到真正結束**：一輪牽涉多次工具
+    呼叫的對話，Hermes 把每一輪產生的文字都當普通 content chunk 吐出來（含每次呼叫
+    工具前 model 自己講的旁白，例如「這個網址不行，換一個」），協定本身**不提供任何
+    「這段文字屬於哪一輪」的欄位**（`gateway/platforms/api_server.py` 的
+    `_write_real_streaming_sse`：非 tool-progress 的每個 item 都原樣包成
+    `chat.completion.chunk`，`finish_reason` 寫死 `null`）。唯一的分界是 Hermes 在
+    真正執行工具前送出的具名事件 `event: hermes.tool.progress\ndata: {...}`
+    （tool-start 用，不是 `data:` 開頭的預設事件）。`_consume_stream` 靠它作分界：
+    每收到一次這個具名事件就把目前累積的文字清空重新收集，所以 `AgentReply.text`
+    只會是**最後一輪工具呼叫之後**產生的內容——之前幾輪的旁白仍然進了 Hermes 自己的
+    `state.db`（agent 判斷要不要繼續工具呼叫用得到完整歷史），只是不會被轉送到 LINE。
+    沒有工具呼叫的單輪對話不受影響（沒有這個具名事件，行為跟以前一樣是全部串接）。
 - **兩條逾時，意義不同**（任一條踩到，使用者都收到固定提示，不再靜默）：
   - **Idle（靜默上限）**：`HERMES_IDLE_TIMEOUT_SECONDS`，預設 120 秒。連 keepalive 都
     沒了 ⇒ 容器／agent 卡死。實作是 httpx 的 read timeout，逾時拋 `httpx.ReadTimeout`。
@@ -108,7 +120,8 @@ Body:
   裡），設大了又等於死掉的 agent 沒人發現。兩條都比 LINE webhook 本身的等待時間長得多
   ——這也是為什麼整段呼叫必須在 `BackgroundTasks` 裡進行，而不是同步等待再回應 LINE。
 - **回應解析**：`ask_hermes_agent` 回傳 `AgentReply{text, prompt_tokens}`。
-  - `text` = 所有 `delta.content` 依序串接。
+  - `text` = 最後一輪工具呼叫之後的 `delta.content` 依序串接（見上方「多輪工具呼叫」
+    一點）；沒有工具呼叫的單輪對話就是全部 `delta.content` 依序串接。
   - **成功／截斷／失敗**：`hermes.failed` 為真（或 `finish_reason` 不是 `stop`／`length`
     且帶了錯誤訊息）→ `raise ValueError("Hermes agent failed: ...")`；
     `finish_reason == "length"`（＝`hermes.partial`）→ 回傳截到一半的文字，另記 warning
