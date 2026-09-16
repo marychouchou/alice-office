@@ -41,3 +41,20 @@ tools:
 # the obviously harmless ones and still blocks genuinely destructive ones.
 approvals:
   mode: smart
+# Both default to "let it run forever" (max_turns: none) and "warn but never
+# block" (hard_stop_enabled: false — Hermes treats api_server/LINE turns as
+# interactive, so guardrails only warn by default). Neither ever fires on the
+# LINE path: no human is watching to notice a turn is spiraling, so the only
+# backstop was the router's own HERMES_REQUEST_TIMEOUT_SECONDS (3600s) —
+# observed 2026-09-16 letting a weather lookup retry through 28 tool-calling
+# rounds over 7+ minutes before Hermes itself gave up. Capping both here
+# makes Hermes cut a stuck turn off in seconds, not the better part of an
+# hour.
+agent:
+  max_turns: 20
+tool_loop_guardrails:
+  hard_stop_enabled: true
+  hard_stop_after:
+    exact_failure: 3
+    same_tool_failure: 4
+    idempotent_no_progress: 3
