@@ -169,9 +169,26 @@ sequenceDiagram
 ## 5. Google OAuth gate 三態（ok／notice／blocked）對訊息流程的影響
 
 `check_google_authorization` 每則要進 agent 的訊息都跑一次。**重點：`blocked`
-時完全不呼叫 agent，但會在背景啟動容器暖機（`core._warm_container`），不等它完成
-就回授權連結**——這樣授權後的下一則訊息落在已就緒的容器上，不用再吃 30–60 秒
-冷啟動。這一步在 observe 短路與手動 reset 之後、`_reply_for` 之前執行。三態判斷本身的邏輯圖見 README「訊息授權判斷流程」，這裡補一張真正的
+時使用者的問題完全不進 agent，但會在背景把房間暖起來（`core._warm_container`），
+不等它完成就回授權連結**——這樣授權後的下一則訊息落在已就緒的房間上，不用再吃
+30–60 秒冷啟動。這一步在 observe 短路與手動 reset 之後、`_reply_for` 之前執行。
+
+暖機是**兩步**（`core._run_warmup`）：
+
+1. `get_or_create_container` → 容器起來並通過 `/health`；log `Container warm for
+   room ...`（INFO），失敗則 `Container warm-up failed for room ...`（ERROR）。
+2. **暖機探針**（`core._probe_agent`）：對容器送一輪丟棄用的對話（session id
+   `warmup-probe`，ceiling 自己的 120 秒），把 Hermes「每個進程第一輪」要付的
+   ~4.5 秒 tool registry 探測先付掉——那個結果 memoize 在進程層，所以付一次就好。
+   探針跑完立刻 `DELETE /api/sessions/warmup-probe` 把該 session 從 `state.db`
+   刪掉（Hermes 的 `session_search` 可以跨 session 搜同一個房間，不刪會被使用者
+   搜到）。成功 log `Agent warm for room ...（N ms）`（INFO）與 hermes_client 的
+   `hermes_session_deleted`；探針失敗只記 WARNING `Agent warm-up probe failed for
+   room ...`（房間不算已探測，下次被擋再試），刪不掉記 WARNING `Could not delete
+   warm-up session for room ...`。一個 router 進程對一個房間只探一次
+   （`core._probed`）——探針是一次真的 LLM 呼叫，不能每則被擋的訊息都付一次。
+
+三態判斷本身的邏輯圖見 README「訊息授權判斷流程」，這裡補一張真正的
 時序版本。
 
 ```mermaid
@@ -186,8 +203,10 @@ sequenceDiagram
     R->>OA: check_google_authorization(room_key)
     alt tokens.json 不存在，或過期且無 refresh_token
         OA-->>R: ("blocked", 授權連結文案)
-        R-)H: 背景 get_or_create_container（暖機，不等待）
-        Note over R,H: 不呼叫 agent
+        R-)H: 背景暖機 1：get_or_create_container（不等待）
+        R-)H: 背景暖機 2：POST /v1/chat/completions（探針，X-Hermes-Session-Id: warmup-probe）
+        R-)H: DELETE /api/sessions/warmup-probe（探針善後）
+        Note over R,H: 使用者的問題不進 agent；<br/>進 agent 的只有那輪丟棄用的探針
         R-->>U: 只回授權連結
     else 有 token 但缺 Drive scope
         OA-->>R: ("notice", 重新授權提示)

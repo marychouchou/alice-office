@@ -23,9 +23,10 @@ _DONE_SENTINEL = "[DONE]"
 # an error message is a failed turn.
 _USABLE_FINISH_REASONS = frozenset({"stop", "length"})
 
-# Budget for the two GET /api/sessions/{id} bracket calls (see
-# _fetch_session_counts): they read one small JSON row and must never borrow
-# the turn's own idle/ceiling budget, which can be minutes to an hour.
+# Budget for the /api/sessions/{id} side calls — the two GET brackets (see
+# _fetch_session_counts) and the warm-up probe's DELETE (delete_hermes_session).
+# They move one small JSON row and must never borrow the turn's own idle/ceiling
+# budget, which can be minutes to an hour.
 _SESSION_STATS_TIMEOUT = httpx.Timeout(10.0)
 
 
@@ -264,6 +265,43 @@ async def _fetch_session_counts(
         )
         return None, None
     return parsed.session.tool_call_count, parsed.session.api_call_count
+
+
+async def delete_hermes_session(base_url: str, session_id: str, api_key: str) -> None:
+    """Delete one Hermes session, dropping its row and messages from state.db.
+
+    The only call in this router that deletes anything on the Hermes side, and it
+    exists for exactly one reason: the warm-up probe (see core._probe_agent and
+    docs/router-hermes-agent-protocol.md 「暖機探針」). A freshly started Hermes
+    process pays a one-time tool-registry probe on its first chat turn, so the
+    gate's warm-up spends one throwaway turn on its own session id to take that
+    cost off the user's real first message. That turn must not survive: Hermes's
+    `session_search` tool reads across every session in the room, so an
+    undeleted probe would surface as room history.
+
+    Args:
+        base_url: Base URL of the Hermes agent container.
+        session_id: The session to delete. Percent-encoded into the path like
+            the GET, so a `#` (the rotated `room_key#N` form) is not cut off as
+            a URL fragment.
+        api_key: Bearer token matching the container's API_SERVER_KEY.
+
+    Raises:
+        httpx.HTTPStatusError: If Hermes answered with a non-2xx status other
+            than 404.
+        httpx.HTTPError: If the request itself failed (connection, timeout).
+    """
+    url = f"{base_url}/api/sessions/{quote(session_id, safe='')}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=_SESSION_STATS_TIMEOUT) as client:
+        response = await client.delete(url, headers=headers)
+    # 404 is success: there was nothing to delete. Hermes creates a session
+    # lazily on its first chat completion, so a probe that failed before that
+    # left nothing behind — the caller's postcondition ("no probe session in
+    # this room") already holds.
+    if response.status_code != 404:
+        response.raise_for_status()
+    logger.info("hermes_session_deleted", session_id=session_id, status=response.status_code)
 
 
 def _count_delta(after: int | None, before: int | None) -> int | None:

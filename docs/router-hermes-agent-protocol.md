@@ -148,6 +148,50 @@ Body:
 「這一輪工具呼叫失敗幾次」目前只剩 tail 這行 log 一條路，見 `docs/logging-design.md`
 §5.1 的同一則補充。
 
+### 暖機探針與 `DELETE /api/sessions/{session_id}`
+
+Google gate 擋下一則訊息時，router 會在背景把房間暖起來（`core._warm_container` →
+`core._run_warmup`），**兩步**：
+
+1. `get_or_create_container`：把容器叫起來（30–60 秒的冷啟動）。
+2. **暖機探針**：對這個容器送一輪丟棄用的對話，session id 固定
+   `warmup-probe`（`core.WARMUP_SESSION_ID`），內容只是一句「回 OK 就好」
+   （`core.WARMUP_PROMPT`），ceiling 用自己的 120 秒（`_WARMUP_MAX_SECONDS`），
+   不借用給真實對話用的 `HERMES_REQUEST_TIMEOUT_SECONDS`。
+
+第 2 步存在的理由：**容器 running 不等於 agent 熱**。Hermes 進程在「這個進程的第一輪
+對話」會做一次 tool registry 探測（browser／terminal／image-gen／web-key 能力檢查，
+外加兩次 vision auto-detect 會去打 models.dev 然後慢慢失敗），實測約 4.5 秒；結果
+memoize 在進程層（`model_tools._tool_defs_cache`，key 是 toolsets ＋ registry
+generation ＋ `config.yaml` mtime），所以只要有「某一輪」先付掉，同一個容器進程之後
+每一輪都是 11 ms 的 init。把這一輪換成 router 自己的探針，使用者授權後的第一句話就
+不用等。
+
+探針跑完（成功或失敗都一樣）立刻刪掉那個 session：
+
+```
+DELETE {base_url}/api/sessions/{session_id}
+Headers:
+  Authorization: Bearer {HERMES_API_SERVER_KEY}
+→ 200 {"object":"hermes.session.deleted","id":"warmup-probe","deleted":true}
+```
+
+- **為什麼一定要刪**：Hermes 的 `session_search` 工具可以跨 session 搜同一個房間，
+  留著的探針會變成使用者搜得到的「對話紀錄」。刪除會同時移除 `state.db` 裡的 session
+  row 與它的訊息。
+- 這是 router 唯一一個會刪 Hermes 端資料的呼叫（`hermes_client.delete_hermes_session`）。
+- **404 視為成功**：探針若在 Hermes 真正建立 session 之前就失敗，本來就沒東西可刪，
+  後置條件已經成立。其他非 2xx → `raise_for_status()`，由 `core` 記
+  `Could not delete warm-up session for room ...`（WARNING）。
+- `session_id` 一樣要 percent-encode（同上一節的理由）。
+- 探針失敗（`httpx.HTTPError`／`ValueError`／`TimeoutError`）只記一行 WARNING
+  `Agent warm-up probe failed for room ...`，不影響那則已經送出的授權連結；房間不會被
+  標記成已探測，下一則被擋的訊息會再試一次。
+- **一個 router 進程對一個房間只探一次**（`core._probed`）：探針是一次真的 LLM 呼叫
+  （約 28k prompt tokens），已經熱的容器不值得再付一次。已知取捨：operator 手動
+  `docker restart` 某房間的容器而 router 沒重啟 → 該房間下一輪真實對話自己付一次
+  4.5 秒；router 重啟 → 每個房間最多多探一次。
+
 ### 媒體訊息不走這條 API body
 
 圖片/語音/影片/檔案**不會**編碼進 `/v1/chat/completions` 的 request body（Hermes
@@ -236,10 +280,12 @@ sequenceDiagram
 
 ## 關鍵設計要點
 
-- **單一介面，兩條路**：router↔container 只走 Hermes 的 `api_server` platform，
+- **單一介面，三條路**：router↔container 只走 Hermes 的 `api_server` platform，
   沒有其他 API 或直接的 IPC。對話走 `/v1/chat/completions`；`GET
   /api/sessions/{session_id}` 是唯讀的輔助線，只供 log 用的呼叫計數，從不影響
-  對話或失敗時的使用者回覆（fail-soft，見「輔助請求」）。
+  對話或失敗時的使用者回覆（fail-soft，見「輔助請求」）；`DELETE
+  /api/sessions/{session_id}` 只在暖機探針善後時用，是 router 唯一會刪 Hermes 端
+  資料的呼叫。
 - **隔離靠 container，不靠協定**：協定本身（Bearer + session header）很單純，
   真正的房間隔離來自「一個 room_id 一個 Docker container」這個更外層的設計。
 - **container 對 LINE 零知情**：不傳憑證、不傳 LINE 專屬欄位，agent 收到的只是
