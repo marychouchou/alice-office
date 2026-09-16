@@ -81,7 +81,7 @@ E2E 測試容器已移除；`data/U_RUNTIME_TEST/` 保留（logs/ 內有上述�
 「我方寫的 tool 一律用我方準備的環境，不用 hermes 自己的」。
 
 覆核時額外查證兩點，並補進文件（`src/hermes/skill/alice/runtime-env/SKILL.md` +
-本 README 的「如果要寫 Python MCP server」小節）：
+`docs/mcp-plugin-development.md` 的「如果要寫 Python MCP server」小節）：
 
 - **local-tools plugin 的 subprocess scripts 是否需要 hermes 自己的 venv**：
   `grep` 全部 script 的 import，確認 math／OCR／law／memory／hr／browser 只 import
@@ -112,7 +112,8 @@ E2E 測試容器已移除；`data/U_RUNTIME_TEST/` 保留（logs/ 內有上述�
 environment. Only explicitly configured `env` plus a safe baseline are passed
 through」，`env:` 值支援 `${VAR}` 內插（從含 `~/.hermes/.env` 的環境解析）。
 因此把 `SKILL.md` 裡「Writing a new Python MCP server」整節移除（agent 用不上），
-只保留 README「如果要寫 Python MCP server」這個開發者向小節，並補上官方文件連結。
+只保留 `docs/mcp-plugin-development.md`「如果要寫 Python MCP server」這個開發者向
+小節，並補上官方文件連結。
 
 ## 之後怎麼加依賴
 

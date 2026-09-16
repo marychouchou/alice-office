@@ -30,9 +30,11 @@ WebFetch），不要憑記憶寫 API 呼叫——這兩個都是會改版的外�
 | 改群組聊天「該回覆／該旁觀」的判斷機制前 | `docs/group-chat-design.md` |
 | 追訊息解析、去重、批次的實作細節 | `docs/line-hermes-message-flow.md` |
 | 改 router ↔ 容器內 agent 的 HTTP 協定前 | `docs/router-hermes-agent-protocol.md` |
+| 要設定或除錯 Google Workspace 整合（Calendar／Gmail／Drive OAuth）前 | `docs/google-workspace-setup.md` |
 | 改 session epoch 輪替／交接摘要／`/new` 重置／閒置與 token 門檻前 | `docs/session-hygiene.md` |
 | 搞不清 `DATA_DIR`／`HOST_DATA_DIR`／`HERMES_TEMPLATES_DIR` 誰是誰 | `docs/env-data-paths.md` |
 | 動 tools venv 或共用 node_modules 前 | `docs/runtime-env-summary.md` |
+| 要新增／改 MCP server 或 plugin，或測試相關改動前 | `docs/mcp-plugin-development.md` |
 | 不開手機 LINE 要測 end-to-end 時 | `docs/testing-paths.md` |
 | 服務跑得起來但行為不對、要追 log／容器內 debug 時 | `docs/troubleshooting.md` |
 | 要改 log 輸出格式、加 log 欄位、或部署／擴充集中式 log 堆疊（Loki／Alloy／Grafana）前 | `docs/logging-design.md` |

@@ -188,8 +188,8 @@ sequenceDiagram
    warm-up session for room ...`。一個 router 進程對一個房間只探一次
    （`core._probed`）——探針是一次真的 LLM 呼叫，不能每則被擋的訊息都付一次。
 
-三態判斷本身的邏輯圖見 README「訊息授權判斷流程」，這裡補一張真正的
-時序版本。
+三態判斷本身的邏輯圖見 `docs/google-workspace-setup.md`「訊息授權判斷流程」，這裡
+補一張真正的時序版本。
 
 ```mermaid
 sequenceDiagram
@@ -222,7 +222,7 @@ sequenceDiagram
 ```
 
 token 過期/scope 判斷細節、`account_key` 小寫轉換規則、影響既有房間的注意事項見
-README「Google Workspace 整合」與 `docs/google-workspace-integration-summary.md`。
+`docs/google-workspace-setup.md` 與 `docs/google-workspace-integration-summary.md`。
 
 ---
 

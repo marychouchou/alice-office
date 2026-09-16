@@ -111,7 +111,8 @@ router log 出現 `Wrote default config.yaml for room [U_E2E_TEST2]`，房間的
 
 - `.env` 目前 `HERMES_IMAGE=nousresearch/hermes-agent`（原生 image，沒有
   `/opt/node_modules` 也沒有 sympy/pymupdf）。要讓 secretary-mcp／math／OCR 真的可用，
-  要 build 並切換到 `Dockerfile.hermes` 衍生版（見 README「Production 建法」）。
+  要 build 並切換到 `Dockerfile.hermes` 衍生版（見 `docs/mcp-plugin-development.md`
+  「Production 建法」）。
 - 本機 Docker 裡多留了一份測試用的 `alice-hermes-agent:e2etest` image，可以
   `docker rmi alice-hermes-agent:e2etest` 清掉，或直接拿來當正式 tag 用。
 - 多個 MCP 共用同一份 `/opt/node_modules` 依賴——如果未來某個新 MCP 需要跟現有

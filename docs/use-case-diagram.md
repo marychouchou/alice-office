@@ -84,8 +84,8 @@ flowchart TB
 | UC3 | 在群組中被動提供背景脈絡 | `core.py::process_inbound`（observe short-circuit）、`group_context.py::record_observed` | `docs/group-chat-design.md` §6 |
 | UC4 | bot 加入群組自我介紹 | `channels/line/adapter.py::_schedule_join_greeting`（`_GROUP_JOIN_GREETING`，不經 core） | `docs/group-chat-design.md` §9 |
 | UC5 | 重置對話 | `session_hygiene.py::check_reset_command`／`reset_session`、`core.py::process_inbound`（manual reset 短路） | `docs/session-hygiene.md`「手動指令」節 |
-| UC6 | 授權 Google 服務 | `google_oauth.py::oauth_start`／`oauth_callback`／`_store_token` | README「Google Workspace 整合」、`docs/google-workspace-integration-summary.md` |
-| UC7 | 使用 Google Calendar／Gmail／Drive 工具 | `google_oauth.py::check_google_authorization`（gate）、`src/hermes/mcp/{gmail,drive,google-calendar}/` | README「訊息授權判斷流程」 |
+| UC6 | 授權 Google 服務 | `google_oauth.py::oauth_start`／`oauth_callback`／`_store_token` | `docs/google-workspace-setup.md`、`docs/google-workspace-integration-summary.md` |
+| UC7 | 使用 Google Calendar／Gmail／Drive 工具 | `google_oauth.py::check_google_authorization`（gate）、`src/hermes/mcp/{gmail,drive,google-calendar}/` | `docs/google-workspace-setup.md`「訊息授權判斷流程」 |
 | UC8 | 上傳媒體檔案給助理處理 | `channels/line/events.py::_download_and_note_media`／`resolve_inbound_text` | `docs/line-hermes-message-flow.md` §3 |
 
 > **UC2 的部署前提（呼叫詞）**：`addresser` 能點名 bot 只有兩種管道——

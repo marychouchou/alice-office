@@ -48,7 +48,8 @@
 ## 架構圖
 
 > 下圖是原始（共用 `data/_google/`）設計，保留作歷史記錄——見上方 2026-07-11 更新，
-> 現況是逐房隔離的 `data/<room_id>/google/`，README「Google Workspace 整合」有最新圖。
+> 現況是逐房隔離的 `data/<room_id>/google/`，見 `docs/google-workspace-setup.md`
+> 「訊息授權判斷流程」。
 
 ```mermaid
 graph TD
