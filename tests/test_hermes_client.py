@@ -9,7 +9,11 @@ from unittest.mock import Mock, patch
 import httpx
 import pytest
 
-from alice_office_router.hermes_client import AgentReply, ask_hermes_agent
+from alice_office_router.hermes_client import (
+    AgentReply,
+    ask_hermes_agent,
+    delete_hermes_session,
+)
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -470,3 +474,63 @@ async def test_ask_hermes_agent_raises_timeout_error_at_the_ceiling() -> None:
 
     with _mock_transport(_trickle), pytest.raises(TimeoutError):
         await asyncio.wait_for(_ask(max_seconds=0.05), timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Session deletion (the warm-up probe's cleanup)
+# ---------------------------------------------------------------------------
+
+
+async def _delete(session_id: str = "warmup-probe") -> None:
+    """Call delete_hermes_session with the standard test arguments."""
+    await delete_hermes_session("http://hermes_room_AAA:8642", session_id, "test_key")
+
+
+async def test_delete_hermes_session_sends_an_authorized_delete() -> None:
+    """A successful delete returns nothing and hits the session's own path."""
+
+    def _deleted(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"object": "hermes.session.deleted", "id": "warmup-probe", "deleted": True}
+        )
+
+    with _mock_transport(_deleted) as seen:
+        assert await _delete() is None
+
+    assert len(seen) == 1
+    assert seen[0].method == "DELETE"
+    assert seen[0].url.path == "/api/sessions/warmup-probe"
+    assert seen[0].headers["Authorization"] == "Bearer test_key"
+
+
+async def test_delete_hermes_session_treats_404_as_deleted() -> None:
+    """Nothing to delete is the postcondition already met, not a failure."""
+
+    def _missing(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": {"message": "not found"}})
+
+    with _mock_transport(_missing):
+        assert await _delete() is None
+
+
+async def test_delete_hermes_session_raises_on_other_error_statuses() -> None:
+    """Any non-2xx that is not a 404 surfaces to the caller."""
+
+    def _broken(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    with _mock_transport(_broken), pytest.raises(httpx.HTTPStatusError):
+        await _delete()
+
+
+async def test_delete_hermes_session_percent_encodes_the_session_id() -> None:
+    """A rotated id (`room_key#N`) must reach the wire encoded, like the GET."""
+
+    def _deleted(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"deleted": True})
+
+    with _mock_transport(_deleted) as seen:
+        await _delete("room_AAA#2")
+
+    assert seen[0].url.raw_path == b"/api/sessions/room_AAA%232"
+    assert seen[0].url.fragment == ""

@@ -55,9 +55,30 @@ JSON 物件（`docker compose logs --no-log-prefix webhook_router | jq .`），�
 `container_manager.py` 另外會記錄 `Creating new container for room`、
 `Seeded template [...] into ...`、`Container ... created.`、
 `Waiting for Hermes agent at ... to become ready...`（只在容器真的還沒就緒時出現）、
-`Docker API error for container ...`。gate 擋下時的背景暖機由 `core.py` 記錄
-`Container warm for room ...`（INFO）／`Container warm-up failed for room ...`
-（ERROR，使用者不會收到通知，下一則訊息走正常路徑再試）。
+`Docker API error for container ...`。
+
+gate 擋下時的背景暖機是兩步（容器 → agent 探針 → 刪掉探針 session，設計見
+`docs/router-hermes-agent-protocol.md`「暖機探針」），`core.py` 對應的行是：
+
+- `Container warm for room ...`（INFO）：第 1 步成功，容器起來且 `/health` 通過。
+- `Container warm-up failed for room ...`（ERROR）：第 1 步失敗，**不會**再做探針；
+  使用者不會收到通知，下一則訊息走正常路徑再試。
+- `Agent warm for room ...（N ms）`（INFO）：第 2 步成功，這個房間之後的第一則真實
+  訊息不用再付 Hermes 每進程一次的 ~4.5 秒 tool registry 探測。
+- `Agent warm-up probe failed for room ...`（WARNING）：探針失敗，只代表使用者的第一輪
+  要自己付那 4.5 秒；房間不算已探測，下一則被擋的訊息會再試一次。
+- `Agent warm-up failed for room ...`（ERROR）：探針丟出預期外的例外型別（不是
+  HTTP／逾時／`ValueError`），要當成 bug 看。
+- `Could not delete warm-up session for room ...`（WARNING）：探針的 session 沒刪成功，
+  該房間的 `session_search` 可能會搜到一輪 `warmup-probe` 的對話；手動善後
+  `curl -X DELETE -H "Authorization: Bearer $HERMES_API_SERVER_KEY"
+  http://<container>:8642/api/sessions/warmup-probe`。
+- 刪除成功則由 `hermes_client` 記結構化事件 `hermes_session_deleted`
+  （帶 `session_id`／`status`）。
+
+**預期現象**：房間的 `data/<room_id>/logs/agent.log` 在容器剛起來時會有一輪
+`session=warmup-probe` 的對話（一句「回 OK 就好」），這是暖機探針，不是使用者的訊息，
+也不會留在 `state.db`（跑完就被刪了）。
 
 注意：`line_webhook` 本身在簽章驗證通過、events 解析完之後**沒有**額外印一行
 「收到 webhook」——訊號是每個 request 一行的 `"event":"http_request"`（帶
