@@ -1,7 +1,7 @@
 ---
 name: runtime-env
-description: "這個容器的執行環境：官方 skill 直接照它自己的文件用 python／pip；execute_code 工具跑的也是這個 python，已預裝 numpy／sympy（沒有 scipy）；Alice 自家工具用 tools-python；使用者傳來的檔案在 /opt/data/incoming/。要跑 execute_code、讀 PDF、或找使用者傳的檔案前先看這份。"
-version: 2.1.1
+description: "這個容器的執行環境：官方 skill 直接照它自己的文件用 python／pip；execute_code 工具跑的也是這個 python，已預裝 numpy／sympy（沒有 scipy）；Alice 自家工具用 tools-python；使用者傳來的檔案在 /opt/data/incoming/；上網查沒有固定網址的東西先用 web_search、不要用瀏覽器開搜尋引擎。要跑 execute_code、讀 PDF、找使用者傳的檔案、或上網查資料前先看這份。"
+version: 2.2.0
 author: alice
 license: MIT
 platforms: [linux]
@@ -84,3 +84,17 @@ print(len(doc), 'pages')
 ## 圖片
 
 主模型本身看得懂圖片，直接用 `vision_analyze` 給 `/opt/data/incoming/<檔名>` 的路徑即可。
+
+## 上網查資料
+
+- 要查**沒有固定網址、得靠搜尋才找得到**的東西（統一編號查公司名、找某家店、查最近的消息）：
+  先用 **`web_search`**（回標題＋網址＋摘要），要看某一頁的完整內容再用 **`browser_navigate`**
+  開那個網址。
+- **不要**用 `browser_navigate` 直接開 Google／Bing／DuckDuckGo／Yahoo 的搜尋結果頁——這個
+  容器的瀏覽器沒有防偵測，那些頁面幾乎一定回 bot 驗證，再換幾個搜尋引擎也一樣。也不要憑印象
+  猜政府 API 的網址（會 404），先 `web_search` 拿到真的網址再開。
+- **`web_extract` 在這個部署不能用**（搜尋後端只做搜尋），呼叫會回 search-only 錯誤：跳過它，
+  直接用 `browser_navigate` 讀頁。
+- 工具清單裡**沒有** `web_search` 時，代表這個部署沒開搜尋後端：直接告訴使用者這裡查不到、
+  請他提供網址或自行查詢，不要拿瀏覽器硬闖搜尋頁繞路。
+- 有固定 API 的資料（天氣、股價、匯率）照原本的做法用 `terminal` 直接打 API 即可，不需要搜尋。
