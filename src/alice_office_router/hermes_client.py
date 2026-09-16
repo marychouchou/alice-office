@@ -16,7 +16,17 @@ logger = structlog.stdlib.get_logger(__name__)
 # any line starting with ":" is a comment — Hermes writes `: keepalive` every 30s
 # of silence, which is exactly what makes the idle timeout a liveness signal.
 _DATA_PREFIX = "data:"
+_EVENT_PREFIX = "event:"
 _DONE_SENTINEL = "[DONE]"
+
+# Hermes tags the SSE frame it writes right before running a tool with this
+# named event (gateway/platforms/api_server.py's _write_real_streaming_sse) —
+# the only boundary the wire format exposes between one tool-calling round and
+# the next. Every other chunk, whatever round it belongs to, is an untagged
+# `chat.completion.chunk` with finish_reason null, so a model's "let me try
+# this" narration before a tool call is otherwise indistinguishable from its
+# real final answer. See _consume_stream.
+_TOOL_PROGRESS_EVENT = "hermes.tool.progress"
 
 # finish_reason values that still carry a usable answer: "stop" is a complete
 # turn, "length" a truncated one (returned, with a warning). Anything else with
@@ -150,7 +160,11 @@ class _StreamOutcome:
     """The running result of one streamed turn, folded chunk by chunk.
 
     Attributes:
-        parts: The `delta.content` fragments seen so far, joined by `text`.
+        parts: The `delta.content` fragments seen so far *in the current tool
+            round*, joined by `text` — cleared each time a
+            `hermes.tool.progress` event marks the start of another round, so
+            a multi-round turn's final text is only what the model produced
+            after its last tool call (see _consume_stream).
         chunks: How many chunk events were parsed (a liveness/volume metric
             for the call log, not part of the reply).
         finish_reason: The finish chunk's reason, None if the stream ended
@@ -363,21 +377,41 @@ async def _consume_stream(response: httpx.Response, session_id: str) -> _StreamO
     A data line that will not parse is skipped rather than fatal: one corrupt
     frame must not cost the user a turn whose remaining chunks are fine.
 
+    Hermes flattens an entire multi-round tool-calling turn onto one stream
+    with no per-round finish_reason, so a round boundary is only visible as a
+    named `hermes.tool.progress` event (see _TOOL_PROGRESS_EVENT). Each time
+    one arrives, the content collected so far is discarded: it was narration
+    the model produced before deciding to call a tool, not its answer. Only
+    what streams in after the *last* such event survives to become the reply
+    the user sees — the rest still reaches Hermes's own state.db, this just
+    keeps it out of the message we relay.
+
     Args:
         response: The open streaming response (already checked for status).
         session_id: The turn's Hermes session id, for the skip warning.
 
     Returns:
-        The folded outcome — text parts, chunk count, and whatever the finish
-        chunk reported.
+        The folded outcome — text parts (last round only), chunk count, and
+        whatever the finish chunk reported.
     """
     outcome = _StreamOutcome()
+    event_name: str | None = None
     async for line in response.aiter_lines():
-        payload = _sse_payload(line)
+        stripped = line.strip()
+        if not stripped:
+            event_name = None  # blank line ends the current SSE frame
+            continue
+        if stripped.startswith(_EVENT_PREFIX):
+            event_name = stripped[len(_EVENT_PREFIX) :].strip()
+            continue
+        payload = _sse_payload(stripped)
         if payload is None:
             continue
         if payload == _DONE_SENTINEL:
             break
+        if event_name == _TOOL_PROGRESS_EVENT:
+            outcome.parts.clear()
+            continue
         try:
             chunk = _ChatCompletionChunk.model_validate_json(payload)
         except ValidationError as exc:

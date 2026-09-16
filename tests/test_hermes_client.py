@@ -41,6 +41,16 @@ def _content_chunk(text: str) -> str:
     return _chunk(choices=[{"index": 0, "delta": {"content": text}, "finish_reason": None}])
 
 
+def _tool_progress_frame(**fields: object) -> str:
+    """Render Hermes's tool-start SSE frame: a named event, not a bare data line.
+
+    This is the only round boundary the wire format exposes
+    (docs/router-hermes-agent-protocol.md); ask_hermes_agent uses it to drop
+    narration produced before a tool call.
+    """
+    return "event: hermes.tool.progress\ndata: " + json.dumps(fields or {"tool": "browser_navigate"})
+
+
 def _finish_chunk(reason: str = "stop", **fields: object) -> str:
     """Render the finish chunk that closes a streamed turn.
 
@@ -200,6 +210,29 @@ async def test_ask_hermes_agent_assembles_text_across_content_chunks() -> None:
         reply = await _ask()
 
     assert reply.text == "哈囉，我是 Hermes"
+
+
+async def test_ask_hermes_agent_drops_narration_from_earlier_tool_rounds() -> None:
+    """Only content after the *last* tool_progress event reaches the reply.
+
+    Hermes streams a model's "let me try this" commentary before every tool
+    call as ordinary content chunks, indistinguishable on the wire from its
+    real final answer — the named `hermes.tool.progress` event is the only
+    boundary marking one round from the next.
+    """
+    body = _body(
+        _content_chunk("讓我先查一下天氣"),
+        _tool_progress_frame(),
+        _content_chunk("這個網址不行，換一個："),
+        _tool_progress_frame(),
+        _content_chunk("查到了，台北 27 度"),
+        _finish_chunk(),
+        "data: [DONE]",
+    )
+    with _serving(body):
+        reply = await _ask()
+
+    assert reply.text == "查到了，台北 27 度"
 
 
 async def test_ask_hermes_agent_ignores_keepalives_and_blank_lines() -> None:
