@@ -1,0 +1,59 @@
+# 選配（opt-in）的自架 SearXNG — 給每個房間 agent 的 web_search 工具用的後端。
+# 背景：Hermes 內建的 web_search 需要一個 provider 才會出現在工具清單裡；沒有
+# provider 時 agent 只剩瀏覽器工具，會拿沒有防偵測的 headless Chromium 硬闖
+# Google/Bing 的搜尋頁，幾乎每次都被 bot 驗證擋下。SearXNG 是 Hermes 內建
+# provider 之一（image 內 /opt/hermes/plugins/web/searxng/），只要容器 env 有
+# SEARXNG_URL 就會被自動選用，不用改任何房間的 config.yaml。
+#
+# 啟用（一定要從 repo 根目錄執行，相對路徑以它為基準）：
+#   docker compose -f docker-compose.yml -f deploy/searxng/docker-compose.searxng.yml up -d
+# 或 ./scripts/deploy_host.sh --with-searxng
+# 並在 .env 設 SEARXNG_URL=http://searxng:8080（router 轉傳進每個房間容器）與
+# SEARXNG_SECRET（只給這份 compose 用，router 不讀）。既有房間容器要
+# `docker rm -f hermes_<room_id>` 讓 router 重建才吃得到新 env。
+#
+# 跟 deploy/logging/ 不同，這個服務**刻意掛在 hermes_global_net 上**：每個房間的
+# agent 容器要能用容器名 `searxng` 直接打它。這樣做安全的前提是 SearXNG 無狀態、
+# 不留任何跟房間綁定的資料（Loki 存了所有房間的 log，所以那邊不能這樣掛）。
+# 不 publish host port：只有內網可達，operator 要查用
+#   docker exec hermes_<room_id> curl -s 'http://searxng:8080/search?q=test&format=json'
+services:
+  searxng:
+    # pin 到 dated tag，不用 latest：上游引擎的爬取邏輯常改，換版可能靜默壞掉。
+    image: searxng/searxng:2026.9.15-ca4965040
+    container_name: searxng
+    environment:
+      # 沒設就直接讓 compose 失敗，不要拿 settings.yml 裡的 placeholder 上線。
+      - SEARXNG_SECRET=${SEARXNG_SECRET:?請在 .env 設 SEARXNG_SECRET（見 .env.example）}
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      # settings.yml 用唯讀掛載，entrypoint 預設會 chown 整個 /etc/searxng，關掉。
+      - FORCE_OWNERSHIP=false
+    volumes:
+      - ./deploy/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      # favicon 等快取；沒有也能跑，named volume 只是避免每次重啟重抓。
+      - searxng-cache:/var/cache/searxng
+    networks:
+      - hermes_global_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    labels:
+      alice.role: infra
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # 跟 docker-compose.yml 同一個 external network（router 與所有房間容器都在上面）。
+  hermes_global_net:
+    name: hermes_global_net
+    external: true
+
+volumes:
+  searxng-cache:

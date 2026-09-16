@@ -122,3 +122,10 @@ def test_log_level_accepts_lower_case() -> None:
     settings = Settings(**_REQUIRED, LOG_LEVEL="debug")  # type: ignore[arg-type]
 
     assert settings.LOG_LEVEL == "DEBUG"
+
+
+def test_searxng_url_defaults_to_disabled() -> None:
+    """No SEARXNG_URL means the agent's web_search stays hidden, as before this setting existed."""
+    settings = Settings(**_REQUIRED)  # type: ignore[arg-type]
+
+    assert settings.SEARXNG_URL == ""

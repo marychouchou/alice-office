@@ -1,0 +1,25 @@
+# SearXNG 設定（掛到容器 /etc/searxng/settings.yml，唯讀）。
+# 只寫跟預設不同的部分，其餘由 use_default_settings 帶入官方預設值。
+# 語法見 https://docs.searxng.org/admin/settings/settings.html
+use_default_settings:
+  engines:
+    # Google 是上游引擎裡對非瀏覽器流量最兇的，一被判定成 bot 會把整個 instance 卡在
+    # CAPTCHA；先拿掉，靠 bing / duckduckgo / brave / startpage 等。之後看
+    # `docker logs searxng` 有哪個引擎一直 suspended 再調這份清單。
+    remove:
+      - google
+
+server:
+  # 實際值由 compose 的 SEARXNG_SECRET 環境變數覆蓋（SearXNG 的 $SEARXNG_* 慣例）。
+  secret_key: "placeholder-overridden-by-SEARXNG_SECRET-env"
+  # limiter 需要 valkey/redis；這是只有內網 agent 會打的私有 instance，不需要。
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  # Hermes 的 provider 打 /search?format=json；預設只開 html，少了 json 會回 403。
+  formats:
+    - html
+    - json

@@ -205,6 +205,33 @@ def test_missing_container_is_created_with_hermes_env() -> None:
     assert env["LLM_API_KEY"] == "sk-test"
     assert "LINE_CHANNEL_ACCESS_TOKEN" not in env
     assert "LINE_CHANNEL_SECRET" not in env
+    # Unset SEARXNG_URL must not leak an empty string into the container:
+    # Hermes's provider gates on bool(value), but an empty key still reads as
+    # "configured" to anyone inspecting the env.
+    assert "SEARXNG_URL" not in env
+
+
+def test_searxng_url_is_forwarded_to_the_container_when_set() -> None:
+    """SEARXNG_URL reaches the agent container so Hermes's web_search picks SearXNG."""
+    mock_container = _make_running_container()
+    mock_client = MagicMock()
+    mock_client.containers.get.side_effect = docker.errors.NotFound("not found")
+    mock_client.containers.run.return_value = mock_container
+    settings = SETTINGS_IN_DOCKER.model_copy(update={"SEARXNG_URL": "http://searxng:8080"})
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=mock_client),
+        patch("alice_office_router.container_manager._wait_until_ready"),
+        patch("alice_office_router.container_manager._ensure_data_dir"),
+        patch("alice_office_router.container_manager.ensure_soul_seed"),
+        patch("alice_office_router.container_manager.ensure_mcp_seed"),
+        patch("alice_office_router.container_manager.ensure_plugin_seed"),
+        patch("alice_office_router.container_manager._ensure_config_yaml"),
+    ):
+        get_or_create_container("room_AAA", settings)
+
+    env = mock_client.containers.run.call_args.kwargs["environment"]
+    assert env["SEARXNG_URL"] == "http://searxng:8080"
 
 
 def test_created_container_is_labelled_and_its_log_is_capped() -> None:

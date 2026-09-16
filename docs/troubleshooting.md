@@ -459,6 +459,40 @@ qwen3 的思考模式會讓一次呼叫吐出數萬 reasoning token，且 Hermes
 `SESSION_ROTATE_PROMPT_TOKENS`（預設 120000，高於 Hermes 壓縮點；想讓 router 先換 epoch
 帶交接摘要，調到 80000 左右）。該輪的 session 已塞滿時，下一句先 `/new`。
 
+### 2.12 Agent 查不到網路上的東西／一直用瀏覽器開搜尋頁被 bot 驗證擋
+
+症狀：`agent.log` 裡一串 `browser_navigate` 打 google.com／bing.com／duckduckgo.com，
+回覆說「所有搜尋引擎都被 bot 驗證擋住」；有固定 API 的查詢（天氣、股價）反而正常。
+原因是 agent 的工具清單裡**沒有 `web_search`**：Hermes 只在有搜尋 provider 時才把它列
+出來（`tools/web_tools.py` 的 `check_web_api_key`），沒有就只剩瀏覽器工具硬闖。這個
+repo 用自架 SearXNG 當 provider（README「選配：自架 SearXNG 網頁搜尋」），依序檢查：
+
+```bash
+# 1. 房間容器有沒有拿到 URL（沒有＝容器建在設定之前，rm -f 讓 router 重建）
+docker exec hermes_<room_id> env | grep SEARXNG_URL
+
+# 2. 從房間容器打得到 SearXNG 嗎（不從 host 打：它不 publish port）
+docker exec hermes_<room_id> curl -s -w '\nHTTP %{http_code}\n' \
+  'http://searxng:8080/search?q=test&format=json' | tail -c 400
+#    connection refused / could not resolve → searxng 沒起，或不在 hermes_global_net
+#    HTTP 403 → deploy/searxng/settings.yml 的 search.formats 少了 json
+#    HTTP 200 但 "results": [] → 上游引擎全被擋，看第 3 步
+
+# 3. 上游引擎狀態（回應 JSON 的 unresponsive_engines 也看得到，例如 [["duckduckgo","CAPTCHA"]]）
+docker logs searxng 2>&1 | grep -iE "captcha|suspended|blocked|too many" | tail
+#    某個引擎一直被擋 → 在 settings.yml 的 use_default_settings.engines.remove 加上它，
+#    docker compose ... restart searxng（Google 已預設拿掉）
+
+# 4. agent 這次真的用了 web_search 嗎
+grep -E "web_search|SearXNG search" data/<room_id>/logs/agent.log | tail
+#    SearXNG provider 成功會記 "SearXNG search '<query>': N results (from M raw, limit 5)"
+```
+
+`docker logs searxng` 開機時的 `ahmia/torch: can't register engine` 與一次性的
+`X-Forwarded-For nor X-Real-IP header is set!` 都是無害的（沒有 Tor、沒有反向代理）。
+另一個已知限制：SearXNG 只做搜尋，同組的 `web_extract` 工具會回「SearXNG is a search-only
+backend」——這是預期行為，agent 讀結果頁要用 `browser_navigate`。
+
 ## 3. 指令速查表
 
 | 想做什麼 | 指令 |

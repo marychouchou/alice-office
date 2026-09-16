@@ -22,6 +22,12 @@
 #                   堆疊掛在自己的 logging_net 上，不接 hermes_global_net。
 #                   舊的房間容器沒有 alice.* label，要 docker rm -f 讓 router 重建
 #                   才收得到（見下方啟用時印出的提醒）。
+#   --with-searxng  一併起自架 SearXNG（agent 的 web_search 工具後端，見
+#                   deploy/searxng/ 與 README「選配：自架 SearXNG 網頁搜尋」）。需要
+#                   .env 有 SEARXNG_SECRET 與 SEARXNG_URL=http://searxng:8080。
+#                   跟 logging 不同，它掛在 hermes_global_net 上（房間容器要能用
+#                   容器名打它）。舊的房間容器沒有 SEARXNG_URL env，同樣要
+#                   docker rm -f 讓 router 重建。
 
 set -euo pipefail
 
@@ -31,15 +37,18 @@ NETWORK_NAME="hermes_global_net"
 HERMES_IMAGE_TAG="alice-hermes-agent:v1"
 
 LOGGING_COMPOSE_FILE="deploy/logging/docker-compose.logging.yml"
+SEARXNG_COMPOSE_FILE="deploy/searxng/docker-compose.searxng.yml"
 
 PULL_HERMES=false
 RUN_VERIFY=true
 WITH_LOGGING=false
+WITH_SEARXNG=false
 for arg in "$@"; do
   case "${arg}" in
     --pull-hermes) PULL_HERMES=true ;;
     --no-verify) RUN_VERIFY=false ;;
     --with-logging) WITH_LOGGING=true ;;
+    --with-searxng) WITH_SEARXNG=true ;;
     *)
       echo "[deploy] 不認得的參數: ${arg}" >&2
       exit 1
@@ -73,6 +82,23 @@ if ${WITH_LOGGING}; then
   # Alloy 靠 alice.* label 發現容器，而 label 是建立時寫死的：這個版本之前建的
   # hermes_<room_id> 容器沒有 label，Grafana 裡不會出現，要砍掉讓 router 重建。
   log "提醒：舊的房間容器沒有 alice.* label，Alloy 收不到它們的 stdout。"
+  log "      docker rm -f hermes_<room_id> 之後，下一則訊息進來 router 會自動重建"
+  log "      （data/<room_id>/ 不受影響）。"
+fi
+if ${WITH_SEARXNG}; then
+  if ! grep -qE '^SEARXNG_SECRET=.+' .env; then
+    log "--with-searxng 需要 .env 設定非空的 SEARXNG_SECRET（見 .env.example）"
+    exit 1
+  fi
+  if ! grep -qE '^SEARXNG_URL=.+' .env; then
+    log "--with-searxng 需要 .env 設定 SEARXNG_URL=http://searxng:8080，router 才會把它轉傳進房間容器"
+    exit 1
+  fi
+  COMPOSE_FILES+=(-f "${SEARXNG_COMPOSE_FILE}")
+  log "已啟用自架 SearXNG：${SEARXNG_COMPOSE_FILE}"
+  # 容器 env 只在建立時寫入：這個版本之前建的 hermes_<room_id> 容器沒有
+  # SEARXNG_URL，agent 的工具清單裡就不會有 web_search。
+  log "提醒：舊的房間容器沒有 SEARXNG_URL env，agent 看不到 web_search 工具。"
   log "      docker rm -f hermes_<room_id> 之後，下一則訊息進來 router 會自動重建"
   log "      （data/<room_id>/ 不受影響）。"
 fi
@@ -136,7 +162,7 @@ log "docker compose up -d --build"
 ${DOCKER} compose "${COMPOSE_FILES[@]}" up -d --build
 
 log "容器狀態："
-if ${WITH_LOGGING}; then
+if ${WITH_LOGGING} || ${WITH_SEARXNG}; then
   ${DOCKER} ps --filter "label=alice.role"
 else
   ${DOCKER} ps --filter "name=alice-office-router" --filter "name=hermes_"
@@ -171,4 +197,9 @@ if ${WITH_LOGGING}; then
   log "Grafana：只綁 127.0.0.1:3000，從自己的機器開 tunnel 後用瀏覽器連"
   log "  ssh -N -L 3000:127.0.0.1:3000 $(whoami)@<這台主機>   → http://localhost:3000（帳號 admin）"
   log "常用 LogQL 查詢見 docs/troubleshooting.md 第 1 節"
+fi
+if ${WITH_SEARXNG}; then
+  log "SearXNG：不對外開 port，驗證用任一房間容器打它："
+  log "  ${DOCKER} exec hermes_<room_id> curl -s 'http://searxng:8080/search?q=test&format=json' | head -c 300"
+  log "上游引擎被擋會在 ${DOCKER} logs searxng 出現，見 docs/troubleshooting.md 2.12"
 fi
