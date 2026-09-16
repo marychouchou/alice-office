@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import stat
 from pathlib import Path
 
 import pytest
@@ -178,6 +179,30 @@ def test_ensure_google_seed_copies_deployment_creds_into_room_dir(tmp_path: Path
         settings.google_web_creds_path.read_text(encoding="utf-8")
     )
     assert (room_dir / "gcp-oauth.keys.installed.json").exists()
+
+
+def test_ensure_google_seed_files_are_world_readable(tmp_path: Path) -> None:
+    """Seeded credential files are 0644, not mkstemp's default 0600.
+
+    Room container MCP subprocesses (google-calendar/gmail/drive) run as
+    uid 10000, not root, and must be able to read these files. Source files
+    are made 0600 here so the assertion proves the mode is set explicitly by
+    _copy_atomically rather than merely inherited from the source.
+    """
+    settings = _settings_with_google(tmp_path, enabled=True)
+    settings.google_installed_creds_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.google_installed_creds_path.write_text(
+        '{"installed": {"client_id": "x", "client_secret": "y"}}', encoding="utf-8"
+    )
+    settings.google_web_creds_path.chmod(0o600)
+    settings.google_installed_creds_path.chmod(0o600)
+
+    ensure_google_seed("room_AAA", settings)
+
+    room_dir = settings.room_google_dir("room_AAA")
+    for filename in ("gcp-oauth.keys.json", "gcp-oauth.keys.installed.json"):
+        dest = room_dir / filename
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o644
 
 
 def test_ensure_google_seed_does_not_overwrite_existing_room_copy(tmp_path: Path) -> None:

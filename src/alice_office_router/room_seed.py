@@ -217,6 +217,11 @@ def _copy_atomically(src: Path, dest: Path) -> None:
     directory and renaming over `dest` makes each writer's result appear
     whole, and two racing writers simply install identical content.
 
+    `dest` ends up mode 0644 (world-readable), not mkstemp's default 0600:
+    the room container's Hermes MCP subprocesses (google-calendar/gmail/
+    drive) run as uid 10000, not root, and need read access to these seeded
+    credential files.
+
     Args:
         src: The file to copy.
         dest: Where to put it; its parent directory must exist.
@@ -226,6 +231,10 @@ def _copy_atomically(src: Path, dest: Path) -> None:
     try:
         with os.fdopen(fd, "wb") as tmp, src.open("rb") as source:
             shutil.copyfileobj(source, tmp)
+            # mkstemp creates the file 0600 (owner-only); restore the 0644 a
+            # plain copy would have produced so uid 10000 inside the room
+            # container can read it too.
+            os.fchmod(tmp.fileno(), 0o644)
         tmp_path.replace(dest)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
