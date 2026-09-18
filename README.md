@@ -618,7 +618,7 @@ alice-office-router/
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | | 共用 LLM 後端設定，自動寫入每個新房間的 `config.yaml` |
 | `ROUTER_IN_DOCKER` | | Router 是否跑在 Docker 內（預設 `true`）；本機開發用 `uv run uvicorn` 時設為 `false`，容器會改為發布隨機 host port |
 | `DEFAULT_PLUGINS` | | 寫入每個新房間 config.yaml 的預設 plugin 清單（逗號分隔，預設 `local-tools`），名稱需對應 `HERMES_TEMPLATES_DIR/plugin/` 底下已 seed 的目錄名 |
-| `GOOGLE_OAUTH_PUBLIC_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝ Google Workspace 整合停用，見「[Google Workspace 整合](#google-workspace-整合)」 |
+| `PUBLIC_BASE_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線），也就是使用者瀏覽器連得到的網址（通常是 Cloudflare tunnel）；Google 授權連結與 `{url}/oauth/callback` 用它組。Google 整合的開關是「它已設且 Web application 憑證檔存在」，見「[Google Workspace 整合](#google-workspace-整合)」。2026-09-17 由 `GOOGLE_OAUTH_PUBLIC_URL` 改名而來，舊名不再讀取——升級時請改 `.env` |
 | `GOOGLE_OAUTH_GATE` | | 預設 `true`。設 `false` 時 Google OAuth 路由照常運作，只是不擋任何房間的訊息 |
 | `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
 | `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 [`docs/session-hygiene.md`](docs/session-hygiene.md)「1. 手動指令」 |

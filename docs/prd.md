@@ -239,7 +239,7 @@ flowchart TD
 身為使用者，如果我要助理操作我的 Google 服務，我需要先授權；已經授權的部分不該被
 反覆打斷。
 
-- 只有部署方設定 `GOOGLE_OAUTH_PUBLIC_URL` 且放好 Web application 憑證時才啟用
+- 只有部署方設定 `PUBLIC_BASE_URL` 且放好 Web application 憑證時才啟用
   （`Settings.google_oauth_enabled`）；`GOOGLE_OAUTH_GATE`（預設 `true`）可在已啟用
   的部署上單獨關閉「擋訊息」這一步——設 `false` 時 `/oauth/start`、`/oauth/callback`
   照常可用，但 inbound 訊息一律不因未授權被擋（等同 gate 永遠回 `ok`）。

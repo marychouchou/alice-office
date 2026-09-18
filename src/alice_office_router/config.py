@@ -90,10 +90,13 @@ class Settings(BaseSettings):
     # Names must match seeded plugin directory names under HERMES_TEMPLATES_DIR/plugin/.
     DEFAULT_PLUGINS: str = "local-tools"
     # Public HTTPS base URL of this router (no trailing slash), e.g.
-    # https://your-domain. Used to build the Google OAuth redirect_uri
-    # ({url}/oauth/callback) and the auth links sent to LINE users. Must also
-    # be added to the GCP Web application client's Authorized redirect URIs.
-    GOOGLE_OAUTH_PUBLIC_URL: str = ""
+    # https://your-domain — the one address users' browsers reach it at
+    # (typically a Cloudflare tunnel). Used to build the Google OAuth
+    # redirect_uri ({url}/oauth/callback, which must also be registered in the
+    # GCP Web application client's Authorized redirect URIs) and the auth links
+    # sent to LINE users. Renamed from GOOGLE_OAUTH_PUBLIC_URL on 2026-09-17;
+    # the old name is not read.
+    PUBLIC_BASE_URL: str = ""
     # When False, the /oauth/start and /oauth/callback routes still work, but
     # inbound LINE messages are never blocked pending Google authorization
     # (see google_oauth.check_google_authorization).
@@ -386,7 +389,7 @@ class Settings(BaseSettings):
             credentials file has been placed under google_web_creds_path
             (the deployment-level seed source, not any room's own copy).
         """
-        return bool(self.GOOGLE_OAUTH_PUBLIC_URL) and self.google_web_creds_path.exists()
+        return bool(self.PUBLIC_BASE_URL) and self.google_web_creds_path.exists()
 
 
 def get_settings() -> Settings:

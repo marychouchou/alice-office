@@ -79,7 +79,7 @@ async def app_client(tmp_path: Path):
 
     settings = _settings(
         tmp_path,
-        GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com",
+        PUBLIC_BASE_URL="https://router.example.com",
     )
     _write_web_creds(settings)
 
@@ -148,7 +148,7 @@ class TestOAuthStart:
         from alice_office_router.config import get_settings
         from alice_office_router.main import app
 
-        settings = _settings(tmp_path)  # no GOOGLE_OAUTH_PUBLIC_URL, no web creds
+        settings = _settings(tmp_path)  # no PUBLIC_BASE_URL, no web creds
         app.dependency_overrides[get_settings] = lambda: settings
         try:
             async with AsyncClient(
@@ -241,14 +241,14 @@ class TestCheckGoogleAuthorization:
 
     def test_gate_flag_false_returns_ok_even_if_configured(self, tmp_path: Path) -> None:
         settings = _settings(
-            tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com", GOOGLE_OAUTH_GATE=False
+            tmp_path, PUBLIC_BASE_URL="https://router.example.com", GOOGLE_OAUTH_GATE=False
         )
         _write_web_creds(settings)
         status, message = check_google_authorization("U_ROOM_ABC", settings)
         assert (status, message) == ("ok", None)
 
     def test_no_token_returns_blocked_with_raw_room_id_auth_link(self, tmp_path: Path) -> None:
-        settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
+        settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
 
         status, message = check_google_authorization("U_ROOM_ABC", settings)
@@ -258,7 +258,7 @@ class TestCheckGoogleAuthorization:
         assert "/oauth/start?user_id=U_ROOM_ABC" in message
 
     def test_token_missing_drive_scope_returns_notice_and_allows(self, tmp_path: Path) -> None:
-        settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
+        settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
         far_future_ms = int(_now_ms() + 3_600_000)
         _write_tokens(
@@ -284,7 +284,7 @@ class TestCheckGoogleAuthorization:
         assert "/oauth/start?user_id=U_ROOM_ABC" in message
 
     def test_full_scopes_valid_expiry_returns_ok(self, tmp_path: Path) -> None:
-        settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
+        settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
         far_future_ms = int(_now_ms() + 3_600_000)
         _write_tokens(
@@ -308,7 +308,7 @@ class TestCheckGoogleAuthorization:
         assert (status, message) == ("ok", None)
 
     def test_expired_without_refresh_token_returns_blocked(self, tmp_path: Path) -> None:
-        settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
+        settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
         past_ms = int(_now_ms() - 3_600_000)
         _write_tokens(
@@ -332,7 +332,7 @@ class TestCheckGoogleAuthorization:
         assert status == "blocked"
 
     def test_expired_with_refresh_token_and_full_scopes_returns_ok(self, tmp_path: Path) -> None:
-        settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
+        settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
         past_ms = int(_now_ms() - 3_600_000)
         _write_tokens(
@@ -356,7 +356,7 @@ class TestCheckGoogleAuthorization:
         assert (status, message) == ("ok", None)
 
     def test_malformed_tokens_json_returns_blocked(self, tmp_path: Path) -> None:
-        settings = _settings(tmp_path, GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com")
+        settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
         tokens_path = settings.room_google_tokens_path("U_ROOM_ABC")
         tokens_path.parent.mkdir(parents=True, exist_ok=True)

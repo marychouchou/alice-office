@@ -244,7 +244,7 @@ async def oauth_start(
     query = urlencode(
         {
             "client_id": client_id,
-            "redirect_uri": f"{config.GOOGLE_OAUTH_PUBLIC_URL}/oauth/callback",
+            "redirect_uri": f"{config.PUBLIC_BASE_URL}/oauth/callback",
             "response_type": "code",
             "scope": " ".join(SCOPES),
             "access_type": "offline",
@@ -276,7 +276,7 @@ async def _exchange_code_for_token(
                 "code": code,
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "redirect_uri": f"{config.GOOGLE_OAUTH_PUBLIC_URL}/oauth/callback",
+                "redirect_uri": f"{config.PUBLIC_BASE_URL}/oauth/callback",
                 "grant_type": "authorization_code",
             },
         )
@@ -404,7 +404,7 @@ def check_google_authorization(room_id: str, config: Settings) -> tuple[str, str
     status = _check_token(room_id, key, config)
     # Deliberately the raw room_id, not key — oauth_start needs the original
     # case back to seed/locate the right data/<room_id>/google/ directory.
-    auth_url = f"{config.GOOGLE_OAUTH_PUBLIC_URL}/oauth/start?user_id={room_id}"
+    auth_url = f"{config.PUBLIC_BASE_URL}/oauth/start?user_id={room_id}"
 
     if status == "missing":
         return "blocked", _BLOCKED_MSG_TEMPLATE.format(auth_url=auth_url)
