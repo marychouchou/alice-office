@@ -48,17 +48,6 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
-# Import-order workaround for a circular import currently in src/:
-# google_tokens.py imports channels.base.InboundMessage (type hint only), and
-# importing the `channels` submodule for the first time always runs
-# channels/__init__.py first — which eagerly imports channels.api -> core ->
-# auth_links -> google_oauth -> google_tokens, landing back here before this
-# module has finished defining account_key/save_member_tokens/etc. Touching
-# `channels` first (the same order main.py's own imports happen to use) lets
-# that cycle unwind cleanly instead of raising ImportError. See this task's
-# report for the actual fix (make google_tokens.py's InboundMessage import
-# TYPE_CHECKING-only — it's never used at runtime there).
-import alice_office_router.channels  # noqa: F401
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.google_tokens import account_key, load_member_tokens, save_member_tokens
 

@@ -46,8 +46,12 @@ import secrets
 import tempfile
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from alice_office_router.channels.base import InboundMessage
+if TYPE_CHECKING:
+    # Type-only: importing channels.base at runtime pulls in channels/__init__
+    # -> channels.api -> core -> auth_links -> google_oauth -> back here.
+    from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.room_seed import ensure_google_seed
 

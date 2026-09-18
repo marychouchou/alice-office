@@ -40,12 +40,6 @@ import json
 import re
 from pathlib import Path
 
-# Import-order workaround for a circular import currently in src/: see
-# scripts/google_reauth.py's matching comment for the full chain — touching
-# `channels` first (main.py's own order) lets it unwind cleanly instead of
-# raising ImportError when this script's own top-level import order would
-# otherwise enter the cycle through google_tokens.py first.
-import alice_office_router.channels  # noqa: F401
 from alice_office_router.config import get_settings
 from alice_office_router.google_tokens import account_key, save_member_tokens
 
