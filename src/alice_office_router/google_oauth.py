@@ -13,17 +13,18 @@ directly. Both must be reimplemented here rather than ported as-is:
   gate check must run in the router itself, before a message ever reaches
   the agent.
 
-tokens.json and both GCP credential files live per room, under
-Settings.room_google_dir(room_id) — never a shared/global location (see
-room_seed.ensure_google_seed). Two different identifiers are both in
-play and must not be conflated:
+Token storage itself lives in google_tokens.py: tokens are written per
+member under data/<room_id>/google/members/, with tokens.json a symlink the
+router repoints at the current speaker. This module only exchanges codes and
+hands the result to that store. Two different identifiers are both in play
+and must not be conflated:
 
 - room_id: the raw LINE room/user/group id (starts with uppercase U/C/R),
   used as-is for every filesystem path (DATA_DIR/room_id/google/...) — must
   keep its original case, or it silently diverges from the directory
   container_manager creates for the room's data/mcp/plugins.
-- account_key(room_id): the same id lowercased, used only as the dict key
-  *inside* a room's tokens.json and for GOOGLE_ACCOUNT_MODE, because
+- account_key(room_id): the same id lowercased, used as the dict key *inside*
+  a member's token file and for GOOGLE_ACCOUNT_MODE, because
   @cocal/google-calendar-mcp validates that env var against
   /^[a-z0-9_-]{1,64}$/ (lowercase only).
 
@@ -46,6 +47,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
 from alice_office_router.config import Settings, get_settings
+from alice_office_router.google_tokens import (
+    account_key,
+    check_member_token,
+    load_member_tokens,
+    migrate_legacy_tokens,
+    save_member_tokens,
+)
 from alice_office_router.room_seed import ensure_google_seed
 
 logger = logging.getLogger(__name__)
@@ -78,14 +86,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# Scopes the gate requires before it will stop nagging the user; a subset of
-# SCOPES (calendar.events is implied by calendar for gate purposes).
-REQUIRED_SCOPES = {
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/drive",
-}
-
 # How long a state token started via /oauth/start stays valid, in seconds.
 _PENDING_TTL_SECONDS = 600.0
 
@@ -116,23 +116,6 @@ _SUCCESS_HTML = """
 oauth_router = APIRouter()
 
 
-def account_key(room_id: str) -> str:
-    """Normalize a LINE room id into the Google account key used everywhere.
-
-    @cocal/google-calendar-mcp validates GOOGLE_ACCOUNT_MODE against
-    /^[a-z0-9_-]{1,64}$/, which rejects LINE's uppercase-prefixed room ids
-    (U.../C.../R...) outright. Lowercasing is therefore mandatory, not
-    cosmetic — tokens.json keys, oauth routes, and the gate must all agree.
-
-    Args:
-        room_id: Raw LINE room/user/group id.
-
-    Returns:
-        The lowercased room id, used as the Google account key.
-    """
-    return room_id.lower()
-
-
 def _purge_expired_pending() -> None:
     """Drop pending OAuth states older than _PENDING_TTL_SECONDS.
 
@@ -145,40 +128,6 @@ def _purge_expired_pending() -> None:
     ]
     for state in expired:
         del _pending[state]
-
-
-def _load_tokens(config: Settings, room_id: str) -> dict[str, dict[str, object]]:
-    """Load one room's own tokens.json, tolerating a missing file.
-
-    Args:
-        config: Application settings.
-        room_id: Raw LINE room/user/group id (original case).
-
-    Returns:
-        Mapping of account_key to that account's token data, or an empty
-        dict if the file does not exist yet. In practice this room's
-        tokens.json holds at most one entry, since each room's directory is
-        no longer shared with any other room.
-    """
-    path = config.room_google_tokens_path(room_id)
-    if not path.exists():
-        return {}
-    raw = path.read_text(encoding="utf-8")
-    tokens: dict[str, dict[str, object]] = json.loads(raw)
-    return tokens
-
-
-def _save_tokens(config: Settings, room_id: str, tokens: dict[str, dict[str, object]]) -> None:
-    """Write one room's own tokens.json, creating parent directories as needed.
-
-    Args:
-        config: Application settings.
-        room_id: Raw LINE room/user/group id (original case).
-        tokens: Full account_key -> token data mapping to persist.
-    """
-    path = config.room_google_tokens_path(room_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
 
 
 def _load_web_credentials(config: Settings, room_id: str) -> tuple[str, str]:
@@ -322,16 +271,24 @@ async def oauth_callback(
 
 
 def _store_token(config: Settings, room_id: str, key: str, token_response: _TokenResponse) -> None:
-    """Merge a freshly exchanged token into this room's own tokens.json.
+    """Merge a freshly exchanged token into this room's member token file.
 
     Args:
         config: Application settings.
         room_id: Raw LINE room/user/group id (original case), used to
-            locate this room's own tokens.json.
-        key: account_key to store the token under, inside that file.
+            locate this room's own google/ directory.
+        key: account_key to store the token under. In this step it is both
+            the member key (which member file to write) and the inner account
+            key (the key inside that file) — /oauth/start does not yet carry a
+            member parameter, so the only member a callback can write is the
+            room itself.
         token_response: Google's parsed token endpoint response.
     """
-    tokens = _load_tokens(config, room_id)
+    # An upgraded room may still have its pre-member-store tokens.json here;
+    # migrating first stops a later turn's migration from moving that stale
+    # file over the token we are about to write.
+    migrate_legacy_tokens(config, room_id)
+    tokens = load_member_tokens(config, room_id, key)
     expires_in = token_response.expires_in or 0
     now_ms = int(time.time() * 1000)
     tokens[key] = {
@@ -341,43 +298,7 @@ def _store_token(config: Settings, room_id: str, key: str, token_response: _Toke
         "token_type": "Bearer",
         "scope": token_response.scope or " ".join(SCOPES),
     }
-    _save_tokens(config, room_id, tokens)
-
-
-def _check_token(room_id: str, key: str, config: Settings) -> str:
-    """Classify a single account's token status.
-
-    Ports google-workspace-pack's plugins/oauth_gate/__init__.py::_check_token
-    exactly, keyed by account_key instead of the raw LINE user id.
-
-    Args:
-        room_id: Raw LINE room/user/group id (original case), used to
-            locate this room's own tokens.json.
-        key: account_key (lowercased room id) to check, inside that file.
-        config: Application settings.
-
-    Returns:
-        "missing" (no usable token), "missing_scopes" (token present but
-        REQUIRED_SCOPES not fully granted), or "ok".
-    """
-    if not config.room_google_tokens_path(room_id).exists():
-        return "missing"
-    try:
-        tokens = _load_tokens(config, room_id)
-        if key not in tokens:
-            return "missing"
-        token_data = tokens[key]
-        expiry = token_data.get("expiry_date", 0)
-        is_expired = time.time() * 1000 >= float(expiry) - 300_000  # type: ignore[arg-type]
-        if is_expired and not token_data.get("refresh_token"):
-            return "missing"
-        granted = set(str(token_data.get("scope", "")).split())
-        if not REQUIRED_SCOPES.issubset(granted):
-            return "missing_scopes"
-        return "ok"
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        logger.error(f"Failed to read Google tokens for account {key}: {exc}")
-        return "missing"
+    save_member_tokens(config, room_id, key, tokens)
 
 
 def check_google_authorization(room_id: str, config: Settings) -> tuple[str, str | None]:
@@ -401,7 +322,7 @@ def check_google_authorization(room_id: str, config: Settings) -> tuple[str, str
         return "ok", None
 
     key = account_key(room_id)
-    status = _check_token(room_id, key, config)
+    status = check_member_token(config, room_id, key)
     # Deliberately the raw room_id, not key — oauth_start needs the original
     # case back to seed/locate the right data/<room_id>/google/ directory.
     auth_url = f"{config.PUBLIC_BASE_URL}/oauth/start?user_id={room_id}"

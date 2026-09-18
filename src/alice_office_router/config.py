@@ -316,6 +316,38 @@ class Settings(BaseSettings):
         """
         return self.room_google_dir(room_id) / "tokens.json"
 
+    def room_google_members_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's per-member Google token directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+
+        Returns:
+            room_google_dir / "members" — one <member_key>.json per person
+            who has authorized in this room (see google_tokens.py). The
+            room's tokens.json is a relative symlink into this directory,
+            repointed at the current speaker before every turn.
+        """
+        return self.room_google_dir(room_id) / "members"
+
+    def room_google_member_tokens_path(self, room_id: str, member_key: str) -> Path:
+        """Router-local path to one member's own Google token file in a room.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+            member_key: The speaker's account key — account_key(sender_id) in
+                a group, account_key(room_id) in a 1:1 room (see
+                google_tokens.member_key_for).
+
+        Returns:
+            room_google_members_dir / f"{member_key}.json". Its single inner
+            key is account_key(room_id), NOT member_key: that inner key is
+            what each room's write-once config.yaml pinned into the Google
+            MCPs' GOOGLE_ACCOUNT_MODE, so it must stay room-shaped however
+            many members the room has.
+        """
+        return self.room_google_members_dir(room_id) / f"{member_key}.json"
+
     def room_google_web_creds_path(self, room_id: str) -> Path:
         """Router-local path to one room's own Web application GCP OAuth client JSON.
 
@@ -375,6 +407,23 @@ class Settings(BaseSettings):
             so Hermes leaves it alone.
         """
         return self.DATA_DIR / room_id / "router_state"
+
+    def room_pending_auth_path(self, room_id: str, member_key: str) -> Path:
+        """Router-local path to one member's parked, awaiting-authorization message.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see
+                room_router_state_dir).
+            member_key: The speaker's account key (see
+                room_google_member_tokens_path).
+
+        Returns:
+            room_router_state_dir / "pending_auth" / f"{member_key}.json" —
+            the serialized InboundMessage the router re-runs once that member
+            finishes Google authorization. One file per member, overwritten by
+            that member's next auth-triggering message.
+        """
+        return self.room_router_state_dir(room_id) / "pending_auth" / f"{member_key}.json"
 
     @property
     def published_files_dir(self) -> Path:

@@ -222,6 +222,12 @@ def _copy_atomically(src: Path, dest: Path) -> None:
     drive) run as uid 10000, not root, and need read access to these seeded
     credential files.
 
+    google_tokens.save_member_tokens does the same temp-file-plus-chmod
+    dance for a room's member token files (second occurrence — AGENTS.md's
+    Rule of Three says duplicate with a pointer, extract on the third). They
+    stay separate because that one serializes JSON it is handed rather than
+    copying an existing file.
+
     Args:
         src: The file to copy.
         dest: Where to put it; its parent directory must exist.

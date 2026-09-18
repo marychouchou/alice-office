@@ -33,6 +33,7 @@ from alice_office_router.container_manager import get_or_create_container
 from alice_office_router.conversation_log import Outcome, TurnEnvelope
 from alice_office_router.file_links import publish_file_links
 from alice_office_router.google_oauth import check_google_authorization
+from alice_office_router.google_tokens import member_key_for, select_member_tokens
 from alice_office_router.group_context import (
     DIRECT_SYSTEM_PROMPT,
     GROUP_SYSTEM_PROMPT,
@@ -682,6 +683,13 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         reset_session(config, msg.room_key)
         clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
         return RouteResult(texts=[RESET_CONFIRMATION], outcome="reset")
+
+    # Point the room's tokens.json at this speaker's own Google token file
+    # before anything can reach a Google MCP. _take_turn holds the room's
+    # turn lock, which is what makes the swap safe: it can only ever land
+    # between turns, never under a tool call already using the file.
+    member = member_key_for(msg)
+    await asyncio.to_thread(select_member_tokens, config, msg.room_key, member)
 
     status, message = check_google_authorization(msg.room_key, config)
     if status == "blocked" and message is not None:

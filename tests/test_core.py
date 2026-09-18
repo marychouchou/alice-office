@@ -248,6 +248,61 @@ async def test_outbox_marker_in_a_reply_becomes_a_download_url(tmp_path: Path) -
 # ---------------------------------------------------------------------------
 
 
+async def test_token_symlink_is_swapped_to_the_speaker_before_the_gate(tmp_path: Path) -> None:
+    """Every turn repoints the room's tokens.json at the speaker, before anything reads it.
+
+    Both the gate and the agent's Google MCPs read whatever tokens.json
+    points at, so the swap has to be the first thing the turn does — and it
+    has to name the speaker, not the room, in a group.
+    """
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+    order: list[str] = []
+
+    with (
+        patch("alice_office_router.core.select_member_tokens") as mock_select,
+        patch("alice_office_router.core.check_google_authorization") as mock_gate,
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_C1:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="好")),
+        ),
+    ):
+        mock_select.side_effect = lambda *args: order.append("select")
+        mock_gate.side_effect = lambda *args: (order.append("gate"), ("ok", None))[1]
+        await process_inbound(_group_msg(sender_id="U_SPEAKER"), settings)
+
+    mock_select.assert_called_once_with(settings, "line_C1", "u_speaker")
+    assert order == ["select", "gate"]
+
+
+async def test_token_symlink_swap_for_a_direct_room_uses_the_room_key(tmp_path: Path) -> None:
+    """A 1:1 room's member is the room itself, so it swaps to the same file every turn."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with (
+        patch("alice_office_router.core.select_member_tokens") as mock_select,
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="好")),
+        ),
+    ):
+        await process_inbound(_msg(), settings)
+
+    mock_select.assert_called_once_with(settings, "line_room_AAA", "line_room_aaa")
+
+
 async def test_blocked_returns_auth_message_and_warms_container_then_agent(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:

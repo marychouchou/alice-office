@@ -50,8 +50,14 @@ def _write_web_creds(settings: Settings) -> None:
 
 
 def _write_tokens(settings: Settings, room_id: str, tokens: dict[str, object]) -> None:
-    """Write tokens.json content under settings.room_google_tokens_path(room_id)."""
-    path = settings.room_google_tokens_path(room_id)
+    """Write this room's own member token file (see google_tokens module docstring).
+
+    The gate reads a member file, not tokens.json directly — tokens.json is
+    only ever the symlink core repoints per speaker. For a 1:1 room the
+    member key is the room's own account_key, which is what the gate still
+    asks for in this step.
+    """
+    path = settings.room_google_member_tokens_path(room_id, account_key(room_id))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(tokens), encoding="utf-8")
 
@@ -169,7 +175,7 @@ class TestOAuthStart:
 
 
 class TestOAuthCallback:
-    async def test_happy_path_writes_tokens_keyed_by_lowercase_account(
+    async def test_happy_path_writes_member_file_keyed_by_lowercase_account(
         self, app_client: tuple[AsyncClient, Settings]
     ) -> None:
         client, settings = app_client
@@ -194,7 +200,7 @@ class TestOAuthCallback:
         assert response.status_code == 200
         assert "授權成功" in response.text
 
-        tokens_path = settings.room_google_tokens_path("U_ROOM_ABC")
+        tokens_path = settings.room_google_member_tokens_path("U_ROOM_ABC", "u_room_abc")
         tokens = json.loads(tokens_path.read_text(encoding="utf-8"))
         assert "u_room_abc" in tokens
         stored = tokens["u_room_abc"]
@@ -358,7 +364,7 @@ class TestCheckGoogleAuthorization:
     def test_malformed_tokens_json_returns_blocked(self, tmp_path: Path) -> None:
         settings = _settings(tmp_path, PUBLIC_BASE_URL="https://router.example.com")
         _write_web_creds(settings)
-        tokens_path = settings.room_google_tokens_path("U_ROOM_ABC")
+        tokens_path = settings.room_google_member_tokens_path("U_ROOM_ABC", "u_room_abc")
         tokens_path.parent.mkdir(parents=True, exist_ok=True)
         tokens_path.write_text("not valid json {{{", encoding="utf-8")
 

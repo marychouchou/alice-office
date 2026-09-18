@@ -159,7 +159,7 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 能不能靠改資料結構或初始化方式讓正常路徑直接涵蓋它，而不是保留 if 繞過去。
 特殊情況的數量反映的是資料結構／介面設計得好不好。
 
-- repo 內做對的例子：`google_oauth._load_tokens` 對不存在的檔案直接回 `{}`，
+- repo 內做對的例子：`google_tokens.load_member_tokens` 對不存在的檔案直接回 `{}`，
   所以所有呼叫端都沒有「tokens.json 還沒建立」的分支。新的讀取類 helper 比照辦理
   （在邊界把缺失正規化掉，讓呼叫端只有一條路徑）。
 - 邊界提醒：`_seed_templates` 的 `if dest_dir.exists(): continue` 是 write-once
