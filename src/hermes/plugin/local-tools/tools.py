@@ -19,6 +19,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import secrets
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -33,9 +36,17 @@ TOOLS_ROOT = Path(__file__).parent / "scripts"
 _TOOLS_PYTHON = os.environ.get("TOOLS_PYTHON", "/opt/tools/.venv/bin/python3")
 PYTHON = _TOOLS_PYTHON if Path(_TOOLS_PYTHON).is_file() else sys.executable
 
+def _hermes_home() -> Path:
+    """Resolve HERMES_HOME now, not at import time (= /opt/data in a room)."""
+    return Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+
+
 # Plugin data lives under HERMES_HOME/local-tools-data/ so the directory is
 # clearly associated with this plugin and not with any previous agent setup.
-_HERMES_HOME = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
+# The module-level snapshot is what the subprocess env below is built from
+# (it never changes during a container's life); handle_share_file calls
+# _hermes_home() per invocation instead, so a test can point it elsewhere.
+_HERMES_HOME = _hermes_home()
 _PLUGIN_DATA = _HERMES_HOME / "local-tools-data"
 
 # Inherit current env, then override hardcoded OpenClaw paths with
@@ -330,6 +341,64 @@ def handle_ocr(args: dict, **_: Any) -> str:
     if prompt:
         argv += ["--prompt", prompt]
     return _run(_OCR_SCRIPT, argv, timeout=120, env=_OCR_ENV)
+
+
+# ─── share_file ──────────────────────────────────────────────────────────────
+
+# LINE lets a bot send no file at all, so the only way to hand the user
+# something the agent produced is a download link from the router. This tool
+# is the container's half: copy the file into HERMES_HOME/outbox/<token>/ and
+# return the placeholder outbox://<token>, which the router swaps for a real
+# URL on its way out (see src/alice_office_router/file_links.py and
+# docs/file-share-design.md). The container never learns the room id or the
+# router's public URL, so no new container env var is needed.
+#
+# Deliberately NOT restricted to files under HERMES_HOME: the hr tool writes
+# its xlsx to /tmp by design, and inside the container /tmp and /opt/data are
+# not a privilege boundary anyway. The real fence is on the router side, which
+# re-validates and copies the file out of this room's mount before serving it.
+_SHARE_MAX_BYTES = 50 * 1024 * 1024
+
+# Mirrors file_links._UNSAFE_NAME_RE on the router side (control characters,
+# quotes, backslash, separator) — the router sanitizes again regardless, since
+# the agent can write to outbox/ without going through this tool.
+_SHARE_UNSAFE_NAME_RE = re.compile(r'[\x00-\x1f\x7f"\\/]')
+
+
+def handle_share_file(args: dict, **_: Any) -> str:
+    path = str(args.get("path", "")).strip()
+    if not path:
+        return json.dumps({"error": "path 參數必填"}, ensure_ascii=False)
+    source = Path(path).expanduser()
+    if not source.is_file():
+        return json.dumps(
+            {"error": f"找不到檔案（或不是一般檔案）：{path}"}, ensure_ascii=False
+        )
+    size = source.stat().st_size
+    if size > _SHARE_MAX_BYTES:
+        return json.dumps(
+            {"error": f"檔案 {size} bytes 超過上限 {_SHARE_MAX_BYTES} bytes，無法分享"},
+            ensure_ascii=False,
+        )
+    name = _SHARE_UNSAFE_NAME_RE.sub("_", source.name).strip().lstrip(".") or "file"
+    token = secrets.token_urlsafe(32)
+    dest_dir = _hermes_home() / "outbox" / token
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest_dir / name)
+    except OSError as exc:
+        return json.dumps(
+            {"error": f"複製到 outbox 失敗：{type(exc).__name__}: {exc}"}, ensure_ascii=False
+        )
+    return json.dumps(
+        {
+            "link": f"outbox://{token}",
+            "filename": name,
+            "bytes": size,
+            "instruction": "把 link 原樣、單獨一行貼進回覆；不要改寫它，也不要包成 markdown 連結。",
+        },
+        ensure_ascii=False,
+    )
 
 
 # ─── browser_task ────────────────────────────────────────────────────────────

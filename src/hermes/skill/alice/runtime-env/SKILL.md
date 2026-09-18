@@ -1,7 +1,7 @@
 ---
 name: runtime-env
-description: "這個容器的執行環境：官方 skill 直接照它自己的文件用 python／pip；execute_code 工具跑的也是這個 python，已預裝 numpy／sympy（沒有 scipy）；Alice 自家工具用 tools-python；使用者傳來的檔案在 /opt/data/incoming/；上網查沒有固定網址的東西先用 web_search、不要用瀏覽器開搜尋引擎。要跑 execute_code、讀 PDF、找使用者傳的檔案、或上網查資料前先看這份。"
-version: 2.2.0
+description: "這個容器的執行環境：官方 skill 直接照它自己的文件用 python／pip；execute_code 工具跑的也是這個 python，已預裝 numpy／sympy（沒有 scipy）；Alice 自家工具用 tools-python；使用者傳來的檔案在 /opt/data/incoming/；要把檔案交回給使用者只能用 share_file 工具；上網查沒有固定網址的東西先用 web_search、不要用瀏覽器開搜尋引擎。要跑 execute_code、讀 PDF、找使用者傳的檔案、把檔案交給使用者、或上網查資料前先看這份。"
+version: 2.3.0
 author: alice
 license: MIT
 platforms: [linux]
@@ -84,6 +84,20 @@ print(len(doc), 'pages')
 ## 圖片
 
 主模型本身看得懂圖片，直接用 `vision_analyze` 給 `/opt/data/incoming/<檔名>` 的路徑即可。
+
+## 把檔案交給使用者
+
+使用者用的聊天軟體**不能收檔案**，所以在回覆裡寫 `/opt/data/summary.md` 這種路徑、或
+`MEDIA:` 標籤，對方是看不到也打不開的。唯一的方法是 **`share_file` 工具**（`local_tools`
+toolset）：
+
+1. 先把檔案寫出來（`/opt/data/` 或 `/tmp/` 都可以，例如 `hr` 工具的 xlsx 本來就在 `/tmp/`）。
+2. 呼叫 `share_file`，`path` 給絕對路徑，單檔上限 50 MB。
+3. 把它回傳的 `link`（長得像 `outbox://…`）**原封不動、單獨一行**貼進回覆。系統會在送出前
+   換成真正的下載網址——不要自己改寫、不要包成 markdown 連結、更不要自己編一個網址。
+
+連結約 24 小時後失效；過期後使用者再要一次，重新呼叫 `share_file` 產生新連結即可。
+純文字的結論直接寫在回覆裡就好，不需要為了幾行字特地做成檔案再分享。
 
 ## 上網查資料
 

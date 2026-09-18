@@ -225,6 +225,28 @@ OCR_SCHEMA = {
     },
 }
 
+SHARE_FILE_SCHEMA = {
+    "description": (
+        "把一個檔案交給使用者下載。**要讓使用者拿到檔案只能用這個工具**——"
+        "在回覆裡貼檔案路徑（/opt/data/x.md、/tmp/x.xlsx）或 MEDIA: 標籤，"
+        "使用者那邊是看不到、也打不開的。"
+        "回傳的 link 長得像 outbox://xxxx，請把它**原封不動、單獨放一行**貼進你的回覆，"
+        "系統會在送出前換成真正的下載網址；不要改寫它、不要包成 markdown 連結、"
+        "不要自己編一個網址。連結約 24 小時後失效，過期後再呼叫一次這個工具即可。"
+        "任何路徑都可以分享（包含 /tmp/ 底下的產出），單檔上限 50 MB。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "要分享的檔案絕對路徑，例如 /opt/data/summary.md 或 /tmp/payroll.xlsx",
+            },
+        },
+        "required": ["path"],
+    },
+}
+
 WEBDRIVER_SCHEMA = {
     "description": (
         "瀏覽器自動化（Selenium + Firefox headless）。"
