@@ -89,7 +89,7 @@ uv run python scripts/line_stub.py
 uv run python scripts/line_stub.py --port 9000 --log /tmp/line.jsonl   # 想換就換
 
 # 終端機 2:router 指向 stub(host 模式;容器模式改在 .env 設同一個變數再 up -d)
-LINE_API_BASE_URL=http://localhost:8099 uv run fastapi dev --reload-dir src
+LINE_API_BASE_URL=http://localhost:8099 uv run fastapi dev src/alice_office_router/main.py --reload-dir src
 
 # 終端機 3:照常送偽造 webhook
 uv run python scripts/test_webhook.py --text "今天天氣如何?"
@@ -126,6 +126,49 @@ Google 授權相關的測試不用每次都走瀏覽器:`scripts/google_reauth.p
 即 1:1 房間的舊行為);`scripts/simulate_oauth.py <room_id> <member_key>
 --from-member-file <既有成員檔>` 直接複製一份現成 token 進房間的成員檔,
 略過瀏覽器整段流程(見 `docs/google-auth-per-member-plan.md` §6b)。
+
+#### 🟠+ 整段 Google 授權 e2e 的前置條件(2026-09-18 實跑過的組合)
+
+要把 `/oauth/start` → `/oauth/callback` → 寫成員檔 → 自動重跑 pending 訊息整條
+在本機跑完(plan §6b 的 T1–T14),四件事先擺好:
+
+1. **假的 Google token 端點**。`/oauth/callback` 要拿 `code` 去跟 Google 換 token,
+   本機沒有真的 `code`,所以讓 stub 兼差扮演:
+
+   ```bash
+   uv run python scripts/line_stub.py \
+     --google-token-file data/<既有房間>/google/members/<member_key>.json
+   ```
+
+   router 端同時設 `GOOGLE_TOKEN_URL=http://localhost:8099/token`(`Settings` 的
+   欄位,預設是真的 `https://oauth2.googleapis.com/token`)。沒給 `--google-token-file`
+   時那個端點一律回 400,免得誤以為換到 token 了。
+
+2. **router 自己跑在 host 上、換一個埠**。`fastapi dev` 在 repo 根目錄要指定檔案
+   (`fastapi dev src/alice_office_router/main.py`),直接 `uv run fastapi dev` 會找不到
+   app;測 e2e 時用 uvicorn 最省事(順便避開 `data/` 被寫入觸發 reload 的老問題):
+
+   ```bash
+   GOOGLE_TOKEN_URL=http://localhost:8099/token \
+   LINE_API_BASE_URL=http://localhost:8099 \
+   uv run uvicorn alice_office_router.main:app --port 8011
+   ```
+
+3. **偽造 webhook 指到那個埠**。`scripts/test_webhook.py` 讀環境變數 `ROUTER_URL`
+   (整條 URL,含路徑;預設 `http://localhost:8000/webhook`):
+
+   ```bash
+   ROUTER_URL=http://localhost:8011/webhook uv run python scripts/test_webhook.py --text "今天幾號"
+   ```
+
+4. **拿來當來源的 token 要是活的**。stub 的 `expires_in` 固定回 3600,但 access
+   token 本身是從那份成員檔照抄的——檔案裡的 token 早就過期的話,router 會把它記成
+   「還有一小時」,Google MCP 拿去打 API 直接吃 401。先用
+   `uv run python scripts/google_reauth.py <room_id> --member <member_key>` 換一份新的
+   access token 再當來源,不然就要有心理準備看到 401(授權流程本身仍然驗得過)。
+
+容器名字是 `hermes_` + **房間 key**(`hermes_line_<userId>`),不是裸 LINE ID——
+`docker logs` / `docker exec` 找不到容器時先確認這個前綴。
 
 ### 🟢 測試路 B:API curl(`/webhooks/api/messages`)
 

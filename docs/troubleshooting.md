@@ -312,6 +312,26 @@ ls data/<room_id>/google/members/
 - 目標檔不存在是正常狀態（這位成員還沒授權過），MCP 讀到會回「沒有 token」，
   agent 應該會在回覆裡貼出 `google-auth://request`，router 換成連結。
 
+**macOS 專屬：換完 symlink 後容器內讀 tokens.json 一直 EINVAL**
+
+Docker Desktop for macOS（virtiofs）的問題，不是我們的：host 端用 `os.replace`
+把 `tokens.json` 換掉之後，容器裡看那條路徑會**一直**是
+`OSError: [Errno 22] Invalid argument`（read／readlink／write 全掛），host 上那個
+symlink 卻完全正常。症狀是成員明明授權好了，Google 工具還是說沒 token。
+
+容器裡只要有人 `opendir` 這個掛載點就會恢復，所以 router 從 2026-09-18 起會
+**自動處理**：`select_member_tokens` 真的換了檔，`core._take_turn` 就對房間容器
+exec 一次 `ls /opt/google-workspace/`（`container_manager.refresh_google_mount`，
+仍在 room lock 內、agent 回合之前）。沒有容器／容器沒跑只留 debug log，docker
+失敗留 warning，都不會讓這一輪掛掉。Linux 原生 bind mount 推測沒這個問題（未驗證），
+在那邊這只是每次換人多一個很便宜的 exec。
+
+萬一又遇到（例如手動改了成員檔、或 router 這段被繞過），手動敲同一招即可：
+
+```bash
+docker exec hermes_<room_id> ls /opt/google-workspace/
+```
+
 **查授權連結去哪了（pending 重跑）**
 
 ```
@@ -326,6 +346,11 @@ cat data/<room_id>/router_state/pending_auth/<member_key>.json   # {"ts": ..., "
   `auth_resume_started`／`auth_resume_failed`／`auth_resume_no_adapter`（見
   `docs/logging-design.md` §5.7 的事件表），再確認觸發連結的那個 channel 支援
   push——API channel 的 `resume` 只會丟掉訊息並記 log，這是設計如此，不是 bug。
+- 重跑的答案回來了，內容卻還是「你需要先授權」：那一輪重新進的是房間**原本那個
+  session**，前幾輪的歷史全是「還沒授權」，agent 很容易照著歷史回答、根本不重試
+  工具。router 現在會在重跑的訊息前面加一句系統前綴（群組還會點名是誰授權完成，
+  見 `core._resumed_message`）來壓住這件事，但它是提示不是保證——再問一次同樣的
+  問題就會走正常回合、拿到真答案。
 
 **群組裡連結／授權公告點名了不該點的人，或某人完全沒收到連結**
 
@@ -335,6 +360,21 @@ cat data/<room_id>/router_state/pending_auth/<member_key>.json   # {"ts": ..., "
 - 連結本身沒有二次身分驗證，理論上群組裡別人也點得開；`auth_links.py` 只能在
   文字上點名（「{顯示名稱} 請點此連結」），無法阻止別人手滑點到不是自己的連結，
   這是目前接受的取捨（見 `google-auth-per-member-plan.md` §7）。
+
+**calendar 用一陣子後突然 `401 unauthorized_client`，gmail／drive 卻正常**
+
+兩種 OAuth client 的行為不對稱，跟本次改版無關（一直都是這樣）：房間的
+`google/` 底下有兩份憑證，`gcp-oauth.keys.json`（**Web** client）給我們自己的
+gmail／drive MCP 用，`gcp-oauth.keys.installed.json`（**Desktop／installed**
+client）給 `@cocal/google-calendar-mcp` 用。Google 對 installed client 的
+refresh grant 會回 `401 unauthorized_client`，同一份 refresh token 換成 web
+client 就換得到——也就是說 **calendar MCP 自己刷不動 token**。
+
+實際效果：access token 還活著的時候 calendar 一切正常；過期之後就要靠
+gmail／drive（web 憑證）刷新後寫回同一份成員檔，或是那位成員重新授權一次，
+calendar 才會恢復。所以「只有 calendar 壞掉」時先看
+`members/<member_key>.json` 的 `expiry_date`，再讓那位成員重跑一次授權
+（`scripts/google_reauth.py <room_id> --member <member_key>`），不用去動 calendar MCP。
 
 **同一個 key 剛換人，查行事曆卻查到前一個人的（calendar MCP 5 分鐘快取）**
 

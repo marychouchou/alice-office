@@ -453,6 +453,7 @@ data/&lt;room&gt;/router_state/pending_auth/
   <li>公告只寫 LINE 顯示名稱，不含 Google email。要顯示 email 得多要一個 scope。</li>
   <li>「找大家共同空檔」這類跨成員需求刻意不支援：那需要多個成員的 token 同時在場。將來可由 router 對每位成員各跑一回合再彙整。</li>
   <li>API channel（TUI、開發測試）沒有人可以推播，授權完成後的 pending 直接丟棄。</li>
+  <li>macOS 的 Docker Desktop（virtiofs）在 host 端換掉 <code>tokens.json</code> 之後，容器內讀那條路徑會一直是 EINVAL，要有人在容器裡 <code>opendir</code> 掛載點才會恢復。router 因此在真的換檔之後對房間容器 exec 一次 <code>ls /opt/google-workspace/</code>（<code>container_manager.refresh_google_mount</code>）；Linux 原生 bind mount 推測不需要（未驗證），在那邊只是每次換人多一個很便宜的 exec。</li>
 </ul>
 
 
@@ -480,10 +481,10 @@ data/&lt;room&gt;/router_state/pending_auth/
   <thead><tr><th>#</th><th>情境</th><th>步驟</th><th>預期</th></tr></thead>
   <tbody>
     <tr><td>T1</td><td>個人房、無 token、非 Google 問題</td><td>送「今天幾號」</td><td>直接回答；envelope gate_status=ok；tokens.json 已是 symlink，目標不存在</td></tr>
-    <tr><td>T2</td><td>個人房、無 token、Google 問題</td><td>送「明天有什麼會議」</td><td>回覆含 <code>/oauth/start?user_id=U_T10_ALICE&amp;member=line_u_t10_alice</code>，不含 marker；pending 檔存在；gate_status=auth_link</td></tr>
+    <tr><td>T2</td><td>個人房、無 token、Google 問題</td><td>送「明天有什麼會議」</td><td>回覆含 <code>/oauth/start?user_id=line_U_T10_ALICE&amp;member=line_u_t10_alice</code>（<code>user_id</code> 是加了前綴的 room key，不是裸 LINE ID），不含 marker；pending 檔存在；gate_status=auth_link</td></tr>
     <tr><td>T3</td><td>授權完成自動接續</td><td>把真 token 複製成成員檔，跑 simulate_oauth</td><td>stub 收到一則 push（不是 reply），內容是行事曆答案；pending 被刪；再跑一次不重送</td></tr>
     <tr><td>T4</td><td>pending 過期</td><td>pending 的 ts 改成 11 分鐘前，再跑 T3</td><td>不重跑、無 push、pending 被刪、一行 info log</td></tr>
-    <tr><td>T5</td><td>群組 A、B 各自拿連結</td><td>A 點名問行事曆；B 點名問信件</td><td>兩則回覆各含 member=u_t10_a、member=u_t10_b，開頭有各自名字；兩回合之間 symlink 目標由 A 換成 B</td></tr>
+    <tr><td>T5</td><td>群組 A、B 各自拿連結</td><td>A 點名問行事曆；B 點名問信件</td><td>兩則回覆都是 <code>user_id=line_C_T10_GROUP</code>（房間）、<code>member=u_t10_a</code>／<code>member=u_t10_b</code>（發話者），開頭有各自名字；兩回合之間 symlink 目標由 A 換成 B</td></tr>
     <tr><td>T6</td><td>群組只有 A 授權</td><td>真 token 放進 members/u_t10_a.json；A 問；B 問</td><td>A 得到答案；B 仍拿到自己的連結；B 的成員檔不存在</td></tr>
     <tr><td>T7</td><td>群組匿名發話者</td><td>點名但不給 sender-id</td><td>固定提示「LINE 沒提供你的身分…」，不含連結；symlink 指向 _anonymous；不寫 pending</td></tr>
     <tr><td>T8</td><td>群組未點名</td><td>同 T5 但不 mention</td><td>outcome=observed；不換 symlink、不呼叫 agent</td></tr>
