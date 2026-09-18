@@ -25,6 +25,7 @@ LINE OA 多租戶 Webhook 路由器。接收來自 LINE 平台的 Webhook，依�
   - [C. Plugin / MCP](#c-plugin--mcp)
   - [驗證層級（由快到慢）](#驗證層級由快到慢)
 - [Google Workspace 整合](#google-workspace-整合)
+- [檔案下載連結](#檔案下載連結)
 - [疑難排解](#疑難排解)
 - [指令速查](#指令速查)
 - [專案結構](#專案結構)
@@ -114,8 +115,10 @@ Router 會處理整個 webhook body 裡的**所有** event（不只第一個）�
 
 以上邏輯 1:1 參考自 Hermes Agent 內建 LINE adapter 的演算法（詳見 [`docs/hermes-agent-line-gateway-comparison.md`](docs/hermes-agent-line-gateway-comparison.md)），但因為架構不同（router 與 container 分離、只透過 `api_server` + 共用 volume 溝通），媒體處理走的是「檔案落地 + 文字通知」而非 Hermes 內建的多模態 API 路徑。
 
-Outbound 媒體（agent 主動產生圖片/語音/影片送回 LINE）與 slow-LLM postback 按鈕尚未實作，見同一份文件的
-「未做（Phase 2）」項目。
+出站方向：LINE 沒有「檔案」這種出站訊息型別，bot 傳不了檔案給使用者，所以 agent 產出的
+`summary.md`／`report.xlsx` 是以**下載連結**交出去的，見「[檔案下載連結](#檔案下載連結)」。
+Outbound 媒體（agent 主動產生圖片/語音/影片，以 image/video message 送回 LINE）與 slow-LLM
+postback 按鈕尚未實作，見同一份文件的「未做（Phase 2）」項目。
 
 ## 部署模式
 
@@ -463,6 +466,40 @@ GCP Console 設定、憑證檔案放置、環境變數、訊息授權判斷流�
 而非 Hermes plugin、為何原本獨立的 Flask OAuth server 併進了 router、憑證掛載路徑與
 seed 時序的取捨）見 [`docs/google-workspace-integration-summary.md`](docs/google-workspace-integration-summary.md)。
 
+## 檔案下載連結
+
+LINE 的 Messaging API 沒有「檔案」這種出站訊息型別，bot 傳不了檔案給使用者。所以 agent
+做出來的檔案改用連結交付：agent 呼叫 `share_file` 工具 → 檔案落在
+`data/<room_id>/outbox/<token>/` → router 在送出回覆前把它複製到自己專屬的
+`data/_files/<room_id>/<token>/`（房間 mount 之外，agent 碰不到），並把回覆裡的
+`outbox://<token>` 換成 `{PUBLIC_BASE_URL}/files/<room_id>/<token>`。
+
+連結是**能力型連結**：token 有 256 bit 隨機性、猜不到，誰拿到連結誰就能在 TTL
+（`FILE_LINK_TTL_HOURS`，預設 24 小時）內下載，router 不問來者是誰——跟 LINE 原生傳檔
+同一個安全等級（收到檔案的人本來就能轉傳）。完整設計、威脅對照表與之後要做身份驗證
+（LIFF）的插入點見 [`docs/file-share-design.md`](docs/file-share-design.md)。
+
+啟用：`.env` 設 `PUBLIC_BASE_URL`（router 的公開網址，跟 Google 授權連結共用同一個），重啟 router。
+
+**既有房間要多做一步。** plugin 是 write-once seed，既有房間的
+`data/<room_id>/plugins/local-tools/` 不會自動更新，所以拿不到 `share_file` 工具：
+
+```bash
+# 開發環境：把 src/hermes 的樣板同步到所有房間
+uv run python scripts/dev_sync_src.py
+
+# 或逐房手動覆蓋這四個檔
+for f in __init__.py schemas.py tools.py plugin.yaml; do
+  cp "src/hermes/plugin/local-tools/$f" "data/<room_id>/plugins/local-tools/$f"
+done
+
+docker restart hermes_<room_id>
+```
+
+**不需要** `docker rm -f`：這個功能沒有新增任何容器環境變數，容器對 LINE 與 router 的
+公開網址一樣是零知情。（`src/hermes/skill/` 底下的 `runtime-env` 說明是烤進 image 的，
+要重建 image 才會更新；不急——每回合送的 system prompt 已經告訴 agent 這條規則。）
+
 ## 疑難排解
 
 > 這節是**部署/建置期**一次性的坑。服務跑起來之後，日常「這則訊息為什麼卡住／
@@ -618,7 +655,9 @@ alice-office-router/
 | `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` | | 共用 LLM 後端設定，自動寫入每個新房間的 `config.yaml` |
 | `ROUTER_IN_DOCKER` | | Router 是否跑在 Docker 內（預設 `true`）；本機開發用 `uv run uvicorn` 時設為 `false`，容器會改為發布隨機 host port |
 | `DEFAULT_PLUGINS` | | 寫入每個新房間 config.yaml 的預設 plugin 清單（逗號分隔，預設 `local-tools`），名稱需對應 `HERMES_TEMPLATES_DIR/plugin/` 底下已 seed 的目錄名 |
-| `PUBLIC_BASE_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線），也就是使用者瀏覽器連得到的網址（通常是 Cloudflare tunnel）；Google 授權連結與 `{url}/oauth/callback` 用它組。Google 整合的開關是「它已設且 Web application 憑證檔存在」，見「[Google Workspace 整合](#google-workspace-整合)」。2026-09-17 由 `GOOGLE_OAUTH_PUBLIC_URL` 改名而來，舊名不再讀取——升級時請改 `.env` |
+| `PUBLIC_BASE_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線），也就是使用者瀏覽器連得到的網址（通常是 Cloudflare tunnel）。所有交給使用者去開的連結都用它組：agent 產出檔案的下載連結（留空＝回覆裡的 `outbox://…` 佔位字串會被換成「此部署未設定檔案下載連結」，見「[檔案下載連結](#檔案下載連結)」）與 Google 授權連結／`{url}/oauth/callback`（見「[Google Workspace 整合](#google-workspace-整合)」）。2026-09-17 由 `GOOGLE_OAUTH_PUBLIC_URL` 改名而來，舊名不再讀取——升級時請改 `.env` |
+| `FILE_LINK_TTL_HOURS` | | 下載連結有效期（小時，預設 `24`）。過期回 `404`，請 agent 再分享一次即可 |
+| `FILE_LINK_MAX_BYTES` | | 單一檔案大小上限（bytes，預設 `52428800`＝50 MB），超過就不發佈連結 |
 | `GOOGLE_OAUTH_GATE` | | 預設 `true`。設 `false` 時 Google OAuth 路由照常運作，只是不擋任何房間的訊息 |
 | `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
 | `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 [`docs/session-hygiene.md`](docs/session-hygiene.md)「1. 手動指令」 |

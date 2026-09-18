@@ -213,6 +213,36 @@ async def test_ok_status_returns_only_agent_reply(tmp_path: Path) -> None:
     assert load_state(settings, "line_room_AAA").epoch == 0
 
 
+async def test_outbox_marker_in_a_reply_becomes_a_download_url(tmp_path: Path) -> None:
+    """A reply carrying outbox://<token> leaves core as a real, user-clickable URL."""
+    from alice_office_router.core import process_inbound
+
+    room_key = "line_room_AAA"
+    token = "Qm3fZ9xL-aB7cD1eF4gH6iJ8kL0mN2oP5qR7sT9uV1w"
+    outbox = tmp_path / room_key / "outbox" / token
+    outbox.mkdir(parents=True)
+    (outbox / "report.pdf").write_bytes(b"%PDF-1.4 hi")
+    settings = _settings(DATA_DIR=tmp_path, PUBLIC_BASE_URL="https://router.example.com")
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text=f"做好了：\noutbox://{token}")),
+        ),
+    ):
+        texts = (await process_inbound(_msg(), settings)).texts
+
+    assert texts == [f"做好了：\nhttps://router.example.com/files/{room_key}/{token}"]
+    # The bytes now live outside the room's own mount, and the agent's copy is gone.
+    assert (tmp_path / "_files" / room_key / token / "report.pdf").read_bytes() == b"%PDF-1.4 hi"
+    assert not outbox.exists()
+
+
 # ---------------------------------------------------------------------------
 # process_inbound — Google OAuth gate
 # ---------------------------------------------------------------------------

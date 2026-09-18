@@ -32,6 +32,9 @@ from alice_office_router.core import process_inbound
 # (line_ + native [UCR]+32 hex id) or this channel's own rooms (api_<slug>,
 # 1-32 of [a-z0-9-]). A second real webhook channel (e.g. Telegram) adds its
 # own shape here when it lands (design §4.3 / §4.4).
+# Duplicated as file_links._ROOM_ID_RE, which validates the room segment of a
+# download URL against the same two shapes — keep both in step; a third
+# consumer is the signal to extract one shared pattern.
 _ROOM_KEY_RE = re.compile(r"(?:line_[UCR][0-9a-f]{32}|api_[a-z0-9-]{1,32})")
 
 

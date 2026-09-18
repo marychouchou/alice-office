@@ -31,6 +31,7 @@ from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import get_or_create_container
 from alice_office_router.conversation_log import Outcome, TurnEnvelope
+from alice_office_router.file_links import publish_file_links
 from alice_office_router.google_oauth import check_google_authorization
 from alice_office_router.group_context import (
     DIRECT_SYSTEM_PROMPT,
@@ -696,7 +697,12 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
 
     turn = await _reply_for(msg, config)
     if turn.text is not None:
-        texts.append(turn.text)
+        # The one seam every agent reply passes through, for both 1:1 and
+        # group turns, after the silence token has been filtered out and
+        # still inside the room's lock — so publishing a file is serialized
+        # against the room's next turn (file_links.publish_file_links). The
+        # notices above never carry a marker, which is why they skip it.
+        texts.append(await publish_file_links(turn.text, msg.room_key, config))
     return RouteResult(
         texts=texts,
         outcome=turn.outcome,
