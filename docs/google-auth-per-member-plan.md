@@ -1,9 +1,10 @@
 # Google 授權改版計畫：延遲授權＋群組逐人授權（task10）
 
-狀態：**設計定案，實作中**（2026-09-18 以 Fable 5.1 擬定；實作交 Opus）。
+狀態：**已實作（2026-09-18）；本文件保留為設計紀錄**。
 圖解版（使用者體驗流程、機制圖）：`docs/google-auth-per-member-design.html`。
-實作完成後，本文件的「現況」段落應改寫成設計說明，或併入
-`google-workspace-integration-summary.md`。
+落地後的現況說明見 `docs/prd.md` FR-06、`docs/google-workspace-integration-summary.md`；
+本文件保留 §2（已驗證事實）／§3（設計）／§6b（逐情境測試計畫）作為設計紀錄，
+`AGENTS.md` 文件地圖指到本文件與 `google-workspace-integration-summary.md`。
 
 ## 0. 一句話
 
@@ -12,7 +13,7 @@ router 才在回覆裡放授權連結，使用者授權完 router 自動把剛�
 群組裡 token 逐人存放，**每一回合一律以發話者的身分執行 Google 工具**，授權連結也只給
 發話者。
 
-## 1. 現況（實作前，供對照）
+## 1. 改版前（2026-09-18 之前的行為，供對照）
 
 - Gate 只認房間：`core._take_turn` 每回合呼叫 `check_google_authorization(room_key)`，
   沒 token 就回 `blocked`，agent 完全不跑（`core.py:686-692`）。sender_id 沒進到
@@ -22,6 +23,8 @@ router 才在回覆裡放授權連結，使用者授權完 router 自動把剛�
 - 群組後果：連結廣播給全群，誰點誰的 Google 帳號就成了群組的帳號，第二個人點會靜默覆蓋，
   之後所有成員都能透過 agent 操作那個帳號。
 - `GOOGLE_OAUTH_GATE=false` 已經是「不擋」，但 MCP 的錯誤文字沒有連結，agent 給不出網址。
+- **這個段落描述的是改版前的行為，已被下面的設計取代並落地**（`blocked` 狀態與
+  `GOOGLE_OAUTH_GATE` 開關已刪除）；現況說明見 `docs/prd.md` FR-06。
 
 ## 2. 已驗證的事實（決定做法的關鍵）
 

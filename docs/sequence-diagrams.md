@@ -166,62 +166,84 @@ sequenceDiagram
 
 ---
 
-## 5. Google OAuth gate 三態（ok／notice／blocked）對訊息流程的影響
+## 5. Google 延遲授權＋逐人授權對訊息流程的影響
 
-`check_google_authorization` 每則要進 agent 的訊息都跑一次。**重點：`blocked`
-時使用者的問題完全不進 agent，但會在背景把房間暖起來（`core._warm_container`），
-不等它完成就回授權連結**——這樣授權後的下一則訊息落在已就緒的房間上，不用再吃
-30–60 秒冷啟動。這一步在 observe 短路與手動 reset 之後、`_reply_for` 之前執行。
+2026-09-18 起不再有 blocking gate：`check_google_authorization` 只剩「token 有效
+但缺 Drive scope」這一種要主動提醒的情況（notice），其餘一律讓訊息照常進 agent。
+授權連結改成**事後才發**——agent 真的呼叫 Google 工具卻拿不到 token，才會在那則
+回覆裡出現連結；每一輪都先把房間的 `tokens.json` 換成**這一輪發話者自己的**
+token 檔，1:1 與群組走同一條路徑。這一步在 observe 短路、手動 reset 之後，
+`_reply_for` 呼叫 agent 之前執行，同樣在房間的 turn lock 內完成。
 
-暖機是**兩步**（`core._run_warmup`）：
+**5a. 一輪訊息：換檔 → 呼叫 agent → marker 換成連結 → 暫存待重跑**
 
-1. `get_or_create_container` → 容器起來並通過 `/health`；log `Container warm for
-   room ...`（INFO），失敗則 `Container warm-up failed for room ...`（ERROR）。
-2. **暖機探針**（`core._probe_agent`）：對容器送一輪丟棄用的對話（session id
-   `warmup-probe`，ceiling 自己的 120 秒），把 Hermes「每個進程第一輪」要付的
-   ~4.5 秒 tool registry 探測先付掉——那個結果 memoize 在進程層，所以付一次就好。
-   探針跑完立刻 `DELETE /api/sessions/warmup-probe` 把該 session 從 `state.db`
-   刪掉（Hermes 的 `session_search` 可以跨 session 搜同一個房間，不刪會被使用者
-   搜到）。成功 log `Agent warm for room ...（N ms）`（INFO）與 hermes_client 的
-   `hermes_session_deleted`；探針失敗只記 WARNING `Agent warm-up probe failed for
-   room ...`（房間不算已探測，下次被擋再試），刪不掉記 WARNING `Could not delete
-   warm-up session for room ...`。一個 router 進程對一個房間只探一次
-   （`core._probed`）——探針是一次真的 LLM 呼叫，不能每則被擋的訊息都付一次。
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 使用者（這一輪發話者）
+    participant R as Router（core._take_turn）
+    participant GT as google_tokens
+    participant OA as google_oauth
+    participant H as Hermes 容器（agent + MCP）
+    participant AL as auth_links
 
-三態判斷本身的邏輯圖見 `docs/google-workspace-setup.md`「訊息授權判斷流程」，這裡
-補一張真正的時序版本。
+    U->>R: 訊息（已通過 observe / reset 短路）
+    R->>GT: select_member_tokens(room, member_key)
+    Note over GT: tokens.json 相對 symlink 換指向<br/>members/&lt;member_key&gt;.json（temp symlink + os.replace，原子）
+    R->>OA: check_google_authorization(room, member_key)
+    OA-->>R: ("ok", None) 或 ("notice", 缺 Drive scope 提示)
+    R->>H: 照常呼叫 agent（無論有沒有 token）
+    alt Google 工具沒有可用 token
+        H-->>R: 回覆內文含一行 google-auth://request
+    else 工具成功，或這輪沒用到 Google 工具
+        H-->>R: 一般回覆
+    end
+    R->>AL: publish_auth_links(reply_text, msg, config)
+    alt 回覆含 marker
+        AL->>AL: 依身分規則算出 member_key（群組＝sender_id，1:1＝房間自己）
+        AL-)R: 把觸發的 InboundMessage 存進<br/>router_state/pending_auth/&lt;member_key&gt;.json（10 分鐘 TTL）
+        AL-->>R: 換成「{發話者} 請點此連結」＋這位發話者自己的 /oauth/start 連結
+        Note over R: RouteResult.gate_status = "auth_link"
+    else 無 marker
+        AL-->>R: 原文不變
+    end
+    R-->>U: [notice（若有）, 上面那則回覆]
+```
+
+**5b. 授權完成 → 自動重跑 → Push 送出答案（跟原本那次 webhook 請求無關）**
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor U as 使用者
-    participant R as Router（core）
+    participant G as Google
     participant OA as google_oauth
+    participant GT as google_tokens
+    participant C as core.resume_pending_auth
+    participant AD as ChannelAdapter（如 LineAdapter）
     participant H as Hermes 容器
 
-    U->>R: 訊息（已通過 observe / reset 短路）
-    R->>OA: check_google_authorization(room_key)
-    alt tokens.json 不存在，或過期且無 refresh_token
-        OA-->>R: ("blocked", 授權連結文案)
-        R-)H: 背景暖機 1：get_or_create_container（不等待）
-        R-)H: 背景暖機 2：POST /v1/chat/completions（探針，X-Hermes-Session-Id: warmup-probe）
-        R-)H: DELETE /api/sessions/warmup-probe（探針善後）
-        Note over R,H: 使用者的問題不進 agent；<br/>進 agent 的只有那輪丟棄用的探針
-        R-->>U: 只回授權連結
-    else 有 token 但缺 Drive scope
-        OA-->>R: ("notice", 重新授權提示)
-        R->>H: 照常呼叫 agent（calendar/gmail 可用）
-        H-->>R: 回覆
-        R-->>U: [提示, agent回覆]
-    else 授權齊全
-        OA-->>R: ("ok", None)
-        R->>H: 照常呼叫 agent
-        H-->>R: 回覆
-        R-->>U: [agent回覆]
+    U->>G: 瀏覽器完成 Google 同意
+    G->>OA: GET /oauth/callback?code&state
+    OA->>GT: save_member_tokens(room, member_key, token)
+    OA-->>U: 授權成功頁（「答案稍後會出現在 LINE」）
+    OA-)C: 背景 task：on_authorized(room, member_key)
+    C->>C: 讀並刪除 pending_auth/&lt;member_key&gt;.json
+    alt 有暫存的訊息且未過期
+        C->>AD: adapter_for(msg.channel).resume(msg)
+        AD->>H: 重新走一次 process_inbound（換檔、gate、呼叫 agent）
+        Note over AD,H: 這次 select_member_tokens 換到的檔已經有 token，<br/>Google 工具改為成功
+        H-->>AD: 回覆
+        AD-)U: Push 送出（群組會先加一句「{發話者} 已完成 Google 授權」）
+    else 沒有暫存訊息、已過期，或該 channel 不支援 push（API channel）
+        C->>C: 記 log，什麼都不送
     end
 ```
 
-token 過期/scope 判斷細節、`account_key` 小寫轉換規則、影響既有房間的注意事項見
+身分規則、token 存放（`members/<member_key>.json` 與 symlink 換檔）、marker 的兩層
+規則（MCP 錯誤文字＋system prompt）、群組連結可被誤點的取捨，完整設計見
+[`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)；
+`account_key` 小寫轉換規則、影響既有房間的注意事項見
 `docs/google-workspace-setup.md` 與 `docs/google-workspace-integration-summary.md`。
 
 ---
@@ -278,12 +300,17 @@ sequenceDiagram
 
 ## 7. Container 冷啟動（第一次訊息進某房間）
 
-第一則訊息落進一個還沒有 container 的房間時（gate 啟用的部署裡，這通常就是被
-`blocked` 擋下的那一則——冷啟動在背景跑，第一個 chat completion 是授權後的下一則；
-見 §5），seed（`SOUL.md`／`config.yaml`／
+第一則訊息落進一個還沒有 container 的房間時，seed（`SOUL.md`／`config.yaml`／
 `mcp`／`plugins`）在 `docker run` **之前**完成——因為 `config.yaml` 的渲染要讀
 剛 seed 出來的 MCP manifest，且 `SOUL.md` 一旦晚於 `docker run`，Hermes 會自己
 先生一份預設版、之後就永遠蓋不掉（write-once）。
+
+這通常不是使用者真的等到的那一次：LINE 的 `follow`（1:1 加好友）與 `join`
+（被拉進群組）事件一收到就觸發 `core.warm_room`，在背景走完全一樣的
+「建容器 → seed → `docker run` → `/health`」流程並多跑一輪暖機探針（見 §5 的
+2026-09-18 更新，取代了舊版「靠 gate `blocked` 觸發暖機」的設計）——使用者的
+第一則真正提問，多半落在早就 ready 的容器上。只有暖機還沒跑完、或暖機本身失敗時，
+才會走到下面這張圖：第一個真正的 chat completion 親自撞上冷啟動。
 
 ```mermaid
 sequenceDiagram

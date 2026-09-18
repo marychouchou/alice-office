@@ -79,6 +79,12 @@ class InboundMessage(BaseModel):
 預設值讓 1:1 與 api channel 的既有呼叫**一行都不用改、行為不變**。
 api channel 之後若要模擬群組（測試用）可直接帶這些欄位。
 
+> **2026-09-18 更新**：`sender_id` 多了一個用途——`google_tokens.member_key_for`
+> 拿它算這一輪該用誰的 Google 帳號（`account_key(sender_id)`；1:1 房間沒有
+> `sender_id`，改用房間自己）。群組訊息如果連不到 `sender_id`（成員沒加 OA
+> 好友），Google 工具一律視為「這位發話者沒有身分」，見
+> [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md) §3.1。
+
 ## 6. Observed buffer（新模組 `group_context.py`，channel-free）
 
 - 位置：`data/<room_id>/group_state/observed.jsonl`。比照 `incoming/` 的先例
@@ -133,6 +139,10 @@ layered on top of core prompt、單次有效不進 config.yaml）：
   `dedup.py` 的做法），每則群組訊息查一次 cache。
 - 拿不到（API 錯、userId 缺席）→ fallback：`userId` 前 8 碼，連 userId 都沒有
   → `"成員"`。lookup 失敗**絕不能**擋訊息處理。
+- 這個 `sender_id`／`sender_name` 對就是 2026-09-18 起 Google 逐人授權用來辨識
+  「這一輪該用誰的帳號」的同一組欄位（`google_tokens.member_key_for`／
+  `auth_links._link_text`）——沒有另外一套群組身分機制，也因此繼承同樣的限制：
+  沒加 OA 好友的成員在 Google 授權這邊一樣拿不到連結（見 §5 更新）。
 
 ## 9. Join greeting（`channels/line/adapter.py` + `events.py`）
 
@@ -167,9 +177,13 @@ layered on top of core prompt、單次有效不進 config.yaml）：
 | `group_context.py`（新） | buffer record/peek/clear、build_group_prompt、is_silence、system prompt 常數 | channel-free 群組邏輯 |
 | `hermes_client.py` | `system` 參數 | Hermes HTTP 協定 |
 | `config.py` | 上表新設定＋path helper | 環境變數與路徑推導 |
+| `google_tokens.py`（2026-09-18 新增） | `member_key_for` 用 `InboundMessage.sender_id`／`is_group` 算出這一輪的 Google member key | Google 授權（逐人）——見 `google-auth-per-member-plan.md` |
+| `auth_links.py`（2026-09-18 新增） | 用 `sender_name` 組「{發話者} 請點此連結」；`resume` 走的 pending 訊息就是原始 `InboundMessage` | 同上 |
 
-core 的 observe 短路放在 OAuth gate **之前**：未點名的訊息不問 agent、
-也不該觸發授權提示；blocked 房間照樣累積背景，等授權後一併帶上。
+core 的 observe 短路放在 Google token 換檔／gate **之前**：未點名的訊息完全不進
+`_take_turn`，不換 `tokens.json` 指向、也不該觸發授權提示；未授權的房間照樣累積
+背景，等該成員之後點名、真的觸發授權連結時一併帶上（見
+`docs/google-auth-per-member-plan.md` §3.4 的 pending 重跑機制）。
 
 ## 12. 測試計畫
 

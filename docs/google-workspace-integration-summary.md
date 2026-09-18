@@ -82,6 +82,10 @@ graph TD
 
 ## 訊息授權判斷流程
 
+> **下圖是 2026-09-18 改版前的原始（blocking gate）設計，保留作歷史記錄。** 現況是
+> 「不擋訊息、事後才發連結」的延遲授權＋逐人授權，見下一節與
+> [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)。
+
 ```mermaid
 flowchart TD
     Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"Google 整合已啟用？"}
@@ -95,20 +99,56 @@ flowchart TD
     Scopes -- "齊全" --> Ok2["ok：正常呼叫 agent"]
 ```
 
+## 訊息授權判斷流程（現況：2026-09-18 起，延遲授權＋逐人授權）
+
+`blocked` 狀態與 `GOOGLE_OAUTH_GATE` 開關已移除。`check_google_authorization` 只剩
+「token 有效但缺 Drive scope」這一種要主動提醒的情況；真正「沒 token」的判斷交給
+Google 工具自己在呼叫當下報錯，再由 router 把錯誤裡的固定 marker
+（`google-auth://request`）換成連結。每一輪開始前，router 先把這個房間的
+`tokens.json` 換成**這一輪發話者自己的** token 檔（1:1＝房間本身，群組＝
+`sender_id`），MCP 完全不用改：
+
+```mermaid
+flowchart TD
+    Start(["收到訊息，準備呼叫 agent 前<br/>（已過 observe／reset 短路）"]) --> Swap["select_member_tokens(room, member_key)<br/>把 tokens.json 換指向 members/&lt;member_key&gt;.json"]
+    Swap --> Enabled{"Google 整合已啟用<br/>且認得出發話者？"}
+    Enabled -- "否" --> Ok1["ok：直接放行"]
+    Enabled -- "是" --> Scopes{"這位成員的 token<br/>scope 齊全？"}
+    Scopes -- "缺 Drive" --> Notice["notice：推播重新授權提示<br/>仍照常呼叫 agent"]
+    Scopes -- "齊全或沒有 token" --> Ask["照常呼叫 agent"]
+    Notice --> Ask
+    Ask --> ToolFail{"Google 工具回報<br/>沒有可用 token？"}
+    ToolFail -- "是" --> Marker["回覆含 google-auth://request<br/>router 換成這位發話者的連結，<br/>gate_status=auth_link，暫存待重跑訊息"]
+    ToolFail -- "否" --> Ok2["ok：照常回覆"]
+```
+
+`agent 真的碰到 Google 工具沒 token` 跟 `notice` 的差別：notice 是 router 自己主動
+檢查 scope、在呼叫 agent **之前**先知道要提醒；marker／連結則是 agent 呼叫工具
+**當下**才知道沒 token，router 事後在回覆裡替換——兩者可能同一輪都出現（先 notice，
+再因為 Drive 工具真的沒 scope 而多一次 marker）。完整時序圖見
+`docs/sequence-diagrams.md` §5。
+
 ## 檔案落點
 
-- `src/alice_office_router/google_oauth.py` — OAuth routes + gate（沿用 pack 語意：無 token → 擋下＋授權連結；缺 Drive scope → 通知但放行；完整 → 放行）
-- `src/hermes/mcp/gmail/`、`src/hermes/mcp/drive/` — pack 的 server.py 原樣 + token_manager.py 改為 env 指定路徑；manifest `requires_google_oauth: true`（未設定 Google 時不 seed）
-- `src/hermes/mcp/google-calendar/` — 薄註冊 manifest（`command: google-calendar-mcp`）
+- `src/alice_office_router/google_oauth.py` — OAuth routes（member 化的 `/oauth/start`／
+  `/oauth/callback`）＋ `check_google_authorization`（現在只剩 notice／ok）
+- `src/alice_office_router/google_tokens.py` — 成員 token 檔讀寫、`select_member_tokens`
+  換檔、既有房間的 legacy 遷移（2026-09-18 新增，見上方「現況」一節）
+- `src/alice_office_router/auth_links.py` — `google-auth://request` marker 替換、
+  pending 訊息暫存與讀取（鏡射 `file_links.py`，2026-09-18 新增）
+- `src/hermes/mcp/gmail/`、`src/hermes/mcp/drive/` — pack 的 server.py 原樣 + token_manager.py 改為 env 指定路徑（`get_access_token` 沒 token 時丟出含 marker 的錯誤訊息）；manifest `requires_google_oauth: true`（未設定 Google 時不 seed）
+- `src/hermes/mcp/google-calendar/` — 薄註冊 manifest（`command: google-calendar-mcp`），第三方套件的錯誤文字不可控，靠 system prompt／SKILL.md 教 agent 認出並貼 marker
 - `src/hermes/runtime/pyproject.toml` — 加 `mcp`/`httpx`/`requests`（`/opt/tools/.venv`）
-- `scripts/google_reauth.py` — 本機瀏覽器一次性授權腳本
+- `scripts/google_reauth.py` — 本機瀏覽器一次性授權腳本，`--member` 指定要寫哪個成員檔
 - Settings：`PUBLIC_BASE_URL`；憑證種子放 `data/_google/`（gitignored，部署層放一次），逐房副本在 `data/<room_id>/google/`（見上方 2026-07-11 更新）
 
 ## 驗證結果（全部通過）
 
-- `ruff` / `mypy --strict` / `pytest`（112 tests，含新增 23 個）
+- `ruff` / `mypy --strict` / `pytest`
 - image `alice-hermes-agent:v3` build + smoke test
-- Docker E2E：無 token → gate 擋下（agent 不呼叫），容器在背景暖機建立（2026-09-15 起；原本是不建立）；`/oauth/start` 302 帶正確參數、錯誤路徑 400；寫入 token 後 → 容器建立、`/opt/google-workspace` 掛載正確、四個 MCP（gmail/drive/google-calendar/secretary）全部 `✓ enabled`、以 uid 10000 實測 calendar 讀到 token、gmail stdio tools/list 回 8 個工具、agent 回覆 200
+- Docker E2E（2026-09-15，blocking gate 時代）：無 token → gate 擋下（agent 不呼叫），容器在背景暖機建立；`/oauth/start` 302 帶正確參數、錯誤路徑 400；寫入 token 後 → 容器建立、`/opt/google-workspace` 掛載正確、四個 MCP（gmail/drive/google-calendar/secretary）全部 `✓ enabled`、以 uid 10000 實測 calendar 讀到 token、gmail stdio tools/list 回 8 個工具、agent 回覆 200
+- 2026-09-18 改版後的 e2e 驗證（不擋訊息、marker→連結、授權後自動重跑）見
+  [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md) §6／§6b
 
 ## Agent 如何透過 MCP 操作 Calendar / Gmail / Drive
 
@@ -209,7 +249,7 @@ agent 會看到一段 `Error: ...` 的文字，可以自己決定要不要重試
 分別打 Drive v3（`/drive/v3`）、Docs v1（`/docs/v1`）、Sheets v4（`/sheets/v4`）、
 Drive upload（`/upload/drive/v3`）四個 Google API base URL。
 
-### 5. 每次呼叫背後怎麼拿 access token（gmail/drive 共用同一份 `token_manager.py` 原始碼，但各房間各自一份 tokens.json）
+### 5. 每次呼叫背後怎麼拿 access token（gmail/drive 共用同一份 `token_manager.py` 原始碼；2026-09-18 起 `tokens.json` 是逐成員 symlink）
 
 ```python
 def gmail_request(method, path, **kwargs) -> dict:
@@ -218,23 +258,40 @@ def gmail_request(method, path, **kwargs) -> dict:
     ...
 ```
 
-`get_access_token()`（`token_manager.py:71-117`）：
+MCP 這一側完全不知道有「成員」這回事——`token_manager.py` 讀寫的仍然只有
+`/opt/google-workspace/tokens.json` 這一個路徑，逐人授權完全是 router 側靠
+symlink 換檔做出來的：
 
-1. 用 `GOOGLE_ACCOUNT_MODE`（= account_key）從這個房間自己的 `tokens.json` 撈出 token
-   （字典裡實務上只會有一筆，因為這份檔案不再跨房間共用）。
+```
+data/<room_id>/google/
+  tokens.json -> members/<member_key>.json     ← router 在每輪開始前換指向
+  members/
+    <member_key>.json                          ← { "<account_key(room_id)>": {...} }
+```
+
+`get_access_token()`（`token_manager.py`）：
+
+1. 用 `GOOGLE_ACCOUNT_MODE`（＝`account_key(room_id)`，房間層級的值，不是
+   member_key）從 `tokens.json`**當前指到的那個成員檔**撈出 token——同一把 key，
+   不同輪可能讀到不同人的檔案，MCP 自己感覺不到差異。
 2. 若 5 分鐘內會過期，就用 `refresh_token` 換新的 `access_token`，先試 Web 憑證
    （`gcp-oauth.keys.json`），失敗再試 Installed 憑證（`gcp-oauth.keys.installed.json`）
    ——這兩份都是該房間自己 `data/<room_id>/google/` 底下的副本。
-3. 換到新 token 後**直接改寫 `/opt/google-workspace/tokens.json`**（`save_all_tokens`）——
-   跟 router 的 `google_oauth.py` 讀寫的是同一份房間專屬檔案、同一個 key，所以 MCP 換的
-   新 token 下次 router 判斷 gate 狀態時也看得到，不需要額外同步。
-4. 若沒有 `refresh_token`，直接丟例外——會被 `call_tool` 捕捉，agent 看到的是一段
-   `Error: No refresh token for account '...'`，使用者需要重新走一次 `/oauth/start`。
+3. 換到新 token 後**直接改寫 `/opt/google-workspace/tokens.json`**（`save_all_tokens`）
+   ——透過 symlink 寫，實際落地的是當前指向的那個成員檔，跟 router 的
+   `google_tokens.save_member_tokens` 寫的是同一份檔案、同一個 key，所以 MCP 換的
+   新 token 下次這個成員被換回來時也看得到，不需要額外同步。
+4. 若沒有 `refresh_token`，或帳號根本不在檔案裡（symlink 目標是這位成員從沒授權過、
+   不存在的檔），丟出的例外文字含固定 marker `google-auth://request`——router 的
+   `auth_links.publish_auth_links` 會把它換成**這位發話者自己**的授權連結
+   （`docs/google-auth-per-member-plan.md` §3.3）。
 
 `google-calendar` MCP（npm 套件）走自己的 refresh 邏輯，但透過
 `GOOGLE_CALENDAR_MCP_TOKEN_PATH` 指到同一份 `tokens.json`、用同一個 `account_key`，
-所以同一個房間內的三個 MCP 及 router 讀寫的是同一份檔案，靠檔案系統本身序列化，
-沒有額外的鎖或協調機制；不同房間之間則完全是各自獨立的檔案，互不影響。
+所以同一個房間內的三個 MCP 及 router 讀寫的是同一份路徑，靠檔案系統本身序列化，
+沒有額外的鎖或協調機制；不同房間之間則完全是各自獨立的檔案，互不影響。router 只
+在房間的 turn lock 內換 symlink（`google_tokens.select_member_tokens`），確保換檔
+永遠發生在兩輪之間，不會有 MCP 正在讀一半就被換掉的情況。
 
 ### 6. 每個房間各自一份 MCP 子行程，資料也逐房隔離
 
@@ -242,8 +299,9 @@ def gmail_request(method, path, **kwargs) -> dict:
 子行程（stdio，房間之間不共用行程），也都各自掛載**自己的** `data/<room_id>/google/`
 到 `/opt/google-workspace`——行程隔離、資料也隔離，不同房間的 container 讀不到彼此的
 `tokens.json`。`GOOGLE_ACCOUNT_MODE` 這個 env 仍然保留（給 `@cocal/google-calendar-mcp`
-的 lowercase 驗證用，也是 `tokens.json` 字典內部的 key），但已經不是「從共用檔案裡挑出
-自己那筆」的用途了。
+的 lowercase 驗證用，也是每個成員檔字典內部的 key），但已經不是「從共用檔案裡挑出
+自己那筆」的用途了——房間內部現在還有一層更細的隔離：同一個房間裡的不同成員，看到的
+是 `tokens.json` symlink 在不同輪換指到的不同檔案（見上一節）。
 
 ## 尚未驗證／上線前待辦
 
@@ -251,5 +309,12 @@ def gmail_request(method, path, **kwargs) -> dict:
 2. `.env` 已改 `HERMES_IMAGE=alice-hermes-agent:v3`
 3. Linux 部署時每個房間的 `data/<room_id>/google/` 都需可被 uid 10000 讀寫，新房間建立時
    要記得補（macOS Docker Desktop 不用管）
-4. 已存在的房間不會回溯取得 Google MCP（write-once seeding）；gate 一開啟，所有訊息都會被授權檢查擋下直到完成授權（pack 原語意）
+4. 已存在的房間不會回溯取得 Google MCP（write-once seeding）。
+   ~~gate 一開啟，所有訊息都會被授權檢查擋下直到完成授權（pack 原語意）~~
+   ——**2026-09-18 起不再成立**：gate 改成不擋訊息，只有 agent 真的用到 Google
+   工具卻沒 token 時才在回覆裡夾一個連結（見上方「現況」一節）。既有房間仍要注意
+   的是另一件事：`src/hermes/mcp/{gmail,drive}/token_manager.py` 是 write-once
+   seed，2026-09-18 之前建立的房間手上還是舊版（沒有 marker 錯誤文字），要嘛靠
+   system prompt 那條規則（立即生效）撐著，要嘛照 `docs/troubleshooting.md`
+   「Google 授權相關」節手動把新版複製過去並重建容器。
 5. 風險觀察點：calendar MCP 用 installed client 去 refresh web client 發的 token（pack 原設計即如此），若 refresh 失敗，gmail/drive 的 token_manager 會維持 tokens.json 新鮮度

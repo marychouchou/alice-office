@@ -49,24 +49,26 @@ JSON 物件（`docker compose logs --no-log-prefix webhook_router | jq .`），�
 - `Hermes agent request failed for room ...`（ERROR，呼叫 agent 失敗）
 - `LINE reply token rejected for room ...; falling back to push`（INFO，正常
   fallback，不是錯誤）
-- `Failed to push LINE reply for room ...`（ERROR，LINE Push 也失敗）
-- `Failed to push Google OAuth notice for room ...`（ERROR）
+- `Failed to push LINE reply for room ...`（ERROR，LINE Push 也失敗；授權後自動
+  重跑推播答案失敗時也是同一行，見 2.5 節）
 
 `container_manager.py` 另外會記錄 `Creating new container for room`、
 `Seeded template [...] into ...`、`Container ... created.`、
 `Waiting for Hermes agent at ... to become ready...`（只在容器真的還沒就緒時出現）、
 `Docker API error for container ...`。
 
-gate 擋下時的背景暖機是兩步（容器 → agent 探針 → 刪掉探針 session，設計見
-`docs/router-hermes-agent-protocol.md`「暖機探針」），`core.py` 對應的行是：
+LINE 的 `follow`（1:1 加好友）／`join`（被拉進群組）事件觸發的背景暖機是兩步
+（容器 → agent 探針 → 刪掉探針 session，設計見
+`docs/router-hermes-agent-protocol.md`「暖機探針」；2026-09-18 起這是唯一的觸發點，
+取代了舊版「靠 gate `blocked` 觸發」的設計），`core.py` 對應的行是：
 
 - `Container warm for room ...`（INFO）：第 1 步成功，容器起來且 `/health` 通過。
 - `Container warm-up failed for room ...`（ERROR）：第 1 步失敗，**不會**再做探針；
-  使用者不會收到通知，下一則訊息走正常路徑再試。
+  使用者不會收到通知，下一則真正的訊息走正常路徑再試（吃一次冷啟動）。
 - `Agent warm for room ...（N ms）`（INFO）：第 2 步成功，這個房間之後的第一則真實
   訊息不用再付 Hermes 每進程一次的 ~4.5 秒 tool registry 探測。
 - `Agent warm-up probe failed for room ...`（WARNING）：探針失敗，只代表使用者的第一輪
-  要自己付那 4.5 秒；房間不算已探測，下一則被擋的訊息會再試一次。
+  要自己付那 4.5 秒；房間不算已探測，下次 `follow`／`join` 再觸發會重試。
 - `Agent warm-up failed for room ...`（ERROR）：探針丟出預期外的例外型別（不是
   HTTP／逾時／`ValueError`），要當成 bug 看。
 - `Could not delete warm-up session for room ...`（WARNING）：探針的 session 沒刪成功，
@@ -168,7 +170,10 @@ router 的 JSON 行有）；`request_id`、`event_id`、`sender_id` 一律留在
    log 的 `Creating new container for room` 有沒有接著 `Failed to get/create
    container for room`（通常是 `DATA_DIR`／`HERMES_TEMPLATES_DIR` 沒設對，見
    README「疑難排解」）。
-4. 若這個部署啟用了 Google OAuth gate，確認訊息沒被擋在 gate：見 2.5 節。
+4. 訊息本身不會被 Google 授權擋住（2026-09-18 起不再有 blocking gate），但如果
+   這則訊息本來就是「請助理操作 Google 服務」，且發話者沒有可用 token，收到的會是
+   授權連結而不是真正的答案——這不是卡住，是預期行為；要查連結／重跑機制見
+   2.5 節。
 5. 確認 agent 真的收到請求：`docker logs --tail 50 hermes_<room_id>` 或
    `tail data/<room_id>/logs/agent.log`，找 `/v1/chat/completions`。完全沒有 →
    `ask_hermes_agent` 這次 HTTP call 可能還沒發出或連線失敗，回頭看 router log 的
@@ -271,19 +276,96 @@ docker inspect hermes_<room_id> | jq '.[0].Config.Labels, .[0].HostConfig.LogCon
 砍容器不會動到 `data/<room_id>/`（對話、skills、config.yaml 都在 bind mount 上），
 只會中斷一次、下一則訊息要等容器重新開機。
 
-### 2.5 Google OAuth 卡住
+### 2.5 Google 授權相關
+
+> 2026-09-18 起不再是「訊息被擋住等授權」——助理照常回話，只有真的呼叫 Google
+> 工具卻沒 token 時，那則回覆才會夾帶授權連結；授權完成後 router 自動把觸發的
+> 那則訊息重跑一次並推播答案（見 `docs/google-auth-per-member-plan.md`）。以下按
+> 「授權連結沒出現／連結點了沒反應／查是哪個成員的授權」分項排查。
+
+**基本檢查（跟改版前相同）**
 
 1. 確認這個部署真的啟用了：`PUBLIC_BASE_URL` 有沒有設 + 部署層級的
    `data/_google/gcp-oauth.keys.json` 是否存在（`Settings.google_oauth_enabled`）。
 2. 確認房間自己有沒有拿到憑證副本（write-once，由 `ensure_google_seed` 複製）：
    `ls data/<room_id>/google/` 應該看得到 `gcp-oauth.keys.json`。
-3. 確認這個房間有沒有完成過授權：`cat data/<room_id>/google/tokens.json` ——
-   不存在代表這個房間從沒授權成功過。
-4. router log 找 oauth 相關錯誤：`Failed to load Google web credentials for
-   room`、`Google OAuth token exchange failed for`、`Failed to read Google
-   tokens for account`。
-5. 需要本機手動重新走一次授權流程時，用 `uv run python scripts/google_reauth.py
-   <room_id>`，或直接開 `<PUBLIC_BASE_URL>/oauth/start?user_id=<room_id>`。
+3. router log 找 oauth 相關錯誤：`Failed to load Google web credentials for
+   room`、`Google OAuth token exchange failed for`、
+   `Failed to read Google tokens for room [...] member [...]`。
+4. 需要本機手動重新走一次授權流程時，用 `uv run python scripts/google_reauth.py
+   <room_id> --member <member_key>`（不給 `--member` 預設等於房間自己的
+   `account_key`，即 1:1 房間的行為），或直接開
+   `<PUBLIC_BASE_URL>/oauth/start?user_id=<room_id>&member=<member_key>`。
+
+**查現在誰的 token 生效中（symlink 換檔）**
+
+```
+ls -l data/<room_id>/google/
+# tokens.json -> members/<member_key>.json   ← 目標是「這一輪發話者」，每輪開始前才換
+ls data/<room_id>/google/members/
+# 每個授權過的成員各一個檔，檔名就是他的 account_key（1:1 房間只會有跟房間自己同名那一個）
+```
+
+- symlink 目標在**兩輪之間**才會變，不是即時反映「現在誰在看畫面」——要看某個成員
+  現在有沒有 token，直接看 `members/<member_key>.json` 存不存在，不用等他被換上
+  symlink。
+- 目標檔不存在是正常狀態（這位成員還沒授權過），MCP 讀到會回「沒有 token」，
+  agent 應該會在回覆裡貼出 `google-auth://request`，router 換成連結。
+
+**查授權連結去哪了（pending 重跑）**
+
+```
+ls data/<room_id>/router_state/pending_auth/
+cat data/<room_id>/router_state/pending_auth/<member_key>.json   # {"ts": ..., "message": {...}}
+```
+
+- 有檔＝這個成員點連結授權完成後，router 會自動重跑檔案內容並 push 答案；檔案
+  10 分鐘沒被消費（成員遲遲沒授權）就過期，之後的授權不會再重跑舊問題，只在
+  router log 留一行 `pending_auth_expired`。
+- 成員授權完卻沒收到重跑的答案：先看 router log 有沒有
+  `auth_resume_started`／`auth_resume_failed`／`auth_resume_no_adapter`（見
+  `docs/logging-design.md` §5.7 的事件表），再確認觸發連結的那個 channel 支援
+  push——API channel 的 `resume` 只會丟掉訊息並記 log，這是設計如此，不是 bug。
+
+**群組裡連結／授權公告點名了不該點的人，或某人完全沒收到連結**
+
+- LINE 沒給這位發話者 `userId`（沒加 OA 好友）時，`sender_id` 是 `None`，Google
+  工具一律視為沒有身分，回覆會是固定提示「LINE 沒有提供你的身分…」而不是連結——
+  請他先加好友再問一次。
+- 連結本身沒有二次身分驗證，理論上群組裡別人也點得開；`auth_links.py` 只能在
+  文字上點名（「{顯示名稱} 請點此連結」），無法阻止別人手滑點到不是自己的連結，
+  這是目前接受的取捨（見 `google-auth-per-member-plan.md` §7）。
+
+**同一個 key 剛換人，查行事曆卻查到前一個人的（calendar MCP 5 分鐘快取）**
+
+`@cocal/google-calendar-mcp` 對「依名稱找行事曆」的結果有 5 分鐘 TTL 快取，快取
+key 是帳號 key 本身（`GOOGLE_ACCOUNT_MODE`，房間層級的固定值，不隨 symlink 換人而
+變）。房間的 `tokens.json` 剛從 A 換成 B 之後 5 分鐘內，agent 如果用「行事曆名稱」
+去查，有機會撞到 A 的快取結果；用 `primary` 或帶 `@` 的行事曆 id 不受影響。目前
+v1 接受這個限制，不是 bug——時間到快取自然失效。
+
+**既有房間（2026-09-18 之前建立）：agent 貼不出 marker，回覆裡看不到授權連結**
+
+`src/hermes/mcp/{gmail,drive}/token_manager.py` 是 write-once seed，改版前建立的
+房間手上還是舊版（沒有 `google-auth://request` marker 錯誤文字）。這種房間目前靠
+system prompt 那條規則頂著（`group_context.py` 的兩個 `SYSTEM_PROMPT` 常數，**立即
+生效、不用重建房間**：agent 自己看到 Google 工具報錯就會照規則貼 marker），但錯誤
+訊息本身仍是舊版英文字串，agent 判斷起來沒有新版直接。要讓這個房間拿到新版
+`token_manager.py`：
+
+```bash
+cp src/hermes/mcp/gmail/token_manager.py data/<room_id>/mcp/gmail/token_manager.py
+cp src/hermes/mcp/drive/token_manager.py data/<room_id>/mcp/drive/token_manager.py
+docker restart hermes_<room_id>
+```
+
+（開發環境也可以整批跑 `uv run python scripts/dev_sync_src.py`，見 §2.6；
+production 不要對既有房間跑這支，它會覆寫使用者可能已經客製化過的 mcp/plugin。）
+
+`src/hermes/skill/alice/runtime-env/SKILL.md` 同樣提到 marker 規則，但它是烤進
+image 的 bundled skill，**要 rebuild image 才會送到既有房間**（新房間 first boot
+就有）；system prompt 那條規則不依賴它，所以 SKILL.md 沒更新不影響既有房間能不能
+拿到授權連結，只是少一份參考文件。
 
 ### 2.6 改了 config.yaml / skills / MCP / SOUL.md 沒生效
 

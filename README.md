@@ -556,10 +556,12 @@ docker restart hermes_<room_id>
   rm -rf data/<room_id>
   ```
   下一次該房間收到訊息時會完整重新走一次 seed 流程（`config.yaml`／`mcp`／
-  `plugins`／`google`）。**這也會把該房間的 Google 授權一併清空**（`tokens.json`
-  跟該房間自己的憑證副本都在 `data/<room_id>/google/` 底下，是刻意設計，見上方
-  「Google Workspace 整合」）——使用者要重新點一次授權連結。GCP 端的
-  `client_secret`／舊 `refresh_token` 不受影響，只是本地不再記得它。
+  `plugins`／`google`）。**這也會把該房間所有成員的 Google 授權一併清空**
+  （`google/members/` 底下每位成員的 token 檔跟該房間自己的憑證副本都在
+  `data/<room_id>/google/` 底下，是刻意設計，見上方「Google Workspace 整合」）
+  ——下次哪位成員真的用到 Google 功能，才會重新拿到一個授權連結（不會主動要求
+  所有人重新授權）。GCP 端的 `client_secret`／舊 `refresh_token` 不受影響，只是
+  本地不再記得它。
 
 ## 指令速查
 

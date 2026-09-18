@@ -120,6 +120,13 @@ symlink target 一定是相對路徑，否則容器內解析不到。升級前�
 該房間下一回合被搬成 `members/<account_key(room_id)>.json`（1:1 房間因此授權無縫延續）。
 設計全文見 [`docs/google-auth-per-member-plan.md`](google-auth-per-member-plan.md)。
 
+`data/<room_id>/router_state/pending_auth/<member_key>.json` 是同一套機制的另一半：
+agent 呼叫 Google 工具卻沒 token 時，router 把那則觸發的訊息原樣存在這裡（10 分鐘
+TTL），等該成員完成授權後自動重跑、推播答案，使用者不用再問一次（`auth_links.py`
+`write_pending_auth`／`read_pending_auth`）。這個路徑純粹是 router 自己的狀態，跟
+同層的 `router_state/session.json`（session-hygiene）一樣，Hermes 不會去動它；
+不含使用者的 Google token，只含那則訊息本身的內容。
+
 `outbox/` 與 `_files/` 是同一件事的兩端，分成兩個目錄是刻意的：`data/<room_id>/` 整個
 是 agent 的 `HERMES_HOME`，agent 對它有完整寫入權，可以在 `outbox/` 放 symlink 指到別
 的房間、可以 `touch` 把 mtime 往後推、可以繞過工具直接塞超大檔。所以 router 在改寫連結

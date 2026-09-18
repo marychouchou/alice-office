@@ -169,15 +169,25 @@ LINE event 有幾十個欄位，我們只認 `type` / `webhookEventId` / `replyT
 
 ### 4c. 逐 event 分派（`adapter.py:_dispatch_event`）
 
-每個 event 過三道快篩，任一不過就跳過（記 log），**不會**讓 webhook 失敗——
+每個 event 過兩道快篩，任一不過就跳過（記 log），**不會**讓 webhook 失敗——
 因為 envelope 層已經承諾回 200 了，LINE 的契約不允許事後對單一 event 報錯：
 
-1. `event.type != "message"` → 跳過（follow、postback 等目前不處理）；
+1. `event.type` 只認三種，其餘（postback 等）目前直接跳過不處理：`message`、
+   `follow`（1:1 加好友）、`join`（被拉進群組）；
 2. **Dedup**（`dedup.py`）：LINE 的投遞是 at-least-once，我們回 200 慢了它就重送。
    `EventDeduplicator` 用一個有界 dict（上限 1000，滿了淘汰最舊 10%）記住看過的
    `webhookEventId`。狀態是 in-process 的——單 worker 部署下夠用，這個限制明寫在
-   docstring 裡（`dedup.py:14-16`）；
-3. `room_key` 解析不出來 → 跳過。
+   docstring 裡（`dedup.py:14-16`）。
+
+過完這兩道之後才依 `event.type` 分派：`message` 走 4d 以下的一般訊息路徑
+（`room_key` 解析不出來 → 跳過）。`follow`／`join` 走一條更短的路：兩者都呼叫
+`core.warm_room(room_key)`——在背景把這個房間的容器建起來、跑一輪暖機探針，讓它
+第一則真正的提問落在已就緒的 agent 上（2026-09-18 取代了舊版「靠被擋下的第一則
+訊息觸發暖機」的設計，見 `docs/google-auth-per-member-plan.md` §3.5）；`join`
+另外用該事件的 reply token 回一則固定的繁中自我介紹
+（`_schedule_join_greeting`，不經過 agent）。`follow` 沒有對應的訊息可回——LINE
+官方帳號自己會顯示歡迎詞，所以這裡只暖機、不回話。兩者一樣先解析 `room_key`，
+解析不出來就只記 log 跳過。
 
 ### 4d. room_key：加上 channel 前綴（設計文件 §4.3 的核心）
 
@@ -257,23 +267,30 @@ msg = InboundMessage(channel="line", room_key=room_key, text=text)
 texts = await process_inbound(msg, config)   # ← 從這行起，世界裡沒有 LINE
 ```
 
-`process_inbound`（`core.py:54`）只有三步：
+`process_inbound` 是「換 Google token 檔 → 呼叫 agent → 改寫回覆裡的連結」這串步驟
+的薄包裝，重點步驟：
 
-1. **Google OAuth gate**：`check_google_authorization(room_key)` 回傳三態——
-   `blocked`（只回授權訊息，不問 agent，但背景先把容器暖起來）／`notice`（提示 +
-   照常問 agent）／`ok`；
+1. **換 Google token 檔**：`select_member_tokens(room_key, member_key)` 把這個房間的
+   `tokens.json` 換成這一輪發話者自己的（1:1＝房間本身，群組＝`sender_id`），再跑
+   `check_google_authorization` ——2026-09-18 起只剩 `notice`（token 有效但缺 Drive
+   scope，提示＋照常問 agent）／`ok`，**不再有 `blocked`**：沒 token 一樣照常問
+   agent（見 `docs/google-auth-per-member-plan.md`）；
 2. **容器解析**：`get_or_create_container(room_key)` 拿到（必要時建立）
    `hermes_<room_key>` 容器的 URL；
-3. **問 agent**：`ask_hermes_agent(url, room_key, text)`。
+3. **問 agent**：`ask_hermes_agent(url, room_key, text)`；
+4. **改寫回覆**：`publish_file_links` 把 `outbox://` 換成下載連結，
+   `publish_auth_links` 把 `google-auth://request` marker 換成這一輪發話者的授權
+   連結（若出現，同時把觸發的訊息暫存起來，供授權後自動重跑）。
 
 兩個設計重點：
 
 - **每一步各自 try/except、失敗記 log 回 None**——這個函式跑在 background task 裡，
   例外往上拋沒有人接得住，所以錯誤在這層就地吸收（`_ask_agent` 的 docstring 明講了
   這個契約）。
-- **回傳值是 `list[str]`，不是「已送出」**。gate blocked 回 `[授權訊息]`；notice 回
-  `[提示, agent回覆]`；正常回 `[agent回覆]`。誰去送、怎麼送，是呼叫端 adapter 的事——
-  這就是 core 可以被 LINE 和 API 通道共用的原因。
+- **回傳的是待送文字＋turn envelope，不是「已送出」**。notice 回
+  `[提示, agent回覆]`；出現授權連結回 `[agent回覆（已換成連結）]`；正常回
+  `[agent回覆]`。誰去送、怎麼送，是呼叫端 adapter 的事——這就是 core 可以被 LINE
+  和 API 通道共用的原因。
 
 ---
 
