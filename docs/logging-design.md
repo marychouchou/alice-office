@@ -443,7 +443,7 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 | `inbound_text` | **JSONL only**。只在 Hermes 自己沒記的那些 outcome 才填（`core._TEXT_IN_STATE_DB` = `replied` + `silence`；`silence` 也進了 agent，所以同樣不重複記）。`agent_failed` 刻意保留：它有一半的情況（容器起不來、連不上）根本沒碰到 Hermes，這份 envelope 是唯一記得使用者說了什麼的地方 |
 | `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
 | `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
-| `gate_status` | `ok` / `notice`（token 有效但缺 Drive scope，仍照常呼叫 agent）/ `auth_link`（這輪回覆含 Google 授權連結——agent 呼叫 Google 工具時沒 token，`auth_links.publish_auth_links` 把 marker 換成連結，見 `docs/google-auth-per-member-plan.md` §3.3）/ `None`（observe、reset 短路，沒跑到判斷這一步）。舊版的 `blocked` 不會再出現，理由同上 |
+| `gate_status` | `ok` / `unauthorized`（發話者沒有可用 token——不擋訊息，但這一輪的 system prompt 會多帶一段提示，見 `group_context.GOOGLE_AUTH_MISSING_HINT`；只有在 agent 這輪其實用不到 Google 時才會留下這個值）/ `notice`（token 有效但缺 Drive scope，仍照常呼叫 agent）/ `auth_link`（這輪回覆含 Google 授權連結——`auth_links.publish_auth_links` 把 marker 換成連結後覆寫掉前面的值，見 `docs/google-auth-per-member-plan.md` §3.3）/ `None`（observe、reset 短路，沒跑到判斷這一步）。舊版的 `blocked` 不會再出現，理由同上 |
 | `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
 | `tool_calls`, `api_calls` | 這一輪 Hermes 內部的工具呼叫次數／LLM API 呼叫次數，`None`＝未知（沒有呼叫或讀取失敗）。兩個都不是 JSONL only——純數字，兩個 sink 都有。來源與取捨見 §5.1 的 2026-09-15 補充 |
 | `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `core.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |

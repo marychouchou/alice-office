@@ -391,7 +391,9 @@ async def test_a_speaker_without_a_google_token_still_reaches_the_agent(
     mock_ask.assert_awaited_once()
     assert result.texts == ["今天是 9 月 18 日"]
     assert result.envelope.outcome == "replied"
-    assert result.envelope.gate_status == "ok"
+    # The gate noticed the missing token and said so to the agent, not the room;
+    # the agent answered without Google, so that is what the envelope keeps.
+    assert result.envelope.gate_status == "unauthorized"
     # No warm-up is triggered any more: the turn itself resolved the container.
     assert warmups == {}
 
@@ -424,7 +426,7 @@ async def test_auth_marker_in_a_reply_becomes_the_speaker_s_authorization_link(
         "https://router.example.com/oauth/start"
         "?user_id=line_room_AAA&member=line_room_aaa"
     ]
-    # The issued link outranks the gate's own "ok" in the turn envelope.
+    # The issued link outranks the gate's own "unauthorized" in the turn envelope.
     assert result.envelope.gate_status == "auth_link"
     # The question is parked for the resume step to re-run after authorization.
     assert settings.room_pending_auth_path("line_room_AAA", "line_room_aaa").exists()
@@ -453,6 +455,112 @@ async def test_an_unidentified_group_speaker_still_reaches_the_agent(tmp_path: P
     mock_ask.assert_awaited_once()
     assert result.texts == ["好的"]
     assert result.envelope.gate_status == "ok"
+
+
+async def test_an_unauthorized_speaker_s_turn_warns_the_agent_in_its_system_prompt(
+    tmp_path: Path,
+) -> None:
+    """A speaker with no token is announced to the agent, not left to a tool failure.
+
+    The marker rule alone only fires once a Google tool has failed, and the
+    third-party calendar MCP's credential error has been seen to read as
+    something else entirely — so the router says it up front instead.
+    """
+    from alice_office_router.core import process_inbound
+    from alice_office_router.group_context import DIRECT_SYSTEM_PROMPT, GOOGLE_AUTH_MISSING_HINT
+
+    settings = _settings(DATA_DIR=tmp_path)
+    fake_ask, calls = _recording_ask(lambda _session: AgentReply(text="好"))
+
+    with (
+        patch(
+            "alice_office_router.core.check_google_authorization",
+            return_value=("unauthorized", None),
+        ),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+    ):
+        result = await process_inbound(_msg("明天有什麼會"), settings)
+
+    assert calls[0].system == f"{DIRECT_SYSTEM_PROMPT}\n\n{GOOGLE_AUTH_MISSING_HINT}"
+    # Nothing is blocked and nothing extra is pushed to the room.
+    assert result.texts == ["好"]
+    # The agent answered without needing Google, so the gate's own verdict stands.
+    assert result.envelope.gate_status == "unauthorized"
+
+
+async def test_an_unauthorized_group_speaker_s_turn_warns_the_agent_too(tmp_path: Path) -> None:
+    """The hint rides on the group prompt as well, not only the 1:1 one."""
+    from alice_office_router.core import process_inbound
+    from alice_office_router.group_context import GOOGLE_AUTH_MISSING_HINT, GROUP_SYSTEM_PROMPT
+
+    settings = _settings(DATA_DIR=tmp_path)
+    fake_ask, calls = _recording_ask(lambda _session: AgentReply(text="好"))
+
+    with (
+        patch(
+            "alice_office_router.core.check_google_authorization",
+            return_value=("unauthorized", None),
+        ),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_C1:8642",
+        ),
+        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+    ):
+        await process_inbound(_group_msg("幫我看行事曆"), settings)
+
+    assert calls[0].system == f"{GROUP_SYSTEM_PROMPT}\n\n{GOOGLE_AUTH_MISSING_HINT}"
+
+
+async def test_an_authorized_speaker_s_turn_carries_no_auth_hint(tmp_path: Path) -> None:
+    """The ordinary turn's system prompt is untouched — the hint is not a standing rule."""
+    from alice_office_router.core import process_inbound
+    from alice_office_router.group_context import DIRECT_SYSTEM_PROMPT
+
+    settings = _settings(DATA_DIR=tmp_path)
+    fake_ask, calls = _recording_ask(lambda _session: AgentReply(text="好"))
+
+    with (
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+    ):
+        await process_inbound(_msg("今天幾號"), settings)
+
+    assert calls[0].system == DIRECT_SYSTEM_PROMPT
+
+
+async def test_an_unauthorized_turn_that_emits_the_marker_is_recorded_as_auth_link(
+    tmp_path: Path,
+) -> None:
+    """The agent took the hint: the issued link overwrites "unauthorized" in the envelope."""
+    from alice_office_router.auth_links import AUTH_MARKER
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path, PUBLIC_BASE_URL="https://router.example.com")
+    settings.google_web_creds_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.google_web_creds_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text=f"需要看行事曆：\n{AUTH_MARKER}")),
+        ),
+    ):
+        result = await process_inbound(_msg("明天有什麼會"), settings)
+
+    assert result.envelope.gate_status == "auth_link"
 
 
 # ---------------------------------------------------------------------------

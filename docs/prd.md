@@ -238,7 +238,7 @@ flowchart TD
 - 對應：`session_hygiene.py`（`begin_turn` / `complete_turn` / `build_turn_text`）、
   `core._generate_handoff`；完整機制見 `docs/session-hygiene.md`。
 
-### FR-06　Google 延遲授權＋群組逐人授權（gate_status：ok / notice / auth_link）
+### FR-06　Google 延遲授權＋群組逐人授權（gate_status：ok / unauthorized / notice / auth_link）
 
 身為使用者，我不希望還沒碰 Google 相關功能就先被擋下來要求授權；真的用到時才給我
 連結，授權完直接把答案送過來，不用我再問一次。群組裡每個人用自己的 Google 帳號，
@@ -268,6 +268,11 @@ flowchart TD
   存進該成員的檔案，背景重跑那則訊息（`core.resume_pending_auth` → 對應 channel
   adapter 的 `resume`），答案用 Push（不是 Reply）直接送回聊天室——使用者不用再問
   一次。API channel 沒有 push 管道，pending 訊息直接捨棄，使用者要自己再問一次。
+- **沒 token 的人，agent 會事先被告知**：router 在進 agent 前就知道這位發話者沒有可用
+  token（`gate_status="unauthorized"`），於是把提示疊進這一輪的 system prompt——需要用到
+  Google 就直接放 marker、不要呼叫工具——不必等某個 Google 工具用不可控的措辭失敗才觸發
+  （第三方 calendar MCP 的「tokens are no longer valid」就曾讓 agent 回「請在設定裡重新授權」
+  而沒放 marker，使用者因此拿不到連結）。
 - **notice 仍然存在**：token 有效但當初授權時還沒要求 Drive scope（舊授權）→ 照常
   呼叫 agent，並多推播一則重新授權提示（calendar／gmail 仍可用）；對應
   `gate_status="notice"`。

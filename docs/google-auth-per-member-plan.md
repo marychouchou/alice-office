@@ -92,6 +92,13 @@ data/<room>/google/
      寫在 `group_context.DIRECT_SYSTEM_PROMPT`／`GROUP_SYSTEM_PROMPT`（既有房間立即生效）和
      `src/hermes/skill/alice/runtime-env/SKILL.md`（要 rebuild image），與 `outbox://` 的兩層
      做法一致（`docs/file-share-design.md` §9）。
+- **router 事先知道發話者沒 token 時，會在該回合的 system prompt 加上提示，不再只靠工具錯誤文字**
+  （2026-09-18 補）：`check_google_authorization` 多回一個 `"unauthorized"` 狀態（`check_member_token`
+  回 `missing`、且發話者身分可辨識時），`core._take_turn` 就把 `group_context.GOOGLE_AUTH_MISSING_HINT`
+  疊到這一輪的 system prompt 上——「你現在沒有可用的 Google 憑證，需要用到就直接放 marker、別呼叫工具」。
+  起因是實機上 calendar MCP（第三方）回的是 `Authentication tokens are no longer valid. Please restart
+  the server to re-authenticate.`，agent 把它讀成「授權過期」，回了「請在設定裡重新授權」卻沒放 marker，
+  router 因此沒發出連結。上面那條 prompt 規則同時擴充成「任何跟憑證有關的 Google 工具失敗」都要放 marker。
 - 新模組 `auth_links.py`（鏡射 `file_links.py`）：`publish_auth_links(text, msg, config) -> (text, requested: bool)`：
   沒 marker 零 I/O 直接回傳；有 marker → 依 3.1 算 member_key → 換成
   「{sender_name} 請點此連結 Google 帳號：{PUBLIC_BASE_URL}/oauth/start?user_id={room}&member={member_key}」

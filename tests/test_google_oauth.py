@@ -409,7 +409,7 @@ def test_auth_url_for_keeps_the_raw_room_id_and_names_the_member(tmp_path: Path)
 
 
 # ---------------------------------------------------------------------------
-# check_google_authorization (the gate — "notice" or nothing since 2026-09-18)
+# check_google_authorization (the gate — informs, never blocks, since 2026-09-18)
 # ---------------------------------------------------------------------------
 
 
@@ -435,11 +435,14 @@ class TestCheckGoogleAuthorization:
         settings = _settings(tmp_path)  # no public URL / web creds => disabled
         assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == ("ok", None)
 
-    def test_no_token_returns_ok_so_the_message_reaches_the_agent(self, tmp_path: Path) -> None:
-        """The gate stopped blocking on 2026-09-18: the marker path offers the link instead."""
+    def test_no_token_returns_unauthorized_without_blocking(self, tmp_path: Path) -> None:
+        """Nothing is blocked and nothing is pushed; the turn just learns the speaker has none."""
         settings = _enabled_settings(tmp_path)
 
-        assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == ("ok", None)
+        assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == (
+            "unauthorized",
+            None,
+        )
 
     def test_unidentified_group_speaker_returns_ok(self, tmp_path: Path) -> None:
         """A speaker LINE would not name has no token of their own, which is nothing to say."""
@@ -488,8 +491,8 @@ class TestCheckGoogleAuthorization:
 
         assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == ("ok", None)
 
-    def test_expired_without_refresh_token_returns_ok(self, tmp_path: Path) -> None:
-        """An unusable token is the same case as no token: say nothing, let the agent run."""
+    def test_expired_without_refresh_token_returns_unauthorized(self, tmp_path: Path) -> None:
+        """An unusable token is the same case as no token: warn the agent, let the turn run."""
         settings = _enabled_settings(tmp_path)
         _write_tokens(
             settings,
@@ -504,7 +507,10 @@ class TestCheckGoogleAuthorization:
             },
         )
 
-        assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == ("ok", None)
+        assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == (
+            "unauthorized",
+            None,
+        )
 
     def test_expired_with_refresh_token_and_full_scopes_returns_ok(self, tmp_path: Path) -> None:
         settings = _enabled_settings(tmp_path)
@@ -523,13 +529,17 @@ class TestCheckGoogleAuthorization:
 
         assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == ("ok", None)
 
-    def test_malformed_tokens_json_returns_ok(self, tmp_path: Path) -> None:
+    def test_malformed_tokens_json_returns_unauthorized(self, tmp_path: Path) -> None:
+        """An unreadable token file reads as no token, which the agent is told about."""
         settings = _enabled_settings(tmp_path)
         tokens_path = settings.room_google_member_tokens_path("U_ROOM_ABC", "u_room_abc")
         tokens_path.parent.mkdir(parents=True, exist_ok=True)
         tokens_path.write_text("not valid json {{{", encoding="utf-8")
 
-        assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == ("ok", None)
+        assert check_google_authorization("U_ROOM_ABC", "u_room_abc", settings) == (
+            "unauthorized",
+            None,
+        )
 
 
 def _now_ms() -> float:

@@ -37,6 +37,7 @@ from alice_office_router.google_oauth import check_google_authorization
 from alice_office_router.google_tokens import member_key_for, select_member_tokens
 from alice_office_router.group_context import (
     DIRECT_SYSTEM_PROMPT,
+    GOOGLE_AUTH_MISSING_HINT,
     GROUP_SYSTEM_PROMPT,
     build_group_prompt,
     clear_observed,
@@ -464,9 +465,9 @@ class RouteResult:
     Attributes:
         texts: Texts to send back to the room, in delivery order.
         outcome: How the turn ended (see conversation_log.Outcome).
-        gate_status: The Google OAuth gate's verdict, "auth_link" when the
-            reply carried an authorization link instead, or None when the gate
-            was short-circuited (observe, reset).
+        gate_status: The Google OAuth gate's verdict ("ok", "unauthorized",
+            "notice"), "auth_link" when the reply carried an authorization link
+            instead, or None when the gate was short-circuited (observe, reset).
         session_id: The session id sent to Hermes, if an agent call was made.
         rotated: Whether this turn rotated the room's session epoch.
         agent_duration_ms: Wall time of the agent HTTP call, if it ran.
@@ -670,7 +671,23 @@ async def _ask_agent(
     )
 
 
-async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
+def _with_extra(prompt: str, extra: str | None) -> str:
+    """Layer a single-turn note on top of a channel's system prompt.
+
+    Args:
+        prompt: The room-shape system prompt for this turn (DIRECT or GROUP).
+        extra: What this turn alone adds, or None when it adds nothing.
+
+    Returns:
+        `prompt` unchanged when there is nothing to add, else the two joined by
+        a blank line.
+    """
+    return prompt if extra is None else f"{prompt}\n\n{extra}"
+
+
+async def _ask_group_agent(
+    msg: InboundMessage, config: Settings, *, extra_system: str | None = None
+) -> AgentTurn:
     """Ask the agent for an addressed group message, managing buffer and silence.
 
     Folds the room's observed background into a tagged prompt (design §7), asks
@@ -688,6 +705,7 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     Args:
         msg: The addressed group inbound message.
         config: Application settings.
+        extra_system: What this turn alone adds to GROUP_SYSTEM_PROMPT, or None.
 
     Returns:
         The AgentTurn from the underlying call, re-labelled "silence" (with no
@@ -695,7 +713,9 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     """
     observed = peek_observed(config, msg.room_key)
     prompt = build_group_prompt(observed, msg)
-    turn = await _ask_agent(msg.room_key, prompt, config, system=GROUP_SYSTEM_PROMPT)
+    turn = await _ask_agent(
+        msg.room_key, prompt, config, system=_with_extra(GROUP_SYSTEM_PROMPT, extra_system)
+    )
     # "replied" is the only outcome that folds the background in; the `is None`
     # half is for the type checker only — a "replied" turn always carries text.
     if turn.outcome != "replied" or turn.text is None:
@@ -706,21 +726,28 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     return turn
 
 
-async def _reply_for(msg: InboundMessage, config: Settings) -> AgentTurn:
+async def _reply_for(
+    msg: InboundMessage, config: Settings, *, extra_system: str | None = None
+) -> AgentTurn:
     """Ask the agent for a reply, taking the group path for group messages.
 
     Args:
         msg: The inbound message (already past the observe short-circuit, so a
             group message here is one addressed to the bot).
         config: Application settings.
+        extra_system: What this turn alone adds to the room-shape system prompt
+            — currently GOOGLE_AUTH_MISSING_HINT when the router already knows
+            the speaker has no Google token. None on an ordinary turn.
 
     Returns:
         The turn's AgentTurn; its `text` is None when nothing should be
         delivered.
     """
     if msg.is_group:
-        return await _ask_group_agent(msg, config)
-    return await _ask_agent(msg.room_key, msg.text, config, system=DIRECT_SYSTEM_PROMPT)
+        return await _ask_group_agent(msg, config, extra_system=extra_system)
+    return await _ask_agent(
+        msg.room_key, msg.text, config, system=_with_extra(DIRECT_SYSTEM_PROMPT, extra_system)
+    )
 
 
 @asynccontextmanager
@@ -781,15 +808,21 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         # still before the agent turn — the MCPs must not read it in between.
         await asyncio.to_thread(refresh_google_mount, msg.room_key)
 
-    # Never blocks a message since 2026-09-18: the only thing left to say is
-    # "your token predates the Drive scope", which rides ahead of the reply.
+    # Never blocks a message since 2026-09-18. It reports two things instead:
+    # "your token predates the Drive scope" rides ahead of the reply, and
+    # "this speaker has no token at all" goes to the agent, not the room.
     status, message = check_google_authorization(msg.room_key, member, config)
 
     texts: list[str] = []
     if status == "notice" and message is not None:
         texts.append(message)
 
-    turn = await _reply_for(msg, config)
+    # Told up front rather than inferred later: the marker rule in the system
+    # prompts only fires once a Google tool has failed, and the third-party
+    # calendar MCP's credential errors have already been seen to read as
+    # something else entirely (group_context.GOOGLE_AUTH_MISSING_HINT).
+    hint = GOOGLE_AUTH_MISSING_HINT if status == "unauthorized" else None
+    turn = await _reply_for(msg, config, extra_system=hint)
     if turn.text is not None:
         # The one seam every agent reply passes through, for both 1:1 and
         # group turns, after the silence token has been filtered out and

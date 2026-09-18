@@ -354,6 +354,7 @@
 <ul>
   <li>gmail 與 drive 是自己寫的 MCP，錯誤文字直接含這個字串和「原樣單獨放一行」的指示。</li>
   <li>calendar 是第三方套件，錯誤文字不可控，靠 system prompt 的規則補上：任何 Google 工具回報未授權，就放這個字串。</li>
+  <li>再加一層保險：router 在進 agent 前就查得到這位發話者有沒有 token，沒有的話直接在這一輪的 system prompt 裡說明，不必等工具用陌生的措辭失敗才被 agent 認出來。</li>
 </ul>
 
 <h3>授權完成後自動接續</h3>

@@ -414,30 +414,43 @@ def auth_url_for(config: Settings, room_id: str, member_key: str) -> str:
 def check_google_authorization(
     room_id: str, member_key: str | None, config: Settings
 ) -> tuple[str, str | None]:
-    """Decide whether this turn's speaker should be nudged about Google scopes.
+    """Report what this turn's speaker's Google token situation is.
 
     The gate stopped blocking messages on 2026-09-18: a speaker with no token
-    now reaches the agent like anybody else, and gets an authorization link
-    only when a Google tool actually reports it has no token (the
-    google-auth://request marker, docs/google-auth-per-member-plan.md §3.3).
-    What remains here is the one case that marker cannot catch — a token that
-    works, so nothing fails, but predates the Drive scope.
+    reaches the agent like anybody else. Nothing here blocks or sends anything
+    on its own — the two non-"ok" statuses are information the turn acts on:
+
+    - "unauthorized" tells the caller to warn the *agent* before it tries a
+      Google tool (core folds group_context.GOOGLE_AUTH_MISSING_HINT into the
+      turn's system prompt). Without it the authorization link depends on the
+      agent recognising whatever wording a failing Google tool happens to use,
+      which the third-party calendar MCP ("Authentication tokens are no longer
+      valid. Please restart the server to re-authenticate.") has already been
+      seen to defeat: the agent told the user to re-authorize "in the settings"
+      and never emitted the google-auth://request marker, so no link was issued.
+    - "notice" is the one case no tool failure can surface at all — a token that
+      works, so nothing fails, but predates the Drive scope.
 
     Args:
         room_id: Raw LINE room/user/group id.
         member_key: The speaker's account key, or None for a group speaker
-            LINE would not identify. They can have no token at all, which is
-            nothing to comment on; the marker path handles them.
+            LINE would not identify. They can have no token at all, but there
+            is no link to offer them either (auth_links), so they stay "ok".
         config: Application settings.
 
     Returns:
         ("ok", None) — nothing to say, proceed.
+        ("unauthorized", None) — proceed, but the speaker has no usable token,
+            so the turn should tell the agent up front.
         ("notice", msg) — proceed normally, but also push msg to the user
             (token present but missing the Drive scope; calendar/gmail work).
     """
     if not config.google_oauth_enabled or member_key is None:
         return "ok", None
-    if check_member_token(config, room_id, member_key) != "missing_scopes":
+    token_status = check_member_token(config, room_id, member_key)
+    if token_status == "missing":
+        return "unauthorized", None
+    if token_status != "missing_scopes":
         return "ok", None
     auth_url = auth_url_for(config, room_id, member_key)
     return "notice", _NOTICE_MSG_TEMPLATE.format(auth_url=auth_url)

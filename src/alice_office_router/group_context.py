@@ -51,9 +51,11 @@ GROUP_SYSTEM_PROMPT = (
     "如果你判斷這則訊息其實不需要回應，請只輸出 NO_REPLY。"
     "要把檔案交給使用者只能用 share_file 工具，把它回傳的 outbox://… 連結原樣單獨一行貼在回覆裡；"
     "直接貼檔案路徑或 MEDIA: 標籤使用者看不到。"
-    "任何 Google 工具（行事曆／Gmail／Drive）回報沒有 token、未授權或找不到已驗證帳號時，"
-    "在回覆裡把 google-auth://request 原樣單獨一行放上，並簡短說明你需要授權做什麼；"
-    "不要自己編授權網址。"
+    # Same marker rule as DIRECT_SYSTEM_PROMPT's below; keep the two in sync.
+    "任何 Google 工具（行事曆／Gmail／Drive）失敗而原因跟憑證有關時——沒有 token、未授權、"
+    "找不到已驗證帳號、tokens are no longer valid、re-authenticate、restart the server、"
+    "授權已過期、憑證失效，都算——一律在回覆裡把 google-auth://request 原樣單獨一行放上，"
+    "並簡短說明你需要授權做什麼；不要自己編授權網址，也不要只叫使用者自己去設定裡重新授權。"
 )
 
 # Ephemeral system message layered on top of the room's core prompt for one 1:1
@@ -75,10 +77,28 @@ DIRECT_SYSTEM_PROMPT = (
     "先用工具（例如 image_ocr）重新讀取檔案，不要憑印象作答。\n"
     "- 要把檔案交給使用者只能用 share_file 工具，把它回傳的 outbox://… 連結原樣單獨一行貼在回覆裡；"
     "直接貼檔案路徑或 MEDIA: 標籤使用者看不到。\n"
-    "- 任何 Google 工具（行事曆／Gmail／Drive）回報沒有 token、未授權或找不到已驗證帳號時，"
-    "在回覆裡把 google-auth://request 原樣單獨一行放上，並簡短說明你需要授權做什麼；"
-    "不要自己編授權網址。\n"
+    # Same marker rule as GROUP_SYSTEM_PROMPT's above; keep the two in sync.
+    "- 任何 Google 工具（行事曆／Gmail／Drive）失敗而原因跟憑證有關時——沒有 token、未授權、"
+    "找不到已驗證帳號、tokens are no longer valid、re-authenticate、restart the server、"
+    "授權已過期、憑證失效，都算——一律在回覆裡把 google-auth://request 原樣單獨一行放上，"
+    "並簡短說明你需要授權做什麼；不要自己編授權網址，也不要只叫使用者自己去設定裡重新授權。\n"
     "- 不確定或資訊不足就直接問使用者，不要編造。"
+)
+
+# Appended to whichever of the two prompts above a turn uses, for that turn
+# only, when the router already knows the speaker has no usable Google token
+# (core._take_turn -> _reply_for). The marker rule inside those prompts can only
+# fire *after* a Google tool has failed, and a third-party tool words its
+# failure however it likes: the calendar MCP's "Authentication tokens are no
+# longer valid. Please restart the server to re-authenticate." was read as an
+# expired grant, answered with 「請在設定裡重新授權」, and produced no marker and
+# therefore no link. This states the fact up front instead, so issuing a link
+# never depends on the agent parsing a stranger's error text.
+GOOGLE_AUTH_MISSING_HINT = (
+    "（系統提示）這位發話者還沒連結 Google 帳號，你現在沒有任何可用的 Google 憑證。"
+    "如果這次的請求需要行事曆／Gmail／Drive，不要呼叫任何 Google 工具，"
+    "直接在回覆裡把 google-auth://request 原樣單獨一行放上，並用一句話說明你需要授權做什麼。"
+    "如果這次的請求用不到 Google，就忽略這則提示，照常回答。"
 )
 
 # Hermes's silence-token set, matched case-insensitively after strip. When the
