@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +15,7 @@ from alice_office_router.container_manager import (
     _ensure_config_yaml,
     _wait_until_ready,
     get_or_create_container,
+    refresh_google_mount,
 )
 from alice_office_router.room_seed import ensure_mcp_seed
 
@@ -633,3 +635,90 @@ def test_volume_config_adds_google_mount_only_when_enabled(tmp_path: Path) -> No
     }
     disabled_host_dir = str(disabled_settings.room_google_host_dir("room_AAA"))
     assert disabled_host_dir not in disabled_volumes
+
+
+# ---------------------------------------------------------------------------
+# refresh_google_mount — the macOS virtiofs nudge after a member token swap
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_google_mount_execs_ls_in_a_running_container() -> None:
+    """A running room container is made to opendir() the mount, clearing the stale handle."""
+    container = _make_running_container()
+    container.exec_run.return_value = (0, b"")
+    client = _make_mock_client(container)
+
+    with patch("alice_office_router.container_manager.docker.from_env", return_value=client):
+        refresh_google_mount("room_AAA")
+
+    client.containers.get.assert_called_once_with(CONTAINER_NAME)
+    command = container.exec_run.call_args.args[0]
+    assert command[:2] == ["sh", "-c"]
+    assert CONTAINER_GOOGLE_DIR in command[2]
+
+
+def test_refresh_google_mount_skips_a_stopped_container(caplog: pytest.LogCaptureFixture) -> None:
+    """Nothing is executing inside a stopped container, so nothing can hold a stale mount."""
+    container = _make_running_container()
+    container.status = "exited"
+    client = _make_mock_client(container)
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=client),
+        caplog.at_level(logging.DEBUG, logger="alice_office_router.container_manager"),
+    ):
+        refresh_google_mount("room_AAA")
+
+    container.exec_run.assert_not_called()
+    assert "is not running" in caplog.text
+
+
+def test_refresh_google_mount_is_a_noop_for_a_room_without_a_container(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A member can authorize before their room is ever warmed; that is not an error."""
+    client = MagicMock()
+    client.containers.get.side_effect = docker.errors.NotFound("not found")
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=client),
+        caplog.at_level(logging.DEBUG, logger="alice_office_router.container_manager"),
+    ):
+        refresh_google_mount("room_AAA")
+
+    assert f"No container {CONTAINER_NAME}" in caplog.text
+    # Nothing above DEBUG: a room with no container is the normal case.
+    assert [r for r in caplog.records if r.levelno > logging.DEBUG] == []
+
+
+def test_refresh_google_mount_logs_a_docker_failure_instead_of_raising(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The turn must go ahead: a broken nudge is a warning, never an exception."""
+    client = MagicMock()
+    client.containers.get.side_effect = docker.errors.APIError("boom")
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=client),
+        caplog.at_level(logging.WARNING, logger="alice_office_router.container_manager"),
+    ):
+        refresh_google_mount("room_AAA")
+
+    assert "Failed to refresh the Google mount" in caplog.text
+
+
+def test_refresh_google_mount_warns_when_the_exec_itself_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-zero `ls` means the mount is not where it should be — say so, don't swallow it."""
+    container = _make_running_container()
+    container.exec_run.return_value = (2, b"No such file or directory")
+    client = _make_mock_client(container)
+
+    with (
+        patch("alice_office_router.container_manager.docker.from_env", return_value=client),
+        caplog.at_level(logging.WARNING, logger="alice_office_router.container_manager"),
+    ):
+        refresh_google_mount("room_AAA")
+
+    assert "exited 2" in caplog.text

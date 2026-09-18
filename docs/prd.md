@@ -8,8 +8,8 @@
   deployers）附近，2026-09-14。
 - **範圍**：`src/alice_office_router/` 整個 router 服務；不含 `src/hermes/` 底下
   MCP／plugin 工具本身的功能規格（那些是 Hermes agent 的能力，見 AGENTS.md 路由表）。
-- 行為異動時（尤其是群組判斷邏輯、session 輪替門檻、gate 三態）請同步更新本文件，
-  否則本文件會跟程式碼一起腐朽。
+- 行為異動時（尤其是群組判斷邏輯、session 輪替門檻、Google 授權流程）請同步更新
+  本文件，否則本文件會跟程式碼一起腐朽。
 
 ## 1. 背景與問題陳述
 
@@ -197,7 +197,11 @@ flowchart TD
 - `join` event 一樣走 `webhookEventId` 去重。
 - `leave`／`memberLeft` 不處理（無 reply token 可用）；`memberJoined`（既有群組有新
   成員加入，非 bot 自己被邀請）目前不發問候，避免過度打擾（見範圍外章節）。
-- 對應：`channels/line/adapter.py::_schedule_join_greeting`、`_GROUP_JOIN_GREETING`。
+- `join`（群組）與 `follow`（1:1 加好友，無自我介紹可回）都會觸發
+  `core.warm_room`：在背景建立房間目錄與容器、跑一輪丟棄用的暖機探針，讓這個房間
+  的第一則真正提問落在已就緒的 agent 上，不用再等 30–60 秒冷啟動（見「效能」節）。
+- 對應：`channels/line/adapter.py::_schedule_join_greeting`、`_GROUP_JOIN_GREETING`、
+  `_warm`、`core.warm_room`。
 
 ### FR-04　session 手動重置指令
 
@@ -234,26 +238,62 @@ flowchart TD
 - 對應：`session_hygiene.py`（`begin_turn` / `complete_turn` / `build_turn_text`）、
   `core._generate_handoff`；完整機制見 `docs/session-hygiene.md`。
 
-### FR-06　Google OAuth 三態 gate（ok / notice / blocked）
+### FR-06　Google 延遲授權＋群組逐人授權（gate_status：ok / unauthorized / notice / auth_link）
 
-身為使用者，如果我要助理操作我的 Google 服務，我需要先授權；已經授權的部分不該被
-反覆打斷。
+身為使用者，我不希望還沒碰 Google 相關功能就先被擋下來要求授權；真的用到時才給我
+連結，授權完直接把答案送過來，不用我再問一次。群組裡每個人用自己的 Google 帳號，
+不要我授權完變成整群共用。
 
-- 只有部署方設定 `PUBLIC_BASE_URL` 且放好 Web application 憑證時才啟用
-  （`Settings.google_oauth_enabled`）；`GOOGLE_OAUTH_GATE`（預設 `true`）可在已啟用
-  的部署上單獨關閉「擋訊息」這一步——設 `false` 時 `/oauth/start`、`/oauth/callback`
-  照常可用，但 inbound 訊息一律不因未授權被擋（等同 gate 永遠回 `ok`）。
-- Gate 啟用時，每則訊息進 agent 前先跑 `check_google_authorization`，三態：
-  - **blocked**：沒有 token，或 access token 過期且無 refresh token → 只回授權
-    連結，不呼叫 agent；同時在背景建立房間目錄與容器（暖機），授權後的下一則不再
-    吃冷啟動。取捨：任何傳過一則訊息的房間（含從未授權的）都會擁有一個常駐容器，
-    gate 不再是容器數量的上限——容器的資源上限／閒置回收是待辦；
-  - **notice**：有 token 但缺 Drive scope → 照常呼叫 agent，並多推播一則重新授權
-    提示（calendar／gmail 仍可用）；
-  - **ok**：scope 齊全 → 正常呼叫 agent。
-- 每個房間各自一份 `tokens.json` 與 GCP 憑證副本（`data/<room_id>/google/`），逐房
-  隔離、互不可見；砍掉房間資料夾即清空該房間的 Google 授權。
-- 對應：`google_oauth.py::check_google_authorization`；架構決策見
+- **不再擋訊息**（2026-09-18 起，取代原本的三態 blocking gate；`blocked` 狀態與
+  `GOOGLE_OAUTH_GATE` 開關已移除）：沒有 token 的使用者一樣直接進 agent，跟其他
+  訊息完全一樣的路徑。只有 agent 真的呼叫 Google 工具卻沒有可用 token 時，才會在
+  回覆裡出現授權連結。
+- **身分規則（唯一一條）**：每一回合一律以「這一輪發話者」的身分執行 Google 工具——
+  1:1 房間裡發話者就是房間本身；群組裡是 `sender_id` 解出的那個人。router 在
+  `core._take_turn` 進 agent 前，把這個房間的 `tokens.json` 換成（symlink）該發話者
+  自己的 token 檔（`google_tokens.select_member_tokens`），MCP 完全不用改、也不用
+  重啟容器就看到正確的帳號。「要操作誰的資源」不由 agent 判斷：A 問「B 的行事曆」
+  一樣是用 A 的帳號去查，看不看得到由 Google 的分享設定決定。
+  - **匿名群組發話者**：群組成員如果沒加 OA 好友，LINE 不會給 `sender_id`，這種
+    發話者拿不到任何連結，只會收到固定提示請先加好友。
+- **授權連結：marker 走回覆的最後一關（跟 `outbox://` 同一招）**：Google 工具（gmail／
+  drive／calendar）回報沒有 token時，agent 依 system prompt／MCP 錯誤文字的指示，在
+  回覆裡貼一行固定字串 `google-auth://request`；router 在送出前（`auth_links.
+  publish_auth_links`，`publish_file_links` 之後、同一個 room lock 內）把它換成
+  **這一輪發話者自己的**授權連結，並把觸發的那則訊息暫存起來（見下一點）。這一步
+  發生時 `RouteResult.gate_status` 記為 `"auth_link"`。
+- **授權完自動接續**：連結發出的同時，router 把觸發它的那則訊息原樣存進
+  `data/<room_id>/router_state/pending_auth/<member_key>.json`（10 分鐘 TTL，同一人
+  再觸發只留最後一則）。使用者點連結、在瀏覽器完成 Google 同意後，callback 把 token
+  存進該成員的檔案，背景重跑那則訊息（`core.resume_pending_auth` → 對應 channel
+  adapter 的 `resume`），答案用 Push（不是 Reply）直接送回聊天室——使用者不用再問
+  一次。API channel 沒有 push 管道，pending 訊息直接捨棄，使用者要自己再問一次。
+- **沒 token 的人，agent 會事先被告知**：router 在進 agent 前就知道這位發話者沒有可用
+  token（`gate_status="unauthorized"`），於是把提示疊進這一輪的 system prompt——需要用到
+  Google 就直接放 marker、不要呼叫工具——不必等某個 Google 工具用不可控的措辭失敗才觸發
+  （第三方 calendar MCP 的「tokens are no longer valid」就曾讓 agent 回「請在設定裡重新授權」
+  而沒放 marker，使用者因此拿不到連結）。
+- **notice 仍然存在**：token 有效但當初授權時還沒要求 Drive scope（舊授權）→ 照常
+  呼叫 agent，並多推播一則重新授權提示（calendar／gmail 仍可用）；對應
+  `gate_status="notice"`。
+- **Token 存放**：`data/<room_id>/google/tokens.json` 現在是一條相對 symlink，指向
+  `members/<member_key>.json`（member 檔內層 key 固定是 `account_key(room_id)`，
+  MCP 的 `GOOGLE_ACCOUNT_MODE` 寫死用它）；逐房隔離、互不可見；砍掉房間資料夾即清空
+  該房間所有成員的 Google 授權。升級前的舊房間第一次進 `select_member_tokens` 會把
+  既有的單一 `tokens.json` 搬成 `members/<account_key(room)>.json`——1:1 房間因此
+  授權無縫延續，群組房間等於舊的共用 token 作廢，各成員重新各自授權（這正是要修的
+  問題）。
+- **已知取捨**：
+  - 群組裡連結是用純文字點名（「{名字} 請點此連結」），沒有身分驗證——別人點了
+    A 的連結一樣能幫 A 完成授權；靠授權完成的公告（「{名字} 已完成 Google
+    授權」）讓誤觸可見。
+  - `google-calendar` MCP 依名稱找行事曆有 5 分鐘快取，同一個 key 剛換人時，5 分鐘
+    內用名稱查可能對到前一位使用者的行事曆清單（`primary` 與帶 `@` 的 id 不受影響）。
+  - API channel 的 pending 會被丟棄（見上）。
+- 對應：`google_tokens.py`（成員檔、換檔）、`auth_links.py`（marker、pending）、
+  `google_oauth.py::check_google_authorization`（僅剩 notice）、
+  `core._take_turn`／`core.resume_pending_auth`；完整設計見
+  [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)，架構決策見
   `docs/google-workspace-integration-summary.md`。
 
 ### FR-07　多媒體訊息處理方式
@@ -381,7 +421,8 @@ flowchart TD
 ### 效能
 
 - 新房間容器冷啟動 30–60 秒（s6 supervision + skill sync），`/health` 輪詢間隔
-  1 秒、最多 60 秒逾時。gate `blocked` 時冷啟動在背景進行，不佔授權提示的回覆時間。
+  1 秒、最多 60 秒逾時。LINE 的 `follow`／`join` 事件觸發 `core.warm_room` 在背景
+  暖機（見 FR-03），比等第一則訊息才建容器更早，不佔任何回覆的等待時間。
 - 對 Hermes agent 的單次請求走 SSE streaming，以「靜默多久」而非「總共多久」判定 agent
   是否還活著：靜默上限預設 120 秒（`HERMES_IDLE_TIMEOUT_SECONDS`），絕對上限預設 3600 秒
   （`HERMES_REQUEST_TIMEOUT_SECONDS`，正常不會踩到）；任一條逾時都回覆固定提示而非靜默。

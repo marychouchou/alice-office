@@ -27,14 +27,17 @@ import structlog
 from pydantic import ValidationError
 from structlog.contextvars import bound_contextvars
 
+from alice_office_router.auth_links import publish_auth_links, read_pending_auth
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
-from alice_office_router.container_manager import get_or_create_container
+from alice_office_router.container_manager import get_or_create_container, refresh_google_mount
 from alice_office_router.conversation_log import Outcome, TurnEnvelope
 from alice_office_router.file_links import publish_file_links
 from alice_office_router.google_oauth import check_google_authorization
+from alice_office_router.google_tokens import member_key_for, select_member_tokens
 from alice_office_router.group_context import (
     DIRECT_SYSTEM_PROMPT,
+    GOOGLE_AUTH_MISSING_HINT,
     GROUP_SYSTEM_PROMPT,
     build_group_prompt,
     clear_observed,
@@ -75,16 +78,19 @@ struct_logger = structlog.stdlib.get_logger(__name__)
 # number of rooms, which already costs a container each.
 _room_locks: dict[str, asyncio.Lock] = {}
 
-# In-flight warm-ups, one per room. A gate-"blocked" turn starts the room's
-# container here — and then warms its agent with one throwaway turn — so the
-# message the user sends after authorizing lands on a ready one instead of
-# paying the 30–60 s cold start and the agent's first-turn tax; the auth reply
-# itself is not delayed. Keyed by room so a second blocked message while the first
-# warm-up is still running reuses it instead of spawning another thread. The
-# entry is dropped when the task finishes (success or failure), so a later
-# blocked message retries a warm-up that failed — deduplication is in-flight
-# only, never "once ever". Holding the Task also keeps it from being garbage
-# collected mid-flight. Process-local, like `_room_locks`.
+# In-flight warm-ups, one per room. `warm_room` starts a room's container here
+# — and then warms its agent with one throwaway turn — so the room's first real
+# message lands on a ready agent instead of paying the 30–60 s cold start plus
+# the agent's first-turn tax. Triggered from LINE's `follow` (1:1 friend add)
+# and `join` (added to a group) events — the moment a room appears, well before
+# its first question; it used to hang off the Google gate's "blocked" reply,
+# which no longer exists (docs/google-auth-per-member-plan.md §3.5). Keyed by
+# room so a second trigger while the first warm-up is still running reuses it
+# instead of spawning another thread. The entry is dropped when the task
+# finishes (success or failure), so a later trigger retries a warm-up that
+# failed — deduplication is in-flight only, never "once ever". Holding the Task
+# also keeps it from being garbage collected mid-flight. Process-local, like
+# `_room_locks`.
 _warmups: dict[str, asyncio.Task[None]] = {}
 
 # The session id the warm-up probe turn runs under. Deliberately neither a room
@@ -105,9 +111,8 @@ _WARMUP_MAX_SECONDS = 120.0
 
 # Rooms whose agent this router process has already probed. Starting a
 # container is cheap to repeat; the probe is a real ~28k-token LLM call, and a
-# second blocked message (a user who messages twice before authorizing, or a
-# re-authorization gate later in the room's life) would land on an
-# already-warm container and pay it again for nothing. The in-flight dedup in
+# second warm-up trigger for the same room would land on an already-warm
+# container and pay it again for nothing. The in-flight dedup in
 # `_warmups` only covers warm-ups that overlap in time, so it cannot do this.
 # Known misses, both accepted: an operator's `docker restart` of a room's
 # container while the router stays up leaves this set stale, so that room's
@@ -212,7 +217,7 @@ async def _probe_agent(target_url: str, room_key: str, config: Settings) -> bool
     Returns:
         True when the probe turn completed (the room counts as probed), False
         when it failed — the caller then leaves the room unprobed so a later
-        blocked message retries.
+        warm-up retries.
     """
     started = time.perf_counter()
     probed = True
@@ -296,12 +301,12 @@ async def _run_warmup(room_key: str, config: Settings) -> None:
         _probed.add(room_key)
 
 
-def _warm_container(room_key: str, config: Settings) -> None:
+def warm_room(room_key: str, config: Settings) -> None:
     """Start the room's container and warm its agent in the background.
 
-    Returns immediately; the caller replies without waiting. Deduplicated per
-    room: one in-flight warm-up task per room (`_warmups`), and the agent probe
-    inside it runs at most once per room per process (`_probed`). No extra log
+    Returns immediately; the caller carries on without waiting. Deduplicated
+    per room: one in-flight warm-up task per room (`_warmups`), and the agent
+    probe inside it runs at most once per room per process (`_probed`). No extra log
     context needs binding: `asyncio.create_task` copies the current
     contextvars (process_inbound's `room_key`, the adapter's request fields)
     and `asyncio.to_thread` carries them into the worker thread, so every line
@@ -313,14 +318,94 @@ def _warm_container(room_key: str, config: Settings) -> None:
         config: Application settings.
     """
     # `done()` rather than membership: a finished task stays registered until
-    # its pop callback runs on the next loop iteration, and a blocked message
-    # landing in that window must still get its retry.
+    # its pop callback runs on the next loop iteration, and a trigger landing
+    # in that window must still get its retry.
     existing = _warmups.get(room_key)
     if existing is not None and not existing.done():
         return
     task = asyncio.create_task(_run_warmup(room_key, config), name=f"warmup:{room_key}")
     _warmups[room_key] = task
     task.add_done_callback(lambda _done: _warmups.pop(room_key, None))
+
+
+def _resumed_message(msg: InboundMessage) -> InboundMessage:
+    """Prefix a parked message with what changed while it was parked.
+
+    A resumed turn re-enters the room's *existing* Hermes session, whose last
+    few turns all say "you are not authorized yet". Replayed verbatim, the
+    question is answered from that history — the agent repeats the refusal
+    without ever retrying a Google tool (seen in the group e2e of
+    docs/google-auth-per-member-plan.md §6b). One system-voiced sentence ahead
+    of the original text is what tells it the world has moved on. Channel-free
+    on purpose: the LINE adapter's own lead line announces the authorization to
+    the room, this one is addressed to the agent.
+
+    Args:
+        msg: The parked inbound message, exactly as first received.
+
+    Returns:
+        A copy whose text carries the prefix; every identity field is
+        untouched, so the turn still runs as the same speaker in the same room.
+    """
+    # Named only in a group, matching auth_links._link_text: a 1:1 room has
+    # nobody else the authorization could have belonged to.
+    who = f"{msg.sender_name} " if msg.is_group and msg.sender_name else ""
+    prefix = f"（系統：{who}剛完成 Google 授權，請重新執行剛才的請求。）"
+    return msg.model_copy(update={"text": f"{prefix}{msg.text}"})
+
+
+async def resume_pending_auth(room_key: str, member_key: str, config: Settings) -> None:
+    """Re-run whatever a member parked before they went off to authorize.
+
+    The router half of the Google authorization resume
+    (docs/google-auth-per-member-plan.md §3.4): `auth_links` parked the message
+    that made the agent ask for a link, and this picks it up once the token is
+    on disk, so the member gets their answer without retyping the question. It
+    goes back in with a system-voiced prefix (`_resumed_message`), not verbatim.
+
+    Registered as `google_oauth.on_authorized` from main.py — a hook rather
+    than an import, since google_oauth is imported *by* core — and run as a
+    fire-and-forget task off the OAuth callback, which is why every failure
+    ends here as a log line: there is no request left to return it to, and an
+    unobserved task exception would only surface at garbage-collection time.
+
+    Args:
+        room_key: The room the member authorized in. Same value the hook is
+            given as `room_id`: `/oauth/start?user_id=` carries the prefixed
+            room key (see auth_links._link_text -> google_oauth.auth_url_for).
+        member_key: The member whose token was just stored.
+        config: Application settings.
+    """
+    # Imported here, not at module scope: `channels` builds the adapters, which
+    # import this module, so a top-level import would be a cycle.
+    from alice_office_router.channels import adapter_for
+
+    try:
+        msg = await asyncio.to_thread(read_pending_auth, config, room_key, member_key)
+        if msg is None:
+            # The normal case for a member who authorized without a question
+            # waiting (a re-authorization, an expired park, a second click).
+            struct_logger.info("auth_resume_empty", room_key=room_key, member=member_key)
+            return
+        adapter = adapter_for(msg.channel)
+        if adapter is None:
+            struct_logger.error(
+                "auth_resume_no_adapter", room_key=room_key, member=member_key, channel=msg.channel
+            )
+            return
+        struct_logger.info(
+            "auth_resume_started", room_key=room_key, member=member_key, channel=msg.channel
+        )
+        await adapter.resume(_resumed_message(msg))
+    except Exception as exc:
+        # Deliberately broad, like google_oauth._run_authorized's: a resume is
+        # a whole agent turn's worth of code reached from a detached task.
+        struct_logger.error(
+            "auth_resume_failed",
+            room_key=room_key,
+            member=member_key,
+            error=_describe_error("resume", exc),
+        )
 
 
 def cancel_warmups() -> None:
@@ -380,8 +465,9 @@ class RouteResult:
     Attributes:
         texts: Texts to send back to the room, in delivery order.
         outcome: How the turn ended (see conversation_log.Outcome).
-        gate_status: The Google OAuth gate's verdict, or None when the gate
-            was short-circuited (observe, reset).
+        gate_status: The Google OAuth gate's verdict ("ok", "unauthorized",
+            "notice"), "auth_link" when the reply carried an authorization link
+            instead, or None when the gate was short-circuited (observe, reset).
         session_id: The session id sent to Hermes, if an agent call was made.
         rotated: Whether this turn rotated the room's session epoch.
         agent_duration_ms: Wall time of the agent HTTP call, if it ran.
@@ -585,7 +671,23 @@ async def _ask_agent(
     )
 
 
-async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
+def _with_extra(prompt: str, extra: str | None) -> str:
+    """Layer a single-turn note on top of a channel's system prompt.
+
+    Args:
+        prompt: The room-shape system prompt for this turn (DIRECT or GROUP).
+        extra: What this turn alone adds, or None when it adds nothing.
+
+    Returns:
+        `prompt` unchanged when there is nothing to add, else the two joined by
+        a blank line.
+    """
+    return prompt if extra is None else f"{prompt}\n\n{extra}"
+
+
+async def _ask_group_agent(
+    msg: InboundMessage, config: Settings, *, extra_system: str | None = None
+) -> AgentTurn:
     """Ask the agent for an addressed group message, managing buffer and silence.
 
     Folds the room's observed background into a tagged prompt (design §7), asks
@@ -603,6 +705,7 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     Args:
         msg: The addressed group inbound message.
         config: Application settings.
+        extra_system: What this turn alone adds to GROUP_SYSTEM_PROMPT, or None.
 
     Returns:
         The AgentTurn from the underlying call, re-labelled "silence" (with no
@@ -610,7 +713,9 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     """
     observed = peek_observed(config, msg.room_key)
     prompt = build_group_prompt(observed, msg)
-    turn = await _ask_agent(msg.room_key, prompt, config, system=GROUP_SYSTEM_PROMPT)
+    turn = await _ask_agent(
+        msg.room_key, prompt, config, system=_with_extra(GROUP_SYSTEM_PROMPT, extra_system)
+    )
     # "replied" is the only outcome that folds the background in; the `is None`
     # half is for the type checker only — a "replied" turn always carries text.
     if turn.outcome != "replied" or turn.text is None:
@@ -621,21 +726,28 @@ async def _ask_group_agent(msg: InboundMessage, config: Settings) -> AgentTurn:
     return turn
 
 
-async def _reply_for(msg: InboundMessage, config: Settings) -> AgentTurn:
+async def _reply_for(
+    msg: InboundMessage, config: Settings, *, extra_system: str | None = None
+) -> AgentTurn:
     """Ask the agent for a reply, taking the group path for group messages.
 
     Args:
         msg: The inbound message (already past the observe short-circuit, so a
             group message here is one addressed to the bot).
         config: Application settings.
+        extra_system: What this turn alone adds to the room-shape system prompt
+            — currently GOOGLE_AUTH_MISSING_HINT when the router already knows
+            the speaker has no Google token. None on an ordinary turn.
 
     Returns:
         The turn's AgentTurn; its `text` is None when nothing should be
         delivered.
     """
     if msg.is_group:
-        return await _ask_group_agent(msg, config)
-    return await _ask_agent(msg.room_key, msg.text, config, system=DIRECT_SYSTEM_PROMPT)
+        return await _ask_group_agent(msg, config, extra_system=extra_system)
+    return await _ask_agent(
+        msg.room_key, msg.text, config, system=_with_extra(DIRECT_SYSTEM_PROMPT, extra_system)
+    )
 
 
 @asynccontextmanager
@@ -675,7 +787,7 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         A RouteResult with the texts to deliver and everything the turn
         envelope records about how the turn went.
     """
-    # Manual session reset, before the OAuth gate: rotate to a fresh epoch
+    # Manual session reset, before the token swap and the gate: rotate to a fresh epoch
     # (no handoff — a deliberate clean slate), drop any group background so
     # it can't leak into the new epoch, and confirm without an agent turn.
     if check_reset_command(msg, config):
@@ -683,26 +795,50 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         clear_observed(config, msg.room_key, peek_observed(config, msg.room_key))
         return RouteResult(texts=[RESET_CONFIRMATION], outcome="reset")
 
-    status, message = check_google_authorization(msg.room_key, config)
-    if status == "blocked" and message is not None:
-        # The room's first message is usually the blocked one, so this is
-        # where the container's cold start would otherwise land on the
-        # post-authorization message: start it now, reply without waiting.
-        _warm_container(msg.room_key, config)
-        return RouteResult(texts=[message], outcome="blocked", gate_status=status)
+    # Point the room's tokens.json at this speaker's own Google token file
+    # before anything can reach a Google MCP. _take_turn holds the room's
+    # turn lock, which is what makes the swap safe: it can only ever land
+    # between turns, never under a tool call already using the file.
+    member = member_key_for(msg)
+    swapped = await asyncio.to_thread(select_member_tokens, config, msg.room_key, member)
+    if swapped:
+        # Docker Desktop for macOS leaves the container's view of the replaced
+        # symlink stuck at EINVAL until something opendir()s the mount; see
+        # container_manager.refresh_google_mount. Still inside the room lock,
+        # still before the agent turn — the MCPs must not read it in between.
+        await asyncio.to_thread(refresh_google_mount, msg.room_key)
+
+    # Never blocks a message since 2026-09-18. It reports two things instead:
+    # "your token predates the Drive scope" rides ahead of the reply, and
+    # "this speaker has no token at all" goes to the agent, not the room.
+    status, message = check_google_authorization(msg.room_key, member, config)
 
     texts: list[str] = []
     if status == "notice" and message is not None:
         texts.append(message)
 
-    turn = await _reply_for(msg, config)
+    # Told up front rather than inferred later: the marker rule in the system
+    # prompts only fires once a Google tool has failed, and the third-party
+    # calendar MCP's credential errors have already been seen to read as
+    # something else entirely (group_context.GOOGLE_AUTH_MISSING_HINT).
+    hint = GOOGLE_AUTH_MISSING_HINT if status == "unauthorized" else None
+    turn = await _reply_for(msg, config, extra_system=hint)
     if turn.text is not None:
         # The one seam every agent reply passes through, for both 1:1 and
         # group turns, after the silence token has been filtered out and
         # still inside the room's lock — so publishing a file is serialized
         # against the room's next turn (file_links.publish_file_links). The
         # notices above never carry a marker, which is why they skip it.
-        texts.append(await publish_file_links(turn.text, msg.room_key, config))
+        text = await publish_file_links(turn.text, msg.room_key, config)
+        # Second seam, same lock, same reason: a Google tool that reported "no
+        # token" made the agent paste google-auth://request, which only the
+        # router can turn into this speaker's own authorization link
+        # (auth_links.publish_auth_links). An issued link outranks whatever
+        # the gate had to say — the turn's headline is now "go authorize".
+        text, requested = await publish_auth_links(text, msg, config)
+        if requested:
+            status = "auth_link"
+        texts.append(text)
     return RouteResult(
         texts=texts,
         outcome=turn.outcome,
@@ -722,8 +858,8 @@ async def _route(msg: InboundMessage, config: Settings) -> RouteResult:
 
     The whole pipeline in outcome order: an unaddressed group message is only
     observed; a manual reset command rotates the room's session and confirms
-    without an agent turn; the Google gate can block; otherwise the agent runs
-    (its "notice" message, if any, riding ahead of the reply).
+    without an agent turn; otherwise the agent runs, with the Google gate's
+    "notice" message, if any, riding ahead of its reply.
 
     Everything from the reset command onwards runs under the room's turn lock,
     so a room's messages queue instead of overlapping (`_room_locks`). The
@@ -741,8 +877,8 @@ async def _route(msg: InboundMessage, config: Settings) -> RouteResult:
     """
     # Observe short-circuit, before the OAuth gate and before the lock: an
     # unaddressed group message must neither ask the agent nor trigger an auth
-    # prompt; a blocked room still accumulates background to carry once
-    # authorized.
+    # prompt; it only accumulates background for the room's next real turn to
+    # carry.
     if msg.is_group and not msg.addressed:
         record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
         return RouteResult(outcome="observed")
@@ -804,9 +940,7 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> InboundResul
         An InboundResult. `texts` are in delivery order: an unaddressed group
         message is only observed and returns nothing; a manual reset command
         rotates the room's session and returns only the fixed confirmation
-        (agent not called); gate "blocked" returns only the authorization
-        message (the agent is not asked the user's question, though the
-        background warm-up does spend one throwaway turn on it); "notice" returns the notice followed by the
+        (agent not called); gate "notice" returns the notice followed by the
         agent reply; "ok" returns just the agent reply. A container/agent
         failure delivers a fixed notice in place of the reply (the timeout
         wording when the router stopped waiting), so the room is never answered

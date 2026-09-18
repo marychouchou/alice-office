@@ -147,3 +147,22 @@ def test_dotenv_keys_the_router_does_not_read_are_ignored(tmp_path: Path) -> Non
 
     assert settings.SEARXNG_URL == "http://searxng:8080"
     assert not hasattr(settings, "SEARXNG_SECRET")
+
+
+# ---------------------------------------------------------------------------
+# LINE_API_BASE_URL — local stub redirection (docs/testing-paths.md)
+# ---------------------------------------------------------------------------
+
+
+def test_line_api_base_url_defaults_to_empty() -> None:
+    """Unset means the SDK's own LINE hosts, i.e. the real LINE Platform."""
+    settings = Settings(**_REQUIRED)  # type: ignore[arg-type]
+
+    assert settings.LINE_API_BASE_URL == ""
+
+
+def test_line_api_base_url_strips_trailing_slash() -> None:
+    """The SDK appends paths starting with "/", so the slash must not survive."""
+    settings = Settings(**_REQUIRED, LINE_API_BASE_URL="http://localhost:8099/")  # type: ignore[arg-type]
+
+    assert settings.LINE_API_BASE_URL == "http://localhost:8099"

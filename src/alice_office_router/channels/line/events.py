@@ -269,7 +269,9 @@ async def _download_and_note_media(message: Message, room_key: str, config: Sett
         return None
 
     try:
-        content = await download_line_content(message_id, config.LINE_CHANNEL_ACCESS_TOKEN)
+        content = await download_line_content(
+            message_id, config.LINE_CHANNEL_ACCESS_TOKEN, config.LINE_API_BASE_URL or None
+        )
     except ApiException as exc:
         logger.error(f"Failed to download LINE {msg_type} content {message_id}: {exc}")
         return None

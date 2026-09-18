@@ -556,10 +556,12 @@ docker restart hermes_<room_id>
   rm -rf data/<room_id>
   ```
   下一次該房間收到訊息時會完整重新走一次 seed 流程（`config.yaml`／`mcp`／
-  `plugins`／`google`）。**這也會把該房間的 Google 授權一併清空**（`tokens.json`
-  跟該房間自己的憑證副本都在 `data/<room_id>/google/` 底下，是刻意設計，見上方
-  「Google Workspace 整合」）——使用者要重新點一次授權連結。GCP 端的
-  `client_secret`／舊 `refresh_token` 不受影響，只是本地不再記得它。
+  `plugins`／`google`）。**這也會把該房間所有成員的 Google 授權一併清空**
+  （`google/members/` 底下每位成員的 token 檔跟該房間自己的憑證副本都在
+  `data/<room_id>/google/` 底下，是刻意設計，見上方「Google Workspace 整合」）
+  ——下次哪位成員真的用到 Google 功能，才會重新拿到一個授權連結（不會主動要求
+  所有人重新授權）。GCP 端的 `client_secret`／舊 `refresh_token` 不受影響，只是
+  本地不再記得它。
 
 ## 指令速查
 
@@ -658,7 +660,6 @@ alice-office-router/
 | `PUBLIC_BASE_URL` | | 這個 router 的公開 HTTPS base URL（不含結尾斜線），也就是使用者瀏覽器連得到的網址（通常是 Cloudflare tunnel）。所有交給使用者去開的連結都用它組：agent 產出檔案的下載連結（留空＝回覆裡的 `outbox://…` 佔位字串會被換成「此部署未設定檔案下載連結」，見「[檔案下載連結](#檔案下載連結)」）與 Google 授權連結／`{url}/oauth/callback`（見「[Google Workspace 整合](#google-workspace-整合)」）。2026-09-17 由 `GOOGLE_OAUTH_PUBLIC_URL` 改名而來，舊名不再讀取——升級時請改 `.env` |
 | `FILE_LINK_TTL_HOURS` | | 下載連結有效期（小時，預設 `24`）。過期回 `404`，請 agent 再分享一次即可 |
 | `FILE_LINK_MAX_BYTES` | | 單一檔案大小上限（bytes，預設 `52428800`＝50 MB），超過就不發佈連結 |
-| `GOOGLE_OAUTH_GATE` | | 預設 `true`。設 `false` 時 Google OAuth 路由照常運作，只是不擋任何房間的訊息 |
 | `API_CHANNEL_TOKEN` | | 第一方 API 通道（TUI / mobile / dev curl）的 Bearer token。留空（預設）＝通道不掛載，`POST /webhooks/api/messages` 回 `404`；設了才啟用，見「[用 API 通道打進房間（不經 LINE）](#用-api-通道打進房間不經-line)」 |
 | `GROUP_TRIGGER_PREFIXES` | ⚠️ | 群組呼叫詞（逗號分隔）：群組文字訊息去掉前後空白後以其中之一開頭即視為點名 bot（單純前綴比對、大小寫敏感、不看字詞邊界，請挑成員平常不會拿來聊天或稱呼人的詞）。程式預設留空＝只能靠 @mention，但 **LINE 桌面版無法 @ 官方帳號**，留空時桌面版使用者在群組裡完全叫不動 bot——**要服務群組就至少設一個**。`.env.example` 範本值為 `小幫手`，對應入群自我介紹裡寫死的自稱，建議保留並以逗號追加 OA 名稱。群組重置指令也吃此前綴（如 `小幫手 /new`），見 [`docs/session-hygiene.md`](docs/session-hygiene.md)「1. 手動指令」 |
 | `GROUP_OBSERVED_MAX_MESSAGES` | | 每個群組房間背景 buffer（`data/<room_id>/group_state/observed.jsonl`）最多保留幾則未點名訊息，超過丟最舊（預設 `50`；`0`＝不保留背景） |

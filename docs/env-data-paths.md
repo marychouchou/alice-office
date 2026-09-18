@@ -99,6 +99,34 @@ Alloy。症狀是 Loki 裡查不到任何 `source="file"` 的行、但 `source="
 底線開頭的三個目錄名字這樣取，是因為房間目錄名一定是 `line_…`／`api_…`（見
 `channels/api.py` 的 `_ROOM_KEY_RE`），所以永遠不會撞名。
 
+### `data/<room_id>/google/`：一個路徑、每人一份 token
+
+三個 Google MCP 的 token 路徑在該房間 write-once 的 `config.yaml` 裡被釘死成
+`/opt/google-workspace/tokens.json`（＝`data/<room_id>/google/tokens.json`），但群組裡
+每位成員各有自己的 Google 帳號，所以那個檔本身變成一條**相對** symlink：
+
+```
+data/<room_id>/google/
+  gcp-oauth.keys.json / gcp-oauth.keys.installed.json   ← 部署層 seed（不變）
+  tokens.json -> members/<member_key>.json              ← 指向「這一回合的發話者」
+  members/<member_key>.json                             ← { "<account_key(room_id)>": {...} }
+```
+
+`member_key` 是發話者的 `account_key`（群組＝`sender_id`、1:1＝房間自己）；成員檔**內層**
+的 key 則固定是 `account_key(room_id)`，因為那是 MCP env `GOOGLE_ACCOUNT_MODE` 寫死的值。
+換檔由 `google_tokens.select_member_tokens` 在 `core._take_turn`（room lock 內、回合之間）
+用 temp symlink＋`os.replace` 原子完成，MCP 每次 tool call 都重讀檔案，所以不必重啟容器。
+symlink target 一定是相對路徑，否則容器內解析不到。升級前既有的一般檔 `tokens.json` 會在
+該房間下一回合被搬成 `members/<account_key(room_id)>.json`（1:1 房間因此授權無縫延續）。
+設計全文見 [`docs/google-auth-per-member-plan.md`](google-auth-per-member-plan.md)。
+
+`data/<room_id>/router_state/pending_auth/<member_key>.json` 是同一套機制的另一半：
+agent 呼叫 Google 工具卻沒 token 時，router 把那則觸發的訊息原樣存在這裡（10 分鐘
+TTL），等該成員完成授權後自動重跑、推播答案，使用者不用再問一次（`auth_links.py`
+`write_pending_auth`／`read_pending_auth`）。這個路徑純粹是 router 自己的狀態，跟
+同層的 `router_state/session.json`（session-hygiene）一樣，Hermes 不會去動它；
+不含使用者的 Google token，只含那則訊息本身的內容。
+
 `outbox/` 與 `_files/` 是同一件事的兩端，分成兩個目錄是刻意的：`data/<room_id>/` 整個
 是 agent 的 `HERMES_HOME`，agent 對它有完整寫入權，可以在 `outbox/` 放 symlink 指到別
 的房間、可以 `touch` 把 mtime 往後推、可以繞過工具直接塞超大檔。所以 router 在改寫連結

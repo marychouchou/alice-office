@@ -12,8 +12,7 @@ synthetic LINE webhook, then removes every artifact it created.
 - Docker daemon 可用、`HERMES_IMAGE` 已 build 好、`.env` 已設定成 host 模式
   （`ROUTER_IN_DOCKER=false`、`DATA_DIR`／`HERMES_TEMPLATES_DIR` 指向 repo）。
 - 這支腳本**不會改動 `.env`**：它用進程環境變數覆蓋 `API_CHANNEL_TOKEN`（設成
-  一個腳本自訂值）與 `GOOGLE_OAUTH_GATE=false`（讓拋棄式房間不被授權 gate 擋），
-  這些覆蓋只作用在它自己 spawn 的 uvicorn 子進程上。
+  一個腳本自訂值），這個覆蓋只作用在它自己 spawn 的 uvicorn 子進程上。
 
 使用方式
 --------
@@ -272,8 +271,8 @@ def _log_path(port: int) -> Path:
 def start_router(port: int, log_path: Path) -> subprocess.Popen[bytes]:
     """Start a disposable uvicorn instance of the router as a subprocess.
 
-    Injects the API-channel token and disables the Google OAuth gate via the
-    child's environment only — the on-disk .env is never modified.
+    Injects the API-channel token via the child's environment only — the
+    on-disk .env is never modified.
 
     Args:
         port: Port for uvicorn to bind on localhost.
@@ -284,7 +283,6 @@ def start_router(port: int, log_path: Path) -> subprocess.Popen[bytes]:
     """
     env = os.environ.copy()
     env["API_CHANNEL_TOKEN"] = API_TOKEN
-    env["GOOGLE_OAUTH_GATE"] = "false"
     cmd = [
         sys.executable,
         "-m",

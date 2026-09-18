@@ -523,6 +523,70 @@ def _resolve_container(
         raise
 
 
+def _container_name(room_id: str) -> str:
+    """Name the Docker container that serves one room.
+
+    The single spelling of the rule `hermes_<room_key>`; room_key is already
+    channel-prefixed (`line_U…`, `api_…`), so container names never collide
+    across channels.
+
+    Args:
+        room_id: Unique identifier for the chatroom (the channel-prefixed room
+            key core routes on).
+
+    Returns:
+        The container name, e.g. `hermes_line_U1234…`.
+    """
+    return f"hermes_{room_id}"
+
+
+def refresh_google_mount(room_id: str) -> None:
+    """Make the room's container notice that its Google token symlink moved.
+
+    Worked around here because it is a Docker Desktop for macOS (virtiofs)
+    bug, not ours: after the host replaces `data/<room_id>/google/tokens.json`
+    — which `google_tokens.select_member_tokens` does by creating a temp
+    symlink and `os.replace`-ing it over the old one — a process inside the
+    container sees that path as EINVAL for read/readlink/write, indefinitely,
+    even though the host file is perfectly valid. Any `opendir` of the mounted
+    directory clears it, so one `ls /opt/google-workspace/` inside the
+    container right after the swap is enough to keep the Google MCPs working.
+    Linux native bind mounts are believed not to need this (unverified); there
+    it is one cheap exec per member switch and nothing else.
+
+    Best effort by design: the room's turn must go ahead either way, so a room
+    with no container yet (the common case — a member can authorize before the
+    room is ever warmed) and a stopped one are debug lines, not failures.
+
+    Args:
+        room_id: Unique identifier for the chatroom whose mount to nudge.
+    """
+    container_name = _container_name(room_id)
+    try:
+        client: docker.DockerClient = docker.from_env()
+        container = client.containers.get(container_name)
+        if container.status != "running":
+            logger.debug(f"Container {container_name} is not running; skipping mount refresh.")
+            return
+        exit_code, _output = container.exec_run(
+            ["sh", "-c", f"ls {CONTAINER_GOOGLE_DIR} >/dev/null"]
+        )
+        if exit_code != 0:
+            logger.warning(
+                f"Mount refresh in {container_name} exited {exit_code} "
+                f"(is {CONTAINER_GOOGLE_DIR} mounted?)"
+            )
+    except docker.errors.NotFound:
+        # No container for this room yet: nobody is holding a stale mount.
+        logger.debug(f"No container {container_name} to refresh the Google mount in.")
+    except docker.errors.DockerException as exc:
+        # APIError (a DockerException subclass) plus the daemon-unreachable
+        # case from from_env(). Never raised onward: the turn that asked for
+        # this refresh is still perfectly runnable, and its own container step
+        # reports the daemon being down with a user-facing notice.
+        logger.warning(f"Failed to refresh the Google mount in {container_name}: {exc}")
+
+
 def get_or_create_container(room_id: str, config: Settings) -> str:
     """Return the URL for the Hermes agent container for a given room.
 
@@ -552,7 +616,7 @@ def get_or_create_container(room_id: str, config: Settings) -> str:
         RuntimeError: If the container URL cannot be resolved, or the agent
             does not become ready within the startup timeout.
     """
-    container_name = f"hermes_{room_id}"
+    container_name = _container_name(room_id)
 
     with bound_contextvars(container=container_name):
         with _lock:

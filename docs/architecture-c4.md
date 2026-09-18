@@ -133,7 +133,8 @@ logging profile 的三個設計重點（細節見 `docs/logging-design.md`）：
 | 寫入者 | 內容 | 時機 |
 |---|---|---|
 | Router（container_manager／room_seed） | `config.yaml`、`mcp/`、`plugins/`、`SOUL.md` seed | 房間第一次建立，write-once，之後永不覆蓋 |
-| Router（google_oauth） | Google `tokens.json` | OAuth callback / refresh |
+| Router（google_oauth／google_tokens） | `google/members/<member_key>.json`（token）、`google/tokens.json`（symlink） | OAuth callback 寫成員檔；每輪開始前換 symlink 指向這一輪發話者 |
+| Router（auth_links） | `router_state/pending_auth/<member_key>.json` | 回覆含授權連結時寫入待重跑的訊息；授權後讀出並刪除 |
 | Router（group_context） | `group_state/observed.jsonl` | 每則未點名的群組訊息追加；點名回覆成功後裁剪已讀取的部分 |
 | Router（session_hygiene） | `router_state/session.json` | 每則進 agent 的訊息讀寫；手動重置／自動輪替（閒置、token 門檻）時更新 epoch |
 | Hermes gateway | `sessions/`、`skills/`、`kanban.db`、`state.db`、`logs/`、lock 檔 | 每次容器開機自行補齊與執行期寫入 |
@@ -180,7 +181,9 @@ flowchart TB
     core["<b>core.process_inbound</b><br/>[Component: async Python 函式]<br/><i>channel-free：群組 unaddressed 短路 →<br/>reset 指令 → gate → 容器 → agent → list[str]<br/>不碰任何 channel 的送訊 API</i>"]:::comp
     group_ctx["<b>group_context</b><br/>[Component: Python 模組]<br/><i>observed buffer 讀寫／裁剪、組 tagged<br/>［名稱|ID］prompt、silence token 判斷（NO_REPLY 等）</i>"]:::comp
     sess_hyg["<b>session_hygiene</b><br/>[Component: Python 模組]<br/><i>check_reset_command／reset_session：手動重置（不帶交接）｜<br/>begin_turn／complete_turn：閒置與 token 門檻判斷、<br/>epoch 輪替、水位 CAS｜HANDOFF_PROMPT／build_turn_text：<br/>交接文字（HTTP 由 core 發）｜衍生 X-Hermes-Session-Id</i>"]:::comp
-    oauth["<b>google_oauth</b><br/>[Component: FastAPI router + httpx]<br/><i>check_google_authorization 純函式 gate；<br/>/oauth/start、/oauth/callback；tokens.json 存取</i>"]:::comp
+    oauth["<b>google_oauth</b><br/>[Component: FastAPI router + httpx]<br/><i>member 化的 /oauth/start、/oauth/callback；<br/>check_google_authorization 只剩 notice／ok；<br/>callback 存完 token 後觸發 on_authorized hook</i>"]:::comp
+    gtok["<b>google_tokens</b><br/>[Component: Python 模組]<br/><i>member_key_for：算出這一輪該用誰的帳號；<br/>select_member_tokens：把 tokens.json 換成該成員的<br/>相對 symlink（room lock 內、回合之間，原子替換）；<br/>成員檔讀寫、既有房間的 legacy 遷移</i>"]:::comp
+    alinks["<b>auth_links</b><br/>[Component: Python 模組]<br/><i>publish_auth_links：把回覆裡的 google-auth://request<br/>marker 換成這一輪發話者自己的授權連結，<br/>暫存觸發訊息到 pending_auth/&lt;member_key&gt;.json<br/>供授權後重跑（鏡射 file_links）</i>"]:::comp
     cm["<b>container_manager</b><br/>[Component: Python 模組 + docker SDK]<br/><i>get_or_create_container：docker 生命週期＋<br/>config.yaml 渲染；呼叫 room_seed 完成房間初始化</i>"]:::comp
     room_seed["<b>room_seed</b><br/>[Component: Python 模組，無 docker SDK]<br/><i>ensure_mcp_seed／ensure_plugin_seed／ensure_soul_seed／<br/>ensure_google_seed：write-once 複製 template／deployment<br/>secrets 到 data/&lt;room_id&gt;/，已存在就跳過</i>"]:::comp
     hc["<b>hermes_client</b><br/>[Component: httpx client]<br/><i>ask_hermes_agent：POST /v1/chat/completions，<br/>session id 依 epoch 衍生，維持對話連續性</i>"]:::comp
@@ -194,12 +197,15 @@ flowchart TB
   line_adapter -- "Reply / Push、媒體下載" --> line
   line_adapter -- "InboundMessage" --> core
   api_adapter -- "InboundMessage" --> core
-  core -- "check_google_authorization(room_key)<br/>→ blocked / notice / ok" --> oauth
-  core -- "get_or_create_container(room_key)<br/>→ 容器 URL（gate blocked 時背景暖機）" --> cm
+  core -- "select_member_tokens(room, member_key)<br/>→ 每輪開始前換檔" --> gtok
+  core -- "check_google_authorization(room, member_key)<br/>→ notice / ok" --> oauth
+  core -- "get_or_create_container(room_key)<br/>→ 容器 URL（follow／join 時背景暖機）" --> cm
   core -- "peek/record/clear observed buffer、<br/>組 prompt、判斷 silence" --> group_ctx
   core -- "check_reset_command／reset_session（手動重置）、<br/>begin_turn／complete_turn（自動輪替、epoch 讀寫）" --> sess_hyg
   core -- "ask_hermes_agent(url, session_id, text)" --> hc
   core -- "publish_file_links(reply_text, room_key)<br/>→ 已改寫成下載網址的文字" --> flinks
+  core -- "publish_auth_links(reply_text, msg)<br/>→ marker 換成授權連結；<br/>resume_pending_auth 讀 pending" --> alinks
+  core -- "resume_pending_auth：<br/>adapter_for(msg.channel).resume(msg)<br/>（授權後重跑，一律 push 送出）" --> line_adapter
   flinks -- "讀 outbox/&lt;token&gt;/（O_NOFOLLOW）並清掉" --> roomdata
   flinks -- "複製、出檔、掃過期" --> pubfiles
   cm -- "docker SDK" --> docker
@@ -209,7 +215,10 @@ flowchart TB
   sess_hyg -- "讀寫 router_state/session.json" --> roomdata
   oauth -- "以 code 換取 token" --> google
   oauth -- "ensure_google_seed（on-demand，見其 docstring）" --> room_seed
-  oauth -- "tokens.json 讀寫" --> roomdata
+  oauth -- "save_member_tokens／<br/>callback 後觸發 on_authorized" --> gtok
+  gtok -- "members/&lt;member_key&gt;.json 讀寫、<br/>tokens.json symlink 換指" --> roomdata
+  alinks -- "auth_url_for（member 的授權連結）" --> oauth
+  alinks -- "router_state/pending_auth/&lt;member_key&gt;.json<br/>寫入／讀取並刪除" --> roomdata
   hc -- "POST /v1/chat/completions" --> hermes
 ```
 

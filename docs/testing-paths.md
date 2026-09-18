@@ -76,6 +76,100 @@ uv run python scripts/test_webhook.py --text "今天天氣如何?"
 用途:測 LINE 那段 code(驗簽、事件解析、去重、房間路由)。
 看回覆:router log 或 `scripts/debug_room.py <room_id>`,不在終端機 response 裡。
 
+#### 🟠+ 加掛本機 LINE stub:直接看到 router 回了什麼
+
+偽造 webhook 唯一的缺點就是「回覆看不到」——假 replyToken 一定被真 LINE 拒絕。
+把 router 的 `LINE_API_BASE_URL` 指到 `scripts/line_stub.py`(本機假 LINE
+Platform,只用標準函式庫),reply / push / 群組成員名稱查詢就全部落在本機,
+一行一個 JSON 印到 stdout 並附加到 log 檔:
+
+```bash
+# 終端機 1:起 stub(預設 8099 埠,log 預設 data/_line_stub/requests.jsonl)
+uv run python scripts/line_stub.py
+uv run python scripts/line_stub.py --port 9000 --log /tmp/line.jsonl   # 想換就換
+
+# 終端機 2:router 指向 stub(host 模式;容器模式改在 .env 設同一個變數再 up -d)
+LINE_API_BASE_URL=http://localhost:8099 uv run fastapi dev src/alice_office_router/main.py --reload-dir src
+
+# 終端機 3:照常送偽造 webhook
+uv run python scripts/test_webhook.py --text "今天天氣如何?"
+
+# 看 router 到底回了什麼(stub 的終端機已經印了,也可以撈檔)
+tail -f data/_line_stub/requests.jsonl | jq '{path, texts}'
+```
+
+stub 回的是 LINE 官方格式的成功回應(`sentMessages`),所以 router 這邊會判定
+「送出成功」,不會再 fallback 或報錯;群組測試時
+`GET /v2/bot/group/<groupId>/member/<userId>` 回固定假名稱
+`成員-<userId 末四碼>`,不需要真的群組成員。沒對到的端點一律回 200 `{}` 並在
+log 標 `"matched": false`,SDK 永遠不會炸。
+
+⚠️ `LINE_API_BASE_URL` 只給本機測試用,正式部署一定要留空(＝真的 LINE
+Platform)。log 檔寫在 `data/` 底下,已經在 `.gitignore` 裡,不會進版控。
+
+#### 🟠+ 群組與事件
+
+群組訊息除了 `--group-id`,還可以加 `--sender-id`(模擬 source 裡帶
+`userId` 的已加好友成員——LINE 真實群組訊息的樣子;不給就是匿名發話者)與
+`--mention`(文字前加對 bot 的 @mention,讓 `_is_addressed` 判定為真)。
+`--event follow|join` 送一個沒有 `message` 的事件(加好友/被拉進群組),測
+LINE 事件層的分派,不用真的送一則訊息:
+
+```bash
+uv run python scripts/test_webhook.py --group-id "C_GROUP" --sender-id "U_A" --mention --text "明天有什麼會"
+uv run python scripts/test_webhook.py --event follow --user-id "U_NEW"
+uv run python scripts/test_webhook.py --event join --group-id "C_NEW"
+```
+
+Google 授權相關的測試不用每次都走瀏覽器:`scripts/google_reauth.py --member
+<member_key>` 把授權結果寫進指定成員檔(不給就是 `account_key(room_id)`,
+即 1:1 房間的舊行為);`scripts/simulate_oauth.py <room_id> <member_key>
+--from-member-file <既有成員檔>` 直接複製一份現成 token 進房間的成員檔,
+略過瀏覽器整段流程(見 `docs/google-auth-per-member-plan.md` §6b)。
+
+#### 🟠+ 整段 Google 授權 e2e 的前置條件(2026-09-18 實跑過的組合)
+
+要把 `/oauth/start` → `/oauth/callback` → 寫成員檔 → 自動重跑 pending 訊息整條
+在本機跑完(plan §6b 的 T1–T14),四件事先擺好:
+
+1. **假的 Google token 端點**。`/oauth/callback` 要拿 `code` 去跟 Google 換 token,
+   本機沒有真的 `code`,所以讓 stub 兼差扮演:
+
+   ```bash
+   uv run python scripts/line_stub.py \
+     --google-token-file data/<既有房間>/google/members/<member_key>.json
+   ```
+
+   router 端同時設 `GOOGLE_TOKEN_URL=http://localhost:8099/token`(`Settings` 的
+   欄位,預設是真的 `https://oauth2.googleapis.com/token`)。沒給 `--google-token-file`
+   時那個端點一律回 400,免得誤以為換到 token 了。
+
+2. **router 自己跑在 host 上、換一個埠**。`fastapi dev` 在 repo 根目錄要指定檔案
+   (`fastapi dev src/alice_office_router/main.py`),直接 `uv run fastapi dev` 會找不到
+   app;測 e2e 時用 uvicorn 最省事(順便避開 `data/` 被寫入觸發 reload 的老問題):
+
+   ```bash
+   GOOGLE_TOKEN_URL=http://localhost:8099/token \
+   LINE_API_BASE_URL=http://localhost:8099 \
+   uv run uvicorn alice_office_router.main:app --port 8011
+   ```
+
+3. **偽造 webhook 指到那個埠**。`scripts/test_webhook.py` 讀環境變數 `ROUTER_URL`
+   (整條 URL,含路徑;預設 `http://localhost:8000/webhook`):
+
+   ```bash
+   ROUTER_URL=http://localhost:8011/webhook uv run python scripts/test_webhook.py --text "今天幾號"
+   ```
+
+4. **拿來當來源的 token 要是活的**。stub 的 `expires_in` 固定回 3600,但 access
+   token 本身是從那份成員檔照抄的——檔案裡的 token 早就過期的話,router 會把它記成
+   「還有一小時」,Google MCP 拿去打 API 直接吃 401。先用
+   `uv run python scripts/google_reauth.py <room_id> --member <member_key>` 換一份新的
+   access token 再當來源,不然就要有心理準備看到 401(授權流程本身仍然驗得過)。
+
+容器名字是 `hermes_` + **房間 key**(`hermes_line_<userId>`),不是裸 LINE ID——
+`docker logs` / `docker exec` 找不到容器時先確認這個前綴。
+
 ### 🟢 測試路 B:API curl(`/webhooks/api/messages`)
 
 回覆是**一段式**的:curl 的連線一直掛著,router 在這條連線裡同步跑完
@@ -120,7 +214,7 @@ curl 說過的話。
 | LINE 段 code(驗簽/解析) | ✅ 測到 | ✅ 測到 | ✘ 跳過 |
 | core 段(gate/容器/agent) | ✅ 測到 | ✅ 測到 | ✅ 測到 |
 | **回覆方式** | 另開連線打 LINE API → 推播到手機 | 同左,但假 token 被拒 ❌ | **同一條連線的 HTTP response** |
-| 在哪看回覆 | 手機 | router log | 終端機(response body) |
+| 在哪看回覆 | 手機 | router log(掛 stub 後看 stub log) | 終端機(response body) |
 | 需要的憑證 | LINE secret + access token(router 端) | `.env` 的 LINE_CHANNEL_SECRET(算簽章用) | `.env` 的 API_CHANNEL_TOKEN |
 | 手機 | 要 | 不用 | 不用 |
 
@@ -128,7 +222,8 @@ curl 說過的話。
 
 - **改 core / 容器 / agent / MCP / plugin** → 🟢 curl(最快、回覆直接看得到、
   能互動,還能用 `line_…` 插進真房間重現問題)。
-- **改 `channels/line/` 的解析/驗簽/路由** → 🟠 偽造 webhook。
+- **改 `channels/line/` 的解析/驗簽/路由** → 🟠 偽造 webhook(想連回覆內容
+  一起看,就再掛 `scripts/line_stub.py`)。
 - **commit 前整條驗一次** → `uv run python scripts/e2e_smoke.py`
   (一鍵自動跑 🟢,加 `--line` 連 🟠 一起跑,測完自己清乾淨)。
 - **只有「真的送到 LINE、手機上的顯示效果」**(切則、長訊息、推播)要用手機——

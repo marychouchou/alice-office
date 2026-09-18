@@ -39,7 +39,7 @@ WebFetch），不要憑記憶寫 API 呼叫——這兩個都是會改版的外�
 | 不開手機 LINE 要測 end-to-end 時 | `docs/testing-paths.md` |
 | 服務跑得起來但行為不對、要追 log／容器內 debug 時 | `docs/troubleshooting.md` |
 | 要改 log 輸出格式、加 log 欄位、或部署／擴充集中式 log 堆疊（Loki／Alloy／Grafana）前 | `docs/logging-design.md` |
-| 要實作 task10（延遲授權＋群組逐人授權）前 | `docs/google-auth-per-member-plan.md`（計畫，尚未實作） |
+| 要改 Google 授權流程（延遲授權、群組逐人 token、授權後自動接續）前 | `docs/google-auth-per-member-plan.md`（設計紀錄）；圖解版 `docs/google-auth-per-member-design.html` |
 
 歷史決策紀錄（想知道「為什麼當初這樣做」才讀）：`channel-interface-design.md`、
 `channel-interface-plan.md`、`mcp-plugin-per-room-migration.md`、
@@ -111,7 +111,7 @@ LINE Platform → POST /webhooks/line（LineAdapter）→ core.process_inbound �
 ## Commands
 
 - `uv sync` — 安裝依賴
-- `uv run fastapi dev` — 啟動開發伺服器（localhost:8000）
+- `uv run fastapi dev src/alice_office_router/main.py --reload-dir src` — 啟動開發伺服器（localhost:8000；src layout 所以要指定檔案，`--reload-dir src` 避免 data/ 的寫入觸發重載）
 - `uv run pytest` — 執行所有測試
 - `uv run pytest tests/test_foo.py::test_bar -v` — 執行單一測試
 - `uv run pytest --cov=src --cov-report=term-missing` — 含覆蓋率
@@ -159,7 +159,7 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 能不能靠改資料結構或初始化方式讓正常路徑直接涵蓋它，而不是保留 if 繞過去。
 特殊情況的數量反映的是資料結構／介面設計得好不好。
 
-- repo 內做對的例子：`google_oauth._load_tokens` 對不存在的檔案直接回 `{}`，
+- repo 內做對的例子：`google_tokens.load_member_tokens` 對不存在的檔案直接回 `{}`，
   所以所有呼叫端都沒有「tokens.json 還沒建立」的分支。新的讀取類 helper 比照辦理
   （在邊界把缺失正規化掉，讓呼叫端只有一條路徑）。
 - 邊界提醒：`_seed_templates` 的 `if dest_dir.exists(): continue` 是 write-once

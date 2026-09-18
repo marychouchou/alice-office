@@ -26,6 +26,16 @@ class Settings(BaseSettings):
 
     LINE_CHANNEL_SECRET: str
     LINE_CHANNEL_ACCESS_TOKEN: str
+    # Base URL every OUTBOUND LINE Messaging API call goes to (reply, push,
+    # loading animation, member profile, content download). Empty (default)
+    # means the line-bot-sdk's own hosts — api.line.me and api-data.line.me —
+    # i.e. the real LINE Platform, which is what any real deployment wants.
+    # Set it ONLY for local end-to-end testing, to point the router at
+    # scripts/line_stub.py (http://localhost:8099), which records what the
+    # router tried to send instead of needing a phone (docs/testing-paths.md).
+    # A trailing slash is stripped (see _strip_line_api_base_url_slash) because
+    # the SDK concatenates this with paths that already start with "/".
+    LINE_API_BASE_URL: str = ""
     DATA_DIR: Path = _DOCKER_DEFAULT_DATA_DIR
     HOST_DATA_DIR: Path = Path("/app/data")
     HERMES_IMAGE: str = "nousresearch/hermes-agent"
@@ -98,6 +108,15 @@ class Settings(BaseSettings):
     # replaced with a fixed "not configured" notice. Renamed from
     # GOOGLE_OAUTH_PUBLIC_URL on 2026-09-17; the old name is not read.
     PUBLIC_BASE_URL: str = ""
+    # OAuth 2.0 token endpoint the /oauth/callback exchanges its authorization
+    # code at. The default is Google's own, which is what every real
+    # deployment wants. Set it ONLY for local end-to-end testing, to point the
+    # exchange at scripts/line_stub.py's POST /token
+    # (http://localhost:8099/token), so the whole callback path — store the
+    # member token, fire the on_authorized hook, resume the parked message —
+    # can be walked without a browser and without Google
+    # (docs/testing-paths.md, scripts/simulate_oauth.py).
+    GOOGLE_TOKEN_URL: str = "https://oauth2.googleapis.com/token"
     # How long a published file-download link stays valid, measured from the
     # mtime of the router's own copy under published_files_dir.
     FILE_LINK_TTL_HOURS: int = 24
@@ -105,10 +124,6 @@ class Settings(BaseSettings):
     # outbox entry above this is rejected and the marker becomes the fixed
     # "invalid or expired" notice.
     FILE_LINK_MAX_BYTES: int = 50 * 1024 * 1024
-    # When False, the /oauth/start and /oauth/callback routes still work, but
-    # inbound LINE messages are never blocked pending Google authorization
-    # (see google_oauth.check_google_authorization).
-    GOOGLE_OAUTH_GATE: bool = True
     # First-party API channel (TUI / mobile / dev) bearer token. Unset (None)
     # means the channel is not mounted at all (see channels.enabled_adapters).
     API_CHANNEL_TOKEN: str | None = None
@@ -159,6 +174,23 @@ class Settings(BaseSettings):
     # False for a deployment contractually barred from keeping any per-turn
     # record; the same line still goes to stdout for the log collector.
     CONVERSATION_LOG_ENABLED: bool = True
+
+    @field_validator("LINE_API_BASE_URL")
+    @classmethod
+    def _strip_line_api_base_url_slash(cls, value: str) -> str:
+        """Normalize the LINE API base URL so callers never handle two forms.
+
+        The SDK builds request URLs as `host + "/v2/bot/..."`, so a value
+        entered with a trailing slash would produce a double slash. Stripping
+        it here means every reader can use the value as-is.
+
+        Args:
+            value: The raw base URL from the environment (possibly empty).
+
+        Returns:
+            The URL without any trailing slashes; an empty string stays empty.
+        """
+        return value.rstrip("/")
 
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod
@@ -316,6 +348,38 @@ class Settings(BaseSettings):
         """
         return self.room_google_dir(room_id) / "tokens.json"
 
+    def room_google_members_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's per-member Google token directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+
+        Returns:
+            room_google_dir / "members" — one <member_key>.json per person
+            who has authorized in this room (see google_tokens.py). The
+            room's tokens.json is a relative symlink into this directory,
+            repointed at the current speaker before every turn.
+        """
+        return self.room_google_dir(room_id) / "members"
+
+    def room_google_member_tokens_path(self, room_id: str, member_key: str) -> Path:
+        """Router-local path to one member's own Google token file in a room.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see room_google_dir).
+            member_key: The speaker's account key — account_key(sender_id) in
+                a group, account_key(room_id) in a 1:1 room (see
+                google_tokens.member_key_for).
+
+        Returns:
+            room_google_members_dir / f"{member_key}.json". Its single inner
+            key is account_key(room_id), NOT member_key: that inner key is
+            what each room's write-once config.yaml pinned into the Google
+            MCPs' GOOGLE_ACCOUNT_MODE, so it must stay room-shaped however
+            many members the room has.
+        """
+        return self.room_google_members_dir(room_id) / f"{member_key}.json"
+
     def room_google_web_creds_path(self, room_id: str) -> Path:
         """Router-local path to one room's own Web application GCP OAuth client JSON.
 
@@ -375,6 +439,23 @@ class Settings(BaseSettings):
             so Hermes leaves it alone.
         """
         return self.DATA_DIR / room_id / "router_state"
+
+    def room_pending_auth_path(self, room_id: str, member_key: str) -> Path:
+        """Router-local path to one member's parked, awaiting-authorization message.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see
+                room_router_state_dir).
+            member_key: The speaker's account key (see
+                room_google_member_tokens_path).
+
+        Returns:
+            room_router_state_dir / "pending_auth" / f"{member_key}.json" —
+            the serialized InboundMessage the router re-runs once that member
+            finishes Google authorization. One file per member, overwritten by
+            that member's next auth-triggering message.
+        """
+        return self.room_router_state_dir(room_id) / "pending_auth" / f"{member_key}.json"
 
     @property
     def published_files_dir(self) -> Path:

@@ -33,7 +33,7 @@ from alice_office_router.channels.line.profiles import resolve_sender_name
 from alice_office_router.channels.line.verify import verify_line_signature
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.conversation_log import record_turn
-from alice_office_router.core import process_inbound
+from alice_office_router.core import process_inbound, warm_room
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,12 @@ _GROUP_JOIN_GREETING = (
 # never visibly blinks out between calls.
 _LOADING_ANIMATION_SECONDS = 60
 _LOADING_REFRESH_INTERVAL = 50.0
+
+# The event types this adapter does anything with. `follow` and `join` are the
+# two "a room just appeared" signals LINE sends (1:1 friend add / added to a
+# group); everything else LINE may invent is dropped. Still three branches, so
+# an if/elif chain rather than a dispatch table (AGENTS.md Growth Discipline).
+_HANDLED_EVENT_TYPES = frozenset({"message", "follow", "join"})
 
 
 class LineAdapter:
@@ -137,17 +143,17 @@ class LineAdapter:
     ) -> None:
         """Dedup one LINE webhook event and route it to its handler.
 
-        Only `message` and `join` events are handled (both deduped first);
-        everything else is silently skipped. LINE's webhook contract doesn't
-        let us surface per-event failures after the envelope-level 200 OK has
-        already been promised, so unresolvable events just log and drop.
+        Only `message`, `follow` and `join` events are handled (all deduped
+        first); everything else is silently skipped. LINE's webhook contract
+        doesn't let us surface per-event failures after the envelope-level 200
+        OK has already been promised, so unresolvable events just log and drop.
 
         Args:
             event: A single (already-validated) LINE webhook event.
             background_tasks: FastAPI background task queue.
             config: Application settings.
         """
-        if event.type not in {"message", "join"}:
+        if event.type not in _HANDLED_EVENT_TYPES:
             return
 
         event_id = event.webhookEventId or None
@@ -165,11 +171,19 @@ class LineAdapter:
                 logger.info(f"Skipping duplicate LINE webhook event {event_id}")
                 return
 
-            if event.type == "join":
-                self._schedule_join_greeting(event, background_tasks, config)
+            if event.type == "message":
+                await self._dispatch_message(event, background_tasks, config)
                 return
 
-            await self._dispatch_message(event, background_tasks, config)
+            # What is left is `follow` (someone added the OA as a friend) and
+            # `join` (the OA was added to a group): both mean a room that is
+            # about to ask its first question and has no container yet, so the
+            # warm-up starts now instead of on that first message (design
+            # §3.5 of docs/google-auth-per-member-plan.md). A `follow` is not
+            # answered at all — LINE already shows the OA's own greeting.
+            if event.type == "join":
+                self._schedule_join_greeting(event, background_tasks, config)
+            self._warm(event, config)
 
     async def _dispatch_message(
         self, event: Event, background_tasks: BackgroundTasks, config: Settings
@@ -235,6 +249,7 @@ class LineAdapter:
             event.native_id,
             sender_id,
             config.LINE_CHANNEL_ACCESS_TOKEN,
+            config.LINE_API_BASE_URL or None,
         )
         background_tasks.add_task(
             self._process_and_reply,
@@ -272,6 +287,26 @@ class LineAdapter:
         # change to call-word semantics must update both.
         stripped = text.strip()
         return any(stripped.startswith(prefix) for prefix in config.group_trigger_prefixes())
+
+    def _warm(self, event: Event, config: Settings) -> None:
+        """Start this room's container (and warm its agent) in the background.
+
+        Fire-and-forget by contract: `core.warm_room` returns as soon as the
+        task is scheduled, deduplicates per room itself, and reports its own
+        failures — a room whose warm-up fails simply pays the cold start on its
+        first real message.
+
+        Args:
+            event: The `follow` or `join` event naming the room.
+            config: Application settings.
+        """
+        room_key = event.room_key
+        if room_key is None:
+            logger.warning(
+                f"Skipping warm-up for LINE {event.type} event with unresolvable room id"
+            )
+            return
+        warm_room(room_key, config)
 
     def _schedule_join_greeting(
         self, event: Event, background_tasks: BackgroundTasks, config: Settings
@@ -340,11 +375,10 @@ class LineAdapter:
     ) -> None:
         """Run one inbound LINE message through core and deliver its replies.
 
-        Builds the channel-free InboundMessage, runs core.process_inbound
-        (Google gate -> container -> agent), delivers each returned text back to
-        LINE, then records the turn envelope with what delivery did. Runs in a
-        background task after the router already returned 200 OK, so core's own
-        per-step error guards keep any failure from raising here.
+        Builds the channel-free InboundMessage from a webhook event's fields
+        and hands it to `_run_turn` (core -> delivery -> turn envelope). Runs
+        in a background task after the router already returned 200 OK, so
+        core's own per-step error guards keep any failure from raising here.
 
         Args:
             room_key: Channel-prefixed room key core routes on (`line_<id>`);
@@ -369,19 +403,84 @@ class LineAdapter:
             sender_id=sender_id,
             sender_name=sender_name,
         )
+        await self._run_turn(msg, config, reply_token=reply_token, event_id=event_id)
+
+    async def resume(self, msg: InboundMessage) -> None:
+        """Run a parked message again and push its answer, after authorization.
+
+        The `ChannelAdapter` half of the Google authorization resume
+        (docs/google-auth-per-member-plan.md §3.4): core hands back the exact
+        message that triggered the authorization link and this runs it through
+        the normal pipeline again. Two things differ from a webhook turn, both
+        because nobody is waiting on an HTTP request here — the reply token
+        died with the original event, so every text is pushed; and the loading
+        animation is skipped, since it belongs to a message the user has just
+        sent, not to an answer arriving on its own.
+
+        Settings are read here rather than passed in: the Protocol keeps
+        `resume` channel-free, and every other adapter entry point (the webhook
+        route) resolves its own settings the same way.
+
+        Args:
+            msg: The parked inbound message, exactly as first received.
+        """
+        config = get_settings()
+        # Only a group needs it said out loud: the link named one member, so
+        # the room is told whose authorization this answer is running under
+        # (plan §7 — this is what makes a mis-clicked link visible). A 1:1 room
+        # has nobody to disambiguate from.
+        lead = (
+            f"{msg.sender_name} 已完成 Google 授權。" if msg.is_group and msg.sender_name else None
+        )
+        await self._run_turn(msg, config, lead=lead, loading=False)
+
+    async def _run_turn(
+        self,
+        msg: InboundMessage,
+        config: Settings,
+        *,
+        reply_token: str | None = None,
+        event_id: str | None = None,
+        lead: str | None = None,
+        loading: bool = True,
+    ) -> None:
+        """Run one inbound message through core and deliver what comes back.
+
+        The single delivery path both entry points share: a webhook message
+        (`_process_and_reply`, with the event's reply token) and a resumed one
+        (`resume`, with none). With no reply token every text is pushed, which
+        `_deliver_texts` already does for the second text onwards.
+
+        Args:
+            msg: The channel-free message to run.
+            config: Application settings.
+            reply_token: LINE reply token from the triggering event, if any.
+                None means push-only delivery.
+            event_id: The triggering event's `webhookEventId`, re-bound here so
+                this task's log lines and turn envelope carry it (the context
+                _dispatch_event bound is gone by the time this runs).
+            lead: One text to deliver ahead of the agent's own, or None. Sent
+                even when the agent answers with nothing, since it is an
+                announcement about the room, not part of the answer.
+            loading: Whether this turn may show LINE's loading indicator (a
+                1:1 chat only; see _loading_animation).
+        """
         # Re-bound here, not inherited: this task runs after the webhook request
         # (and the context _dispatch_event bound) is already done. event_id is
         # left unbound rather than bound to None when the event carried none.
-        context = {"channel": self.name, "room_key": room_key}
+        context = {"channel": self.name, "room_key": msg.room_key}
         if event_id:
             context["event_id"] = event_id
         with bound_contextvars(**context):
             # The animation runs only while we wait; the reply pushed right
             # after clears it (LINE drops it on the next message we send).
-            async with self._loading_animation(room_key, config, enabled=not is_group):
+            async with self._loading_animation(
+                msg.room_key, config, enabled=loading and not msg.is_group
+            ):
                 result = await process_inbound(msg, config)
+            texts = result.texts if lead is None else [lead, *result.texts]
             delivered = await self._deliver_texts(
-                self._native_id(room_key), result.texts, reply_token, config
+                self._native_id(msg.room_key), texts, reply_token, config
             )
             record_turn(result.envelope.model_copy(update={"delivered": delivered}), config)
 
@@ -412,8 +511,11 @@ class LineAdapter:
 
         native_id = self._native_id(room_key)
         token = config.LINE_CHANNEL_ACCESS_TOKEN
-        await show_loading_animation(native_id, token, _LOADING_ANIMATION_SECONDS)
-        refresher = asyncio.create_task(self._refresh_loading_animation(native_id, token))
+        api_base_url = config.LINE_API_BASE_URL or None
+        await show_loading_animation(native_id, token, _LOADING_ANIMATION_SECONDS, api_base_url)
+        refresher = asyncio.create_task(
+            self._refresh_loading_animation(native_id, token, api_base_url)
+        )
         try:
             yield
         finally:
@@ -422,7 +524,9 @@ class LineAdapter:
                 await refresher
 
     @staticmethod
-    async def _refresh_loading_animation(native_id: str, channel_access_token: str) -> None:
+    async def _refresh_loading_animation(
+        native_id: str, channel_access_token: str, api_base_url: str | None
+    ) -> None:
         """Re-issue the loading animation just before each one lapses.
 
         Runs as a companion task that `_loading_animation` cancels once the
@@ -431,11 +535,13 @@ class LineAdapter:
         Args:
             native_id: Bare LINE user id of the 1:1 chat.
             channel_access_token: LINE channel access token for authentication.
+            api_base_url: Optional LINE API base URL override (see
+                client.build_configuration); None means the real LINE Platform.
         """
         while True:
             await asyncio.sleep(_LOADING_REFRESH_INTERVAL)
             await show_loading_animation(
-                native_id, channel_access_token, _LOADING_ANIMATION_SECONDS
+                native_id, channel_access_token, _LOADING_ANIMATION_SECONDS, api_base_url
             )
 
     async def _deliver_texts(
@@ -491,7 +597,12 @@ class LineAdapter:
         """
         if reply_token:
             try:
-                await reply_line_message(reply_token, text, config.LINE_CHANNEL_ACCESS_TOKEN)
+                await reply_line_message(
+                    reply_token,
+                    text,
+                    config.LINE_CHANNEL_ACCESS_TOKEN,
+                    config.LINE_API_BASE_URL or None,
+                )
                 return True
             except ApiException as exc:
                 logger.info(
@@ -499,7 +610,9 @@ class LineAdapter:
                 )
 
         try:
-            await push_line_message(native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN)
+            await push_line_message(
+                native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN, config.LINE_API_BASE_URL or None
+            )
         except Exception as exc:
             logger.error(f"Failed to push LINE reply for room {native_id}: {exc}")
             return False

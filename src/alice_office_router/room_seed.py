@@ -222,6 +222,12 @@ def _copy_atomically(src: Path, dest: Path) -> None:
     drive) run as uid 10000, not root, and need read access to these seeded
     credential files.
 
+    google_tokens.save_member_tokens does the same temp-file-plus-chmod
+    dance for a room's member token files (second occurrence — AGENTS.md's
+    Rule of Three says duplicate with a pointer, extract on the third). They
+    stay separate because that one serializes JSON it is handed rather than
+    copying an existing file.
+
     Args:
         src: The file to copy.
         dest: Where to put it; its parent directory must exist.
@@ -253,14 +259,12 @@ def ensure_google_seed(room_id: str, config: Settings) -> None:
     its tokens.json and its credential copies) along with everything else,
     by design.
 
-    Called from both container_manager._create_container (so a fresh
-    container's bind mount has something to see) and
-    google_oauth.oauth_start: a room's very first message is usually gated,
-    and the gate-blocked turn only *starts* the container in the background
-    (core._warm_container) — the user can click the auth link before that
-    warm-up has created the data dir, or after it failed — so the OAuth
-    routes must be able to seed a room's google/ dir on demand, not only at
-    container-creation time.
+    Called from container_manager._create_container (so a fresh container's
+    bind mount has something to see), from google_oauth.oauth_start and from
+    google_tokens.select_member_tokens: a member can click an auth link
+    before the room's container exists, or after its creation failed, so both
+    of those paths must be able to seed a room's google/ dir on demand, not
+    only at container-creation time.
 
     No-op when this deployment has no Google OAuth configured.
 

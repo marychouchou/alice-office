@@ -260,12 +260,16 @@ class TestDispatchEvent:
         assert task.args[1] == "hi"
         assert task.args[3] == "reply_1"
 
-    async def test_ignores_non_message_event_types(self) -> None:
-        event = Event.model_validate({"type": "follow", "source": {"type": "user", "userId": "U1"}})
+    async def test_ignores_unhandled_event_types(self) -> None:
+        event = Event.model_validate(
+            {"type": "leave", "source": {"type": "group", "groupId": "C1"}}
+        )
         background_tasks = BackgroundTasks()
-        await LineAdapter()._dispatch_event(event, background_tasks, _settings())
+        with patch(f"{_ADAPTER}.warm_room") as mock_warm:
+            await LineAdapter()._dispatch_event(event, background_tasks, _settings())
 
         assert background_tasks.tasks == []
+        mock_warm.assert_not_called()
 
     async def test_duplicate_webhook_event_id_is_skipped(self) -> None:
         event = Event.model_validate(
@@ -401,7 +405,8 @@ class TestGroupDispatch:
             }
         )
         background_tasks = BackgroundTasks()
-        await LineAdapter()._dispatch_event(event, background_tasks, _settings())
+        with patch(f"{_ADAPTER}.warm_room"):
+            await LineAdapter()._dispatch_event(event, background_tasks, _settings())
 
         assert len(background_tasks.tasks) == 1
         task = background_tasks.tasks[0]
@@ -421,10 +426,12 @@ class TestGroupDispatch:
         )
         adapter = LineAdapter()
         background_tasks = BackgroundTasks()
-        await adapter._dispatch_event(event, background_tasks, _settings())
-        await adapter._dispatch_event(event, background_tasks, _settings())
+        with patch(f"{_ADAPTER}.warm_room") as mock_warm:
+            await adapter._dispatch_event(event, background_tasks, _settings())
+            await adapter._dispatch_event(event, background_tasks, _settings())
 
         assert len(background_tasks.tasks) == 1
+        mock_warm.assert_called_once()
 
     async def test_process_and_reply_forwards_group_fields_and_sends_nothing_when_empty(
         self,
@@ -462,6 +469,198 @@ class TestGroupDispatch:
 
 
 # ---------------------------------------------------------------------------
+# LineAdapter._dispatch_event — container warm-up on follow / join
+# (docs/google-auth-per-member-plan.md §3.5)
+# ---------------------------------------------------------------------------
+
+
+class TestWarmUpOnRoomAppears:
+    async def test_follow_event_warms_the_room_and_answers_nothing(self) -> None:
+        """A 1:1 friend add starts the container early; no greeting is sent."""
+        event = Event.model_validate(
+            {
+                "type": "follow",
+                "webhookEventId": "evt_f",
+                "replyToken": "reply_f",
+                "source": {"type": "user", "userId": "U1"},
+            }
+        )
+        settings = _settings()
+        background_tasks = BackgroundTasks()
+        with (
+            patch(f"{_ADAPTER}.warm_room") as mock_warm,
+            patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+        ):
+            await LineAdapter()._dispatch_event(event, background_tasks, settings)
+
+        mock_warm.assert_called_once_with("line_U1", settings)
+        # Nothing is scheduled and nothing is said: the OA's own greeting
+        # already covers the friend-add moment.
+        assert background_tasks.tasks == []
+        mock_reply.assert_not_called()
+        mock_push.assert_not_called()
+
+    async def test_duplicate_follow_event_warms_only_once(self) -> None:
+        """A follow event is deduped by webhookEventId like every other event."""
+        event = Event.model_validate(
+            {
+                "type": "follow",
+                "webhookEventId": "evt_f_dup",
+                "source": {"type": "user", "userId": "U1"},
+            }
+        )
+        adapter = LineAdapter()
+        background_tasks = BackgroundTasks()
+        with patch(f"{_ADAPTER}.warm_room") as mock_warm:
+            await adapter._dispatch_event(event, background_tasks, settings := _settings())
+            await adapter._dispatch_event(event, background_tasks, settings)
+
+        mock_warm.assert_called_once_with("line_U1", settings)
+
+    async def test_join_event_greets_and_warms(self) -> None:
+        """Being added to a group both greets it and starts its container."""
+        event = Event.model_validate(
+            {
+                "type": "join",
+                "webhookEventId": "evt_jw",
+                "replyToken": "reply_j",
+                "source": {"type": "group", "groupId": "C1"},
+            }
+        )
+        settings = _settings()
+        background_tasks = BackgroundTasks()
+        with patch(f"{_ADAPTER}.warm_room") as mock_warm:
+            await LineAdapter()._dispatch_event(event, background_tasks, settings)
+
+        assert len(background_tasks.tasks) == 1
+        mock_warm.assert_called_once_with("line_C1", settings)
+
+    async def test_unresolvable_room_id_is_not_warmed(self) -> None:
+        """A follow event without a usable source id is logged and dropped."""
+        event = Event.model_validate({"type": "follow", "source": {}})
+        background_tasks = BackgroundTasks()
+        with patch(f"{_ADAPTER}.warm_room") as mock_warm:
+            await LineAdapter()._dispatch_event(event, background_tasks, _settings())
+
+        mock_warm.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# LineAdapter.resume — re-run a message parked before Google authorization
+# (docs/google-auth-per-member-plan.md §3.4)
+# ---------------------------------------------------------------------------
+
+
+class TestResume:
+    def _resumed(self, **fields: object) -> InboundMessage:
+        """Build the parked message core hands back to resume()."""
+        defaults: dict[str, object] = {
+            "channel": "line",
+            "room_key": "line_room_AAA",
+            "text": "明天有什麼會議",
+        }
+        defaults.update(fields)
+        return InboundMessage(**defaults)  # type: ignore[arg-type]
+
+    async def test_resume_pushes_the_answer_and_records_the_turn(
+        self, stub_loading_animation: AsyncMock
+    ) -> None:
+        """No reply token survives the browser trip, so every text is pushed."""
+        captured: dict[str, InboundMessage] = {}
+
+        async def _fake_process(msg: InboundMessage, config: Settings) -> InboundResult:
+            captured["msg"] = msg
+            return _core_result(["明天 10:00 有會"], room_key=msg.room_key)
+
+        msg = self._resumed()
+        with (
+            patch(f"{_ADAPTER}.get_settings", return_value=_settings()),
+            patch(f"{_ADAPTER}.process_inbound", new=_fake_process),
+            patch(f"{_ADAPTER}.reply_line_message", new=AsyncMock()) as mock_reply,
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn") as mock_record,
+        ):
+            await LineAdapter().resume(msg)
+
+        assert captured["msg"] == msg
+        mock_reply.assert_not_called()
+        mock_push.assert_awaited_once_with("room_AAA", "明天 10:00 有會", TEST_TOKEN, None)
+        mock_record.assert_called_once()
+        assert mock_record.call_args.args[0].delivered is True
+        # The indicator answers a message the user just sent; an answer that
+        # arrives on its own has nothing to indicate.
+        stub_loading_animation.assert_not_called()
+
+    async def test_one_to_one_resume_adds_no_announcement(self) -> None:
+        """In a 1:1 room there is nobody to disambiguate the authorization for."""
+        with (
+            patch(f"{_ADAPTER}.get_settings", return_value=_settings()),
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["明天 10:00 有會"])),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn"),
+        ):
+            await LineAdapter().resume(self._resumed())
+
+        assert [call.args[1] for call in mock_push.await_args_list] == ["明天 10:00 有會"]
+
+    async def test_group_resume_announces_who_authorized_first(self) -> None:
+        """The room is told whose authorization this answer ran under (plan §7)."""
+        msg = self._resumed(room_key="line_C1", is_group=True, sender_id="U9", sender_name="王小明")
+        with (
+            patch(f"{_ADAPTER}.get_settings", return_value=_settings()),
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["明天 10:00 有會"], room_key="line_C1")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn"),
+        ):
+            await LineAdapter().resume(msg)
+
+        assert [call.args[1] for call in mock_push.await_args_list] == [
+            "王小明 已完成 Google 授權。",
+            "明天 10:00 有會",
+        ]
+        assert {call.args[0] for call in mock_push.await_args_list} == {"C1"}
+
+    async def test_group_resume_announces_even_when_the_agent_says_nothing(self) -> None:
+        """A silent group turn still announces: it is about the room, not the answer."""
+        msg = self._resumed(room_key="line_C1", is_group=True, sender_id="U9", sender_name="王小明")
+        with (
+            patch(f"{_ADAPTER}.get_settings", return_value=_settings()),
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result([], room_key="line_C1", outcome="silence")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn"),
+        ):
+            await LineAdapter().resume(msg)
+
+        mock_push.assert_awaited_once_with("C1", "王小明 已完成 Google 授權。", TEST_TOKEN, None)
+
+    async def test_group_resume_without_a_speaker_name_skips_the_announcement(self) -> None:
+        """Nothing to announce when LINE never told us who is speaking."""
+        msg = self._resumed(room_key="line_C1", is_group=True)
+        with (
+            patch(f"{_ADAPTER}.get_settings", return_value=_settings()),
+            patch(
+                f"{_ADAPTER}.process_inbound",
+                new=AsyncMock(return_value=_core_result(["明天 10:00 有會"], room_key="line_C1")),
+            ),
+            patch(f"{_ADAPTER}.push_line_message", new=AsyncMock()) as mock_push,
+            patch(f"{_ADAPTER}.record_turn"),
+        ):
+            await LineAdapter().resume(msg)
+
+        assert [call.args[1] for call in mock_push.await_args_list] == ["明天 10:00 有會"]
+
+
+# ---------------------------------------------------------------------------
 # LineAdapter._deliver_reply — reply-token-first, Push fallback
 # ---------------------------------------------------------------------------
 
@@ -474,7 +673,7 @@ class TestDeliverReply:
         ):
             await LineAdapter()._deliver_reply("room_A", "hello", "reply_token_1", _settings())
 
-        mock_reply.assert_awaited_once_with("reply_token_1", "hello", TEST_TOKEN)
+        mock_reply.assert_awaited_once_with("reply_token_1", "hello", TEST_TOKEN, None)
         mock_push.assert_not_called()
 
     async def test_falls_back_to_push_when_reply_token_rejected(self) -> None:
@@ -488,7 +687,7 @@ class TestDeliverReply:
             await LineAdapter()._deliver_reply("room_A", "hello", "expired_token", _settings())
 
         mock_reply.assert_awaited_once()
-        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN)
+        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN, None)
 
     async def test_pushes_directly_when_no_reply_token(self) -> None:
         with (
@@ -498,7 +697,7 @@ class TestDeliverReply:
             await LineAdapter()._deliver_reply("room_A", "hello", None, _settings())
 
         mock_reply.assert_not_called()
-        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN)
+        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN, None)
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +718,7 @@ async def test_process_and_reply_pushes_single_text_when_no_reply_token() -> Non
         await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
 
     # room_key comes in prefixed; the Push target is the stripped native id.
-    mock_push.assert_awaited_once_with("room_AAA", "哈囉，我是 Hermes", TEST_TOKEN)
+    mock_push.assert_awaited_once_with("room_AAA", "哈囉，我是 Hermes", TEST_TOKEN, None)
 
 
 async def test_process_and_reply_uses_reply_token_for_first_text() -> None:
@@ -554,8 +753,8 @@ async def test_process_and_reply_first_text_reply_token_rest_push() -> None:
             "line_room_AAA", "哈囉", _settings(), "reply_token_1"
         )
 
-    mock_reply.assert_awaited_once_with("reply_token_1", "notice", TEST_TOKEN)
-    mock_push.assert_awaited_once_with("room_AAA", "agent reply", TEST_TOKEN)
+    mock_reply.assert_awaited_once_with("reply_token_1", "notice", TEST_TOKEN, None)
+    mock_push.assert_awaited_once_with("room_AAA", "agent reply", TEST_TOKEN, None)
 
 
 async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
@@ -675,7 +874,7 @@ class TestLoadingAnimation:
 
         assert order == ["loading", "push"]
         # Bare LINE user id (prefix stripped), 60 s — LINE's maximum.
-        stub_loading_animation.assert_awaited_with("room_AAA", TEST_TOKEN, 60)
+        stub_loading_animation.assert_awaited_with("room_AAA", TEST_TOKEN, 60, None)
 
     async def test_group_message_never_shows_the_animation(
         self, stub_loading_animation: AsyncMock
@@ -699,7 +898,9 @@ class TestLoadingAnimation:
         refreshed = asyncio.Event()
         calls: list[str] = []
 
-        async def _fake_loading(native_id: str, token: str, seconds: int = 60) -> None:
+        async def _fake_loading(
+            native_id: str, token: str, seconds: int = 60, api_base_url: str | None = None
+        ) -> None:
             calls.append(native_id)
             if len(calls) >= 2:
                 refreshed.set()

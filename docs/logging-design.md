@@ -439,16 +439,36 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 |---|---|
 | `schema_version`, `ts`, `request_id`, `event_id`, `channel`, `room_key` | 同前 |
 | `session_id` | 這一輪送給 Hermes 的 session id（含 epoch）——**對回 `state.db.sessions.id` 的 join key** |
-| `outcome` | `replied` / `observed` / `reset` / `blocked` / `agent_failed` / `silence`；後五種在 `state.db` 裡**沒有對應紀錄**，這是 envelope 存在的主因 |
+| `outcome` | `replied` / `observed` / `reset` / `blocked` / `agent_failed` / `silence`；後五種在 `state.db` 裡**沒有對應紀錄**，這是 envelope 存在的主因。**`blocked` 是遺留值**：2026-09-18 起 Google 授權改成不擋訊息（延遲授權＋逐人授權，見 `docs/google-auth-per-member-plan.md`），程式碼不再產生它，`Outcome` Literal 只是保留讓舊 envelope／既有查詢工具還讀得懂歷史資料 |
 | `inbound_text` | **JSONL only**。只在 Hermes 自己沒記的那些 outcome 才填（`core._TEXT_IN_STATE_DB` = `replied` + `silence`；`silence` 也進了 agent，所以同樣不重複記）。`agent_failed` 刻意保留：它有一半的情況（容器起不來、連不上）根本沒碰到 Hermes，這份 envelope 是唯一記得使用者說了什麼的地方 |
 | `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
 | `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
-| `gate_status`, `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
+| `gate_status` | `ok` / `unauthorized`（發話者沒有可用 token——不擋訊息，但這一輪的 system prompt 會多帶一段提示，見 `group_context.GOOGLE_AUTH_MISSING_HINT`；只有在 agent 這輪其實用不到 Google 時才會留下這個值）/ `notice`（token 有效但缺 Drive scope，仍照常呼叫 agent）/ `auth_link`（這輪回覆含 Google 授權連結——`auth_links.publish_auth_links` 把 marker 換成連結後覆寫掉前面的值，見 `docs/google-auth-per-member-plan.md` §3.3）/ `None`（observe、reset 短路，沒跑到判斷這一步）。舊版的 `blocked` 不會再出現，理由同上 |
+| `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
 | `tool_calls`, `api_calls` | 這一輪 Hermes 內部的工具呼叫次數／LLM API 呼叫次數，`None`＝未知（沒有呼叫或讀取失敗）。兩個都不是 JSONL only——純數字，兩個 sink 都有。來源與取捨見 §5.1 的 2026-09-15 補充 |
 | `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `core.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
 
 `process_inbound` 拆成 `_route` + 薄包裝的做法不變；只是發出點移到 adapter，讓
 `delivered` 能一次寫進去而不是事後補一行 error log。
+
+**延遲授權新增的 structlog 事件**（2026-09-18，`auth_links.py`／`core.py` 的
+`struct_logger`，都走 `room_key`／`member` 這兩個 contextvars 過濾）：
+
+| 事件 | 何時 | 層級 |
+|---|---|---|
+| `auth_link_issued` | `publish_auth_links` 把 marker 換成連結、寫完 pending 檔之後 | INFO |
+| `pending_auth_unreadable` | `router_state/pending_auth/<member_key>.json` 存在但讀不了（OSError） | ERROR |
+| `pending_auth_cleanup_failed` | 讀完 pending 檔後想刪掉卻失敗 | ERROR |
+| `pending_auth_malformed` | pending 檔內容不是合法 JSON／缺欄位／`InboundMessage` 驗證失敗 | ERROR |
+| `pending_auth_expired` | pending 檔存在且格式正確，但已超過 `PENDING_AUTH_TTL_SECONDS`（10 分鐘），不重跑 | INFO |
+| `auth_resume_started` | `resume_pending_auth` 找到未過期的 pending，準備呼叫 `adapter.resume(msg)` 之前 | INFO |
+| `auth_resume_empty` | 該成員授權完成，但沒有 pending 訊息（單純重新授權，或已被更早一次重跑消耗掉） | INFO |
+| `auth_resume_no_adapter` | pending 訊息的 `channel` 在這個 process 沒有掛載對應的 adapter | ERROR |
+| `auth_resume_failed` | `resume_pending_auth` 整個 try 區塊拋出例外（含 `adapter.resume` 本身失敗） | ERROR |
+
+這些事件都發生在 OAuth callback 觸發的背景 task 裡（`on_authorized` hook），跟原本
+那次 webhook request 的 `request_id` 對不上——查一次授權後重跑的完整過程，要用
+`room_key`／`member` 過濾，不能用 `request_id`。
 
 **`error` 欄位不能直接塞 `str(exc)`**（2026-09-14 review 後改）：pydantic 的
 `ValidationError.__str__` 會把它拒絕的那個值一起印出來——在這條路徑上那就是 agent 的

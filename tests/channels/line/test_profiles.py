@@ -3,12 +3,13 @@ from __future__ import annotations
 import time
 from collections.abc import Generator
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from linebot.v3.messaging.exceptions import ApiException
 
 from alice_office_router.channels.line import profiles
+from alice_office_router.channels.line.client import build_configuration
 from alice_office_router.channels.line.profiles import _ProfileCache, resolve_sender_name
 
 _PROFILE_API = "alice_office_router.channels.line.profiles.AsyncMessagingApi"
@@ -154,3 +155,23 @@ class TestProfileCache:
         assert cache.get(("C0", "U")) is None
         assert cache.get(("Cnew", "U")) == "new"
         assert len(cache._entries) <= 10
+
+
+# ---------------------------------------------------------------------------
+# LINE_API_BASE_URL redirection — profile lookups must reach the stub too
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_sender_name_threads_api_base_url_into_configuration() -> None:
+    """The base URL reaches the SDK configuration the profile call uses."""
+    spy = MagicMock(wraps=build_configuration)
+    with (
+        patch("alice_office_router.channels.line.profiles.build_configuration", new=spy),
+        patch(
+            f"{_PROFILE_API}.get_group_member_profile", new=AsyncMock(return_value=_profile("王"))
+        ),
+    ):
+        name = await resolve_sender_name("group", "C1", "U9", "token", "http://localhost:8099")
+
+    assert name == "王"
+    spy.assert_called_once_with("token", "http://localhost:8099")

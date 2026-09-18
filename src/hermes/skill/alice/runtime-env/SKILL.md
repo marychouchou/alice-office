@@ -1,7 +1,7 @@
 ---
 name: runtime-env
 description: "這個容器的執行環境：官方 skill 直接照它自己的文件用 python／pip；execute_code 工具跑的也是這個 python，已預裝 numpy／sympy（沒有 scipy）；Alice 自家工具用 tools-python；使用者傳來的檔案在 /opt/data/incoming/；要把檔案交回給使用者只能用 share_file 工具；上網查沒有固定網址的東西先用 web_search、不要用瀏覽器開搜尋引擎。要跑 execute_code、讀 PDF、找使用者傳的檔案、把檔案交給使用者、或上網查資料前先看這份。"
-version: 2.3.0
+version: 2.4.0
 author: alice
 license: MIT
 platforms: [linux]
@@ -98,6 +98,17 @@ toolset）：
 
 連結約 24 小時後失效；過期後使用者再要一次，重新呼叫 `share_file` 產生新連結即可。
 純文字的結論直接寫在回覆裡就好，不需要為了幾行字特地做成檔案再分享。
+
+## Google 工具說沒有授權
+
+行事曆／Gmail／Drive 工具回報 `No Google authorization`、`No token found`、
+`no authenticated accounts` 這類訊息時，代表**這位發話者**還沒把自己的 Google 帳號接上來
+（群組裡是逐人授權的，別人授權過不代表他也授權過）。
+
+這時候在回覆裡把 `google-auth://request` **原封不動、單獨一行**放上，並用一句話說明你需要
+授權做什麼（例如「要查你明天的行事曆」）。系統會在送出前換成只屬於他本人的授權連結。
+**不要自己編授權網址**、不要叫使用者去某個設定頁、也不要包成 markdown 連結——容器裡查不到
+router 的網址，編出來的一定是死連結。使用者授權完成後，剛才那個問題會自動重跑，不用請他再問一次。
 
 ## 上網查資料
 

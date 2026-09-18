@@ -215,6 +215,9 @@ provider 不同）。
 - **環境事實**（`src/hermes/skill/alice/runtime-env/SKILL.md`，烤進 image）：怎麼用、
   純文字內容直接回文字不必做成檔案。要重建 image 才到，不急。
 
+同樣的兩層做法後來也用在 Google 授權連結（`google-auth://request`，
+`auth_links.py`）：見 `docs/google-auth-per-member-plan.md` §3.3。
+
 `share_file` 工具本身住在 `src/hermes/plugin/local-tools/`，單一參數 `path`。不檢查來源
 路徑是否在 `/opt/data` 內——`hr` 工具本來就把 xlsx 寫到 `/tmp/`，容器內 `/tmp` 和 `/opt/data`
 沒有權限邊界；圍籬是 router 的事（§4）。
