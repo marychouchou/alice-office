@@ -48,7 +48,9 @@ def _tool_progress_frame(**fields: object) -> str:
     (docs/router-hermes-agent-protocol.md); ask_hermes_agent uses it to drop
     narration produced before a tool call.
     """
-    return "event: hermes.tool.progress\ndata: " + json.dumps(fields or {"tool": "browser_navigate"})
+    return "event: hermes.tool.progress\ndata: " + json.dumps(
+        fields or {"tool": "browser_navigate"}
+    )
 
 
 def _finish_chunk(reason: str = "stop", **fields: object) -> str:
