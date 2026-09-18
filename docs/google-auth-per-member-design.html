@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>群組逐人授權設計</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@600;700&family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  html, body { margin: 0; }
+  :root {
+    --bg: #f5f7f6;
+    --surface: #ffffff;
+    --surface-2: #eaefec;
+    --ink: #1b2622;
+    --ink-2: #4f5f58;
+    --ink-3: #7d8a84;
+    --line: #d6ddd9;
+    --accent: #1f8a58;
+    --accent-ink: #146b43;
+    --accent-soft: #dcefe4;
+    --warn: #a86a12;
+    --warn-soft: #f6ecd8;
+    --bubble-user: #b9e9c4;
+    --bubble-bot: #ffffff;
+    --chat-bg: #8fa9c4;
+    --code-bg: #eef2f0;
+    --link-hue: #1f8a58;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101613;
+      --surface: #182019;
+      --surface-2: #1f2a23;
+      --ink: #e6ede9;
+      --ink-2: #aab7b0;
+      --ink-3: #7f8d86;
+      --line: #2c3a32;
+      --accent: #4cc48a;
+      --accent-ink: #7fdcac;
+      --accent-soft: #1b3428;
+      --warn: #e0a84a;
+      --warn-soft: #3a2c14;
+      --bubble-user: #2f7a4d;
+      --bubble-bot: #263129;
+      --chat-bg: #1c2a36;
+      --code-bg: #1f2a23;
+      --link-hue: #4cc48a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101613;
+    --surface: #182019;
+    --surface-2: #1f2a23;
+    --ink: #e6ede9;
+    --ink-2: #aab7b0;
+    --ink-3: #7f8d86;
+    --line: #2c3a32;
+    --accent: #4cc48a;
+    --accent-ink: #7fdcac;
+    --accent-soft: #1b3428;
+    --warn: #e0a84a;
+    --warn-soft: #3a2c14;
+    --bubble-user: #2f7a4d;
+    --bubble-bot: #263129;
+    --chat-bg: #1c2a36;
+    --code-bg: #1f2a23;
+    --link-hue: #4cc48a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.75;
+    padding-block: 0 96px;
+    padding-inline: 20px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+  h1, h2, h3 {
+    font-family: "Noto Serif TC", "Songti TC", "PMingLiU", serif;
+    text-wrap: balance;
+    line-height: 1.3;
+    margin: 0;
+  }
+  h1 { font-size: 2.1rem; font-weight: 700; letter-spacing: 0.01em; }
+  h2 { font-size: 1.45rem; font-weight: 700; margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.1rem; font-weight: 600; margin-top: 2rem; }
+  p { margin: 0.9rem 0; max-width: 68ch; }
+  ul, ol { max-width: 68ch; padding-left: 1.3em; }
+  li { margin: 0.35rem 0; }
+  li::marker { color: var(--ink-3); }
+  a { color: var(--link-hue); }
+  code, .mono {
+    font-family: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    font-size: 0.86em;
+  }
+  code { background: var(--code-bg); padding: 0.1em 0.4em; border-radius: 4px; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    margin: 1rem 0;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .eyebrow {
+    font-size: 0.74rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    font-weight: 700;
+  }
+  header { padding-top: 56px; }
+  header .meta {
+    display: flex; flex-wrap: wrap; gap: 8px 20px;
+    color: var(--ink-2); font-size: 0.9rem; margin-top: 1rem;
+  }
+  header .meta span b { color: var(--ink); font-weight: 500; }
+  .lede { font-size: 1.12rem; color: var(--ink-2); margin-top: 1.4rem; max-width: 62ch; }
+  .status {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    background: var(--warn-soft); color: var(--warn); font-size: 0.8rem; font-weight: 700;
+    letter-spacing: 0.04em; vertical-align: middle;
+  }
+
+  /* chat mockups */
+  .chats { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 1.4rem 0; }
+  .chat {
+    background: var(--chat-bg);
+    border-radius: 12px;
+    padding: 14px 12px 10px;
+    display: flex; flex-direction: column; gap: 8px;
+    font-size: 0.9rem; line-height: 1.55;
+    min-width: 0;
+  }
+  .chat .title {
+    color: #fff; font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em;
+    text-align: center; margin-bottom: 4px; opacity: 0.95;
+  }
+  .msg { max-width: 86%; padding: 8px 12px; border-radius: 14px; position: relative; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--bubble-user); border-bottom-right-radius: 4px; color: var(--ink); }
+  .msg.bot { align-self: flex-start; background: var(--bubble-bot); border-bottom-left-radius: 4px; color: var(--ink); }
+  .msg .who { display: block; font-size: 0.72rem; color: var(--ink-3); margin-bottom: 2px; }
+  .msg .link { color: var(--link-hue); text-decoration: underline; word-break: break-all; }
+  .sys { align-self: center; color: #fff; font-size: 0.74rem; opacity: 0.9; background: rgba(0,0,0,0.22); padding: 2px 10px; border-radius: 999px; }
+  .note { align-self: stretch; font-size: 0.76rem; color: #fff; opacity: 0.85; padding: 4px 6px 0; border-top: 1px dashed rgba(255,255,255,0.45); margin-top: 4px; }
+  .chat.old .msg.bot.blocked { border-left: 3px solid var(--warn); }
+
+  /* figures */
+  figure { margin: 1.6rem 0; }
+  figure svg { max-width: 100%; height: auto; display: block; color: var(--ink); }
+  figcaption { font-size: 0.86rem; color: var(--ink-2); margin-top: 0.6rem; max-width: 68ch; }
+  .figwrap { overflow-x: auto; }
+
+  /* tables */
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; margin: 1rem 0; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 700; color: var(--ink-2); font-size: 0.8rem; letter-spacing: 0.06em; }
+  .tablewrap { overflow-x: auto; }
+
+  /* callouts */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 10px 16px; border-radius: 0 6px 6px 0; margin: 1.2rem 0; max-width: 68ch;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .callout p { margin: 0.3rem 0; }
+  .callout .eyebrow { color: inherit; opacity: 0.85; }
+  .callout.warn .eyebrow { color: var(--warn); }
+
+  /* steps */
+  .steps { counter-reset: step; list-style: none; padding: 0; max-width: 72ch; }
+  .steps li { counter-increment: step; display: grid; grid-template-columns: 2.4rem 1fr; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); margin: 0; }
+  .steps li::before { content: counter(step); font-family: "JetBrains Mono", monospace; color: var(--accent-ink); font-weight: 500; font-size: 0.95rem; padding-top: 2px; }
+  .steps li b { font-weight: 700; }
+  .steps li small { display: block; color: var(--ink-2); font-size: 0.86rem; }
+
+  .rule {
+    display: grid; grid-template-columns: 1fr; gap: 0;
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin: 1rem 0; max-width: 72ch;
+    font-size: 0.92rem;
+  }
+  .rule div { padding: 10px 14px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 12px; }
+  .rule div:last-child { border-bottom: 0; }
+  .rule div span:last-child { color: var(--ink-2); }
+  @media (max-width: 520px) { .rule div { grid-template-columns: 1fr; gap: 2px; } }
+
+  @media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="eyebrow">alice-office-router · task10</div>
+  <h1 style="margin-top: .5rem;">Google 授權改版：延遲授權與群組逐人授權</h1>
+  <p class="lede">不再用 Google 授權擋下使用者的第一則訊息。agent 真的碰到 Google 工具沒 token 時，router 才在回覆裡放授權連結；使用者授權完，router 自動把剛才的問題重跑一次並推播答案。群組裡每一回合一律以發話者的身分執行 Google 工具，授權連結也只給發話者。</p>
+  <div class="meta">
+    <span>狀態 <span class="status">設計定案，實作中</span></span>
+    <span>日期 <b>2026-09-18</b></span>
+    <span>文字版計畫 <b class="mono">docs/google-auth-per-member-plan.md</b></span>
+  </div>
+</header>
+
+<h2 id="why">為什麼要改</h2>
+<p>現在的 gate 只認房間。每一則訊息進 agent 前先檢查這個房間有沒有 Google token，沒有就把訊息擋下來、只回一則授權連結。這帶來兩個問題：</p>
+<ul>
+  <li><b>個人聊天室</b>：跟 Google 無關的功能（讀 PDF、上網查資料、翻譯）也被擋住，使用者第一次接觸就被要求授權，授權完還得把問題再打一次。</li>
+  <li><b>群組</b>：token 屬於群組本身，不屬於任何一位成員。連結廣播給全群，誰點誰的 Google 帳號就成了群組的帳號，第二個人點會靜默覆蓋。之後所有成員都能透過助理讀那個人的 Gmail、改他的行事曆。這不只是體驗問題，是隱私漏洞。</li>
+</ul>
+
+<h2 id="ux">使用者體驗流程</h2>
+
+<h3>個人聊天室：改版前後</h3>
+<div class="chats">
+  <div class="chat old">
+    <div class="title">改版前</div>
+    <div class="msg user">幫我看這份 PDF 在講什麼</div>
+    <div class="msg bot blocked">🔐 請先授權 Google 帳號，才能操作 Calendar、Gmail 和 Drive。<br>👉 點此授權：<span class="link">https://…/oauth/start?user_id=U…</span><br>授權完成後，請再傳一次您的問題！</div>
+    <div class="sys">使用者去授權，回來</div>
+    <div class="msg user">幫我看這份 PDF 在講什麼</div>
+    <div class="msg bot">這份 PDF 是 115 學年度學測數學 A 試卷……</div>
+    <div class="note">跟 Google 無關的問題也被擋；同一個問題要打兩次。</div>
+  </div>
+  <div class="chat">
+    <div class="title">改版後</div>
+    <div class="msg user">幫我看這份 PDF 在講什麼</div>
+    <div class="msg bot">這份 PDF 是 115 學年度學測數學 A 試卷……</div>
+    <div class="msg user">明天有什麼會議？</div>
+    <div class="msg bot">要看你的行事曆需要先連結 Google 帳號：<br><span class="link">https://…/oauth/start?user_id=U…&amp;member=u…</span></div>
+    <div class="sys">使用者點連結、授權、回到 LINE</div>
+    <div class="msg bot">明天有兩場：10:00 產品週會、15:00 與客戶 Alice 的提案討論。</div>
+    <div class="note">只有真的需要 Google 時才要求授權；授權完答案自己送到，不用再打一次。</div>
+  </div>
+</div>
+
+<h3>群組：A 和 B 各自授權</h3>
+<div class="chats">
+  <div class="chat old">
+    <div class="title">改版前</div>
+    <div class="msg user"><span class="who">A</span>@助理 明天有什麼會？</div>
+    <div class="msg bot blocked">🔐 請先授權 Google 帳號…<br>👉 <span class="link">https://…/oauth/start?user_id=C…</span></div>
+    <div class="sys">B 順手點了連結，用 B 的 Google 登入</div>
+    <div class="msg user"><span class="who">A</span>@助理 明天有什麼會？</div>
+    <div class="msg bot">明天有一場 14:00 牙醫預約。</div>
+    <div class="note">A 看到的是 B 的行事曆。群組裡任何人之後都能操作 B 的帳號。</div>
+  </div>
+  <div class="chat">
+    <div class="title">改版後</div>
+    <div class="msg user"><span class="who">A</span>@助理 明天有什麼會？</div>
+    <div class="msg bot">A 請點此連結你的 Google 帳號：<br><span class="link">https://…/oauth/start?user_id=C…&amp;member=u_a…</span></div>
+    <div class="msg user"><span class="who">B</span>@助理 幫我查下週的信</div>
+    <div class="msg bot">B 請點此連結你的 Google 帳號：<br><span class="link">https://…/oauth/start?user_id=C…&amp;member=u_b…</span></div>
+    <div class="sys">A 授權完成</div>
+    <div class="msg bot">A 已完成 Google 授權。<br>明天有兩場：10:00 產品週會、15:00 提案討論。</div>
+    <div class="msg user"><span class="who">A</span>@助理 B 明天有空嗎？</div>
+    <div class="msg bot">我是用你的帳號查的，看不到 B 的行事曆。請 B 直接問我，或先把行事曆分享給你。</div>
+    <div class="note">誰發話就用誰的帳號。A 永遠碰不到 B 的資料，這由 Google 的分享設定決定，不由助理猜。</div>
+  </div>
+</div>
+
+<div class="callout">
+  <div class="eyebrow">身分規則只有一條</div>
+  <p>群組回合的成員 key 是發話者的 LINE userId；個人聊天室的成員就是房間本身。兩種房間走同一條程式路徑，個人房間只是每次都換到同一個檔案。</p>
+  <p>群組裡沒加官方帳號好友的成員，LINE 不會給 userId。這種人的 Google 工具一律失敗，助理回「LINE 沒提供你的身分，請先加我為好友再試」，不給連結。</p>
+</div>
+
+<h2 id="mechanism">機制</h2>
+
+<h3>每回合換 token 檔</h3>
+<p>三個 Google MCP 都把 token 路徑寫死在容器的 <code>/opt/google-workspace/tokens.json</code>，帳號 key 也寫死在 config.yaml。這兩樣都動不了，但路徑背後的檔案可以換。Router 在每回合開始前，把 <code>tokens.json</code> 這個 symlink 指向當前發話者的成員檔。已驗證三個 MCP 每次工具呼叫都重新讀檔，所以換檔不需要重啟容器。</p>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 880 330" role="img" aria-label="一則群組訊息的處理路徑：router 依發話者換 tokens.json symlink，容器內的 MCP 透過固定路徑讀到該成員的 token" xmlns="http://www.w3.org/2000/svg" style="min-width: 640px;">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g font-family="Noto Sans TC, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <!-- LINE -->
+    <rect x="20" y="120" width="110" height="60" rx="6" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="75" y="145" text-anchor="middle" font-weight="700">LINE 群組</text>
+    <text x="75" y="164" text-anchor="middle" font-size="11">A 點名助理</text>
+
+    <!-- Router -->
+    <rect x="190" y="40" width="270" height="250" rx="8" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="205" y="62" font-weight="700">Router · core._take_turn</text>
+    <text x="205" y="80" font-size="11" opacity="0.7">在房間的 turn lock 內</text>
+
+    <rect x="205" y="96" width="240" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="325" y="118" text-anchor="middle">member_key = A 的 userId</text>
+
+    <rect x="205" y="146" width="240" height="34" rx="4" fill="#1f8a58" fill-opacity="0.15" stroke="#1f8a58" stroke-width="1.4"/>
+    <text x="325" y="168" text-anchor="middle" font-weight="700">tokens.json → members/u_a.json</text>
+
+    <rect x="205" y="196" width="240" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="325" y="218" text-anchor="middle">向 agent 送出群組 prompt</text>
+
+    <rect x="205" y="246" width="240" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="325" y="268" text-anchor="middle">reply seam：outbox:// · google-auth://</text>
+
+    <line x1="325" y1="130" x2="325" y2="146" stroke="currentColor" stroke-width="1" marker-end="url(#ah)"/>
+    <line x1="325" y1="180" x2="325" y2="196" stroke="currentColor" stroke-width="1" marker-end="url(#ah)"/>
+    <line x1="325" y1="230" x2="325" y2="246" stroke="currentColor" stroke-width="1" marker-end="url(#ah)"/>
+
+    <line x1="130" y1="150" x2="190" y2="150" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"/>
+    <text x="160" y="142" text-anchor="middle" font-size="10.5">webhook</text>
+
+    <!-- Container -->
+    <rect x="520" y="40" width="340" height="250" rx="8" fill="none" stroke="currentColor" stroke-width="1.2"/>
+    <text x="535" y="62" font-weight="700">容器 hermes_&lt;群組&gt;</text>
+    <text x="535" y="80" font-size="11" opacity="0.7">/opt/google-workspace 是整個目錄 bind mount</text>
+
+    <rect x="535" y="96" width="140" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="605" y="118" text-anchor="middle">Hermes agent</text>
+
+    <rect x="700" y="96" width="145" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1"/>
+    <text x="772" y="118" text-anchor="middle">calendar / gmail / drive</text>
+    <line x1="675" y1="113" x2="700" y2="113" stroke="currentColor" stroke-width="1" marker-end="url(#ah)"/>
+
+    <rect x="535" y="170" width="310" height="104" rx="4" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3"/>
+    <text x="550" y="190" font-family="JetBrains Mono, monospace" font-size="11.5">/opt/google-workspace/</text>
+    <text x="566" y="210" font-family="JetBrains Mono, monospace" font-size="11.5" fill="#1f8a58" font-weight="700">tokens.json → members/u_a.json</text>
+    <text x="566" y="230" font-family="JetBrains Mono, monospace" font-size="11.5">members/u_a.json   ← A 的 token</text>
+    <text x="566" y="250" font-family="JetBrains Mono, monospace" font-size="11.5">members/u_b.json   ← B 的 token</text>
+    <text x="566" y="268" font-family="JetBrains Mono, monospace" font-size="11.5" opacity="0.6">gcp-oauth.keys*.json</text>
+
+    <line x1="772" y1="130" x2="772" y2="170" stroke="currentColor" stroke-width="1" marker-end="url(#ah)"/>
+    <text x="780" y="154" font-size="10.5">每次呼叫重新讀檔</text>
+
+    <!-- router to container -->
+    <line x1="460" y1="213" x2="535" y2="113" stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)"/>
+    <text x="500" y="150" font-size="10.5" text-anchor="middle">HTTP</text>
+    <line x1="445" y1="163" x2="535" y2="210" stroke="#1f8a58" stroke-width="1.4" stroke-dasharray="5 3" marker-end="url(#ah)"/>
+    <text x="482" y="196" font-size="10.5" text-anchor="middle" fill="#1f8a58">host 端換 symlink</text>
+  </g>
+</svg>
+</div>
+<figcaption>Router 在 turn lock 內先換 symlink 再叫 agent，容器內的三個 MCP 沿固定路徑讀到的就只有發話者的 token。成員檔內層 key 維持房間的 account_key，所以 MCP manifest 和既有房間的 config.yaml 完全不用改。</figcaption>
+</figure>
+
+<h3>授權連結怎麼回到使用者手上</h3>
+<p>Router 只看得到 agent 的最終回覆，看不到工具呼叫的錯誤。所以沿用 task9 的做法：工具回報沒 token 時，agent 在回覆裡放一個固定字串 <code>google-auth://request</code>，router 在回覆出口把它換成「這個房間、這回合發話者」的授權連結。這個字串不是秘密，別人觸發也只會拿到自己的連結。</p>
+<ul>
+  <li>gmail 與 drive 是自己寫的 MCP，錯誤文字直接含這個字串和「原樣單獨放一行」的指示。</li>
+  <li>calendar 是第三方套件，錯誤文字不可控，靠 system prompt 的規則補上：任何 Google 工具回報未授權，就放這個字串。</li>
+</ul>
+
+<h3>授權完成後自動接續</h3>
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 880 470" role="img" aria-label="授權連結發出到答案自動推播的時序：router 存下待重跑的訊息，OAuth callback 寫入成員 token 後重跑並推播" xmlns="http://www.w3.org/2000/svg" style="min-width: 640px;">
+  <g font-family="Noto Sans TC, system-ui, sans-serif" font-size="12" fill="currentColor">
+    <!-- lifelines -->
+    <g font-weight="700" text-anchor="middle">
+      <text x="90" y="30">使用者 A</text>
+      <text x="300" y="30">Router</text>
+      <text x="520" y="30">Agent 容器</text>
+      <text x="760" y="30">Google</text>
+    </g>
+    <g stroke="currentColor" stroke-width="1" stroke-dasharray="3 4" opacity="0.5">
+      <line x1="90" y1="42" x2="90" y2="450"/>
+      <line x1="300" y1="42" x2="300" y2="450"/>
+      <line x1="520" y1="42" x2="520" y2="450"/>
+      <line x1="760" y1="42" x2="760" y2="450"/>
+    </g>
+    <g stroke="currentColor" stroke-width="1.2" marker-end="url(#ah)">
+      <line x1="90" y1="70" x2="300" y2="70"/>
+      <line x1="300" y1="100" x2="520" y2="100"/>
+      <line x1="520" y1="130" x2="300" y2="130"/>
+      <line x1="300" y1="200" x2="90" y2="200"/>
+      <line x1="90" y1="250" x2="760" y2="250"/>
+      <line x1="760" y1="280" x2="300" y2="280"/>
+      <line x1="300" y1="350" x2="520" y2="350"/>
+      <line x1="520" y1="380" x2="300" y2="380"/>
+      <line x1="300" y1="420" x2="90" y2="420"/>
+    </g>
+    <g font-size="11">
+      <text x="195" y="63" text-anchor="middle">「明天有什麼會」</text>
+      <text x="410" y="93" text-anchor="middle">換 symlink → 送 prompt</text>
+      <text x="410" y="123" text-anchor="middle">回覆含 google-auth://request</text>
+      <text x="195" y="193" text-anchor="middle">「A 請點此連結…」＋連結</text>
+      <text x="425" y="243" text-anchor="middle">點連結 → /oauth/start → Google 同意畫面</text>
+      <text x="530" y="273" text-anchor="middle">callback?code&amp;state（state 綁 群組＋A）</text>
+      <text x="410" y="343" text-anchor="middle">重跑同一則 InboundMessage</text>
+      <text x="410" y="373" text-anchor="middle">「明天有兩場…」</text>
+      <text x="195" y="413" text-anchor="middle">push：「A 已完成授權」＋答案</text>
+    </g>
+    <!-- router self notes -->
+    <rect x="308" y="145" width="200" height="40" rx="4" fill="#1f8a58" fill-opacity="0.15" stroke="#1f8a58" stroke-width="1.2"/>
+    <text x="318" y="162" font-size="11" font-weight="700">reply seam</text>
+    <text x="318" y="178" font-size="11">換成連結；存 pending/u_a.json</text>
+    <rect x="308" y="295" width="200" height="40" rx="4" fill="#1f8a58" fill-opacity="0.15" stroke="#1f8a58" stroke-width="1.2"/>
+    <text x="318" y="312" font-size="11" font-weight="700">oauth_callback</text>
+    <text x="318" y="328" font-size="11">寫 members/u_a.json；讀 pending</text>
+    <text x="90" y="440" text-anchor="middle" font-size="10.5" opacity="0.7">不用再傳一次</text>
+  </g>
+</svg>
+</div>
+<figcaption>發出連結的那一回合，router 把原始訊息存成該成員的 pending。Callback 寫入成員 token 後，在背景把同一則訊息重跑一次，走正常管線（room lock、session 管理、群組背景），答案用 push 送回。pending 只保留最後一則，10 分鐘過期。</figcaption>
+</figure>
+
+<h3>資料佈局</h3>
+<pre><code>data/&lt;room&gt;/google/
+  gcp-oauth.keys.json                 不變
+  gcp-oauth.keys.installed.json       不變
+  tokens.json → members/&lt;member_key&gt;.json    相對 symlink，指向當前發話者
+  members/
+    &lt;member_key&gt;.json                 { "&lt;account_key(room)&gt;": { access_token, refresh_token, expiry_date, … } }
+
+data/&lt;room&gt;/router_state/pending_auth/
+  &lt;member_key&gt;.json                   等授權完成要重跑的 InboundMessage</code></pre>
+
+<div class="rule">
+  <div><span><b>既有房間遷移</b></span><span>tokens.json 是一般檔案時，搬成 members/&lt;account_key(room)&gt;.json。個人房間的成員 key 正好等於它，授權無縫延續；群組房間這個 key 沒人會用到，舊 token 等於作廢，成員各自重新授權。</span></div>
+  <div><span><b>換檔的原子性</b></span><span>建 temp symlink 再 rename 蓋過去。成員檔用 temp 加 rename 寫入。MCP 刷新 token 會整檔覆寫，透過 symlink 落在正確的成員檔。</span></div>
+  <div><span><b>換檔時機</b></span><span>只在房間的 turn lock 內、回合開始前。回合進行中絕不換，避免 MCP 的讀改寫把 A 的 token 寫進 B 的檔。</span></div>
+  <div><span><b>Gate 的去留</b></span><span>blocked 狀態和 GOOGLE_OAUTH_GATE 設定刪除，只留「已授權但缺 Drive 權限」的提醒。暖機改由加好友與加入群組事件觸發，比現在更早。</span></div>
+</div>
+
+<h2 id="verified">已驗證的事實</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>事實</th><th>對設計的影響</th></tr></thead>
+  <tbody>
+    <tr><td>calendar MCP 2.6.2 每次工具呼叫都重新讀檔、重設憑證；gmail 與 drive 每次呼叫都 <code>open()</code></td><td>回合之間換檔即可，不用重啟容器或 MCP</td></tr>
+    <tr><td>calendar MCP 把檔案裡所有 key 當帳號集合；gmail 與 drive 嚴格用 <code>GOOGLE_ACCOUNT_MODE</code></td><td>成員檔內層只放一個 key，維持房間的 account_key</td></tr>
+    <tr><td>換入的 entry 必須含 <code>access_token</code>，否則 calendar 視為沒帳號</td><td>callback 寫入時一定含 access_token（現行已如此）</td></tr>
+    <tr><td>MCP 刷新後整檔覆寫；calendar 在 fallback 路徑遇到壞 JSON 會刪檔</td><td>成員檔原子寫入；換檔只在回合之間</td></tr>
+    <tr><td>calendar 依名稱找行事曆有 5 分鐘快取，key 是帳號集合</td><td>同 key 換人後 5 分鐘內用名稱找行事曆可能對到前一人；<code>primary</code> 與含 @ 的 id 不受影響。v1 接受，寫進 troubleshooting</td></tr>
+    <tr><td><code>/opt/google-workspace</code> 是整個目錄 rw bind mount</td><td>host 端換 symlink 容器立即可見；symlink 目標用相對路徑</td></tr>
+    <tr><td><code>InboundMessage</code> 是 pydantic model；<code>process_inbound</code> 對訊息無副作用</td><td>pending 可直接序列化存檔、原樣重跑</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="limits">已知限制</h2>
+<div class="callout warn">
+  <div class="eyebrow">群組裡別人可以點 A 的連結</div>
+  <p>Google 的 callback 拿不到 LINE 身分。B 點了 A 的連結並用 B 的 Google 登入，token 會被存成 A 的。第一版靠「連結點名 A」和「A 已完成授權」的公告讓誤綁看得見，擋不住。後續可加開關把連結改推到 A 的私訊：能拿到 A 的 userId 就代表 A 已加好友，一定推得到。</p>
+</div>
+<ul>
+  <li>公告只寫 LINE 顯示名稱，不含 Google email。要顯示 email 得多要一個 scope。</li>
+  <li>「找大家共同空檔」這類跨成員需求刻意不支援：那需要多個成員的 token 同時在場。將來可由 router 對每位成員各跑一回合再彙整。</li>
+  <li>API channel（TUI、開發測試）沒有人可以推播，授權完成後的 pending 直接丟棄。</li>
+</ul>
+
+
+<h2 id="verify">驗證方式</h2>
+<p>實作完成後，router 這邊能自己驗到的部分和只有真人能做的部分要分清楚。</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>層次</th><th>怎麼驗</th><th>誰做</th></tr></thead>
+  <tbody>
+    <tr><td>單元與型別</td><td><code>uv run ruff check . &amp;&amp; uv run mypy src/ &amp;&amp; uv run pytest</code>，每步 commit 前跑</td><td>自動</td></tr>
+    <tr><td>容器層</td><td>起一個房間容器，在 host 換 symlink，<code>docker exec</code> 直接打三個 MCP 的工具，確認讀到換入的 token、刷新後寫回正確的成員檔</td><td>自動</td></tr>
+    <tr><td>訊息層</td><td><code>scripts/test_webhook.py</code> 偽造簽章送群組事件（指定 sender_id）：A 問拿到 A 的連結、B 問拿到 B 的連結、symlink 有換</td><td>自動</td></tr>
+    <tr><td>授權接續</td><td>新增 <code>LINE_API_BASE_URL</code> 設定（預設不變）加一支本機 stub 記錄 reply 與 push；直接寫好成員 token 檔、呼叫 resume hook，確認 pending 被重跑且答案 push 到正確房間</td><td>自動</td></tr>
+    <tr><td>Google 同意畫面</td><td>真手機 LINE 點連結走一次 Google OAuth，Google 這段無法在本機偽造</td><td>人</td></tr>
+    <tr><td>Oregon</td><td>依 upgrade 流程部署後，用真 LINE 跑五個情境</td><td>人</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="steps">實作順序</h2>
+<p>每一步可獨立 commit，測試全綠再進下一步。</p>
+<ol class="steps">
+  <li><div><b>前置</b><small>feat/file-share-links 上 task9 的變更先 commit，本計畫依賴它的 reply seam。從它開 feat/lazy-google-auth。</small></div></li>
+  <li><div><b>LINE API 可指向本機 stub</b><small>LINE_API_BASE_URL 設定與 scripts/line_stub.py，讓 reply 與 push 的內容能在本機看到。小改動，先做，後面每步都用得到。</small></div></li>
+  <li><div><b>成員 token 存放與換檔</b><small>新模組 google_tokens.py：成員檔讀寫、symlink 換檔、既有檔遷移。Settings 加三個路徑。個人房間行為不變。</small></div></li>
+  <li><div><b>OAuth 路由與 gate 逐人化</b><small>/oauth/start 多 member 參數，callback 寫成員檔。刪 blocked、刪 GOOGLE_OAUTH_GATE。_take_turn 接上換檔。</small></div></li>
+  <li><div><b>授權連結 marker</b><small>gmail 與 drive 錯誤文字、system prompt、SKILL.md 加規則。新模組 auth_links.py 在 reply seam 換連結並寫 pending。</small></div></li>
+  <li><div><b>授權完成自動接續</b><small>ChannelAdapter 加 resume；LINE adapter 的回覆函式改成 reply token 可省略；callback 觸發重跑並 push。</small></div></li>
+  <li><div><b>暖機改觸發</b><small>加好友與加入群組事件啟動容器暖機，取代原本 blocked 回合的觸發。</small></div></li>
+  <li><div><b>文件</b><small>PRD FR-06、使用手冊、時序圖、Google 整合摘要、群組設計、架構圖、troubleshooting。</small></div></li>
+  <li><div><b>驗證與部署</b><small>本機 LINE 端對端跑五個情境；容器內確認 symlink；Oregon 依 upgrade 流程，.env 刪 GOOGLE_OAUTH_GATE，rebuild image 送 SKILL.md。</small></div></li>
+</ol>
+</div>
+
+</body>
+</html>

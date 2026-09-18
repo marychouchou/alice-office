@@ -1,6 +1,7 @@
 # Google 授權改版計畫：延遲授權＋群組逐人授權（task10）
 
-狀態：**計畫，尚未實作**（2026-09-18 以 Fable 5.1 擬定；實作交 Sonnet 5／Opus 4.8）。
+狀態：**設計定案，實作中**（2026-09-18 以 Fable 5.1 擬定；實作交 Opus）。
+圖解版（使用者體驗流程、機制圖）：`docs/google-auth-per-member-design.html`。
 實作完成後，本文件的「現況」段落應改寫成設計說明，或併入
 `google-workspace-integration-summary.md`。
 
@@ -166,8 +167,13 @@ write-once config.yaml 不受影響。
 
 ## 5. 實作順序（每步可獨立 commit、測試全綠）
 
-0. **前置**：現在的 `feat/file-share-links` 有 38 個未 commit 的 task9 變更，且 `file_links.py`
-   未追蹤，本計畫依賴它的 seam。先把 task9 commit／合併，再從它開 `feat/lazy-google-auth`。
+0. **前置（已完成 2026-09-18）**：task9 已 commit 在 `feat/file-share-links`，本分支
+   `feat/lazy-google-auth` 從它開出。
+0b. **LINE API 可指向本機 stub**：`Settings.LINE_API_BASE_URL`（預設空＝官方 host）傳給
+   line-bot-sdk 的 `Configuration(host=...)`；`scripts/line_stub.py` 起一個本機 HTTP server
+   記錄 `/v2/bot/message/reply`、`/push` 的 JSON 到 stdout 與檔案，並對 profile／group member
+   查詢回固定假資料。目的：後面每一步的 e2e 都能在本機看到 router 送出了什麼。同 commit 更新
+   `.env.example`、`docker-compose.yml`、`docs/testing-paths.md`。
 1. `google_tokens.py`＋Settings 路徑＋legacy 遷移＋symlink 換檔。1:1 行為不變（成員＝房間）。
    測試：成員檔格式、symlink 相對路徑、原子換檔、遷移、None 身分、disabled no-op。
 2. OAuth routes member 化（start 多 `member` 參數、`_pending` 三元組、callback 寫成員檔）；
