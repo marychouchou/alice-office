@@ -39,6 +39,7 @@ WebFetch），不要憑記憶寫 API 呼叫——這兩個都是會改版的外�
 | 不開手機 LINE 要測 end-to-end 時 | `docs/testing-paths.md` |
 | 服務跑得起來但行為不對、要追 log／容器內 debug 時 | `docs/troubleshooting.md` |
 | 要改 log 輸出格式、加 log 欄位、或部署／擴充集中式 log 堆疊（Loki／Alloy／Grafana）前 | `docs/logging-design.md` |
+| 要實作 task10（延遲授權＋群組逐人授權）前 | `docs/google-auth-per-member-plan.md`（計畫，尚未實作） |
 
 歷史決策紀錄（想知道「為什麼當初這樣做」才讀）：`channel-interface-design.md`、
 `channel-interface-plan.md`、`mcp-plugin-per-room-migration.md`、
