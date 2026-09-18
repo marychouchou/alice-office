@@ -266,6 +266,7 @@ flowchart TD
   vision／STT／檔案工具處理——router 本身不解析媒體內容。
 - `sticker`／`location`：轉成中文佔位文字（如「[使用者傳送了貼圖：...]」）。
 - 其他／未知類型：記一行 log 後略過，不建立背景任務。
+- 反方向（agent 產出的檔案交回給使用者）見 FR-12。
 - 對應：`channels/line/events.py::resolve_inbound_text`。
 
 ### FR-08　長文分段與 Markdown 去除
@@ -321,6 +322,31 @@ flowchart TD
 - 目前只接受純文字 `text` 欄位，不支援媒體上傳，也不支援模擬群組
   （`is_group`／`addressed`／`sender_*` 目前恆為預設值，等同 1:1 訊息）。
 - 對應：`channels/api.py`。
+
+### FR-12　agent 產出的檔案以下載連結交付
+
+身為使用者，我請助理把資料整理成一份檔案之後，要能真的把那個檔案拿到手，而不是看到
+一段打不開的路徑。
+
+- LINE 的出站訊息型別裡**沒有檔案**（只有 text／sticker／image／video／audio／
+  location／imagemap／template／flex），所以檔案一律以下載連結交付。
+- agent 呼叫 `share_file` 工具（`local-tools` plugin），工具把檔案複製到
+  `$HERMES_HOME/outbox/<token>/<檔名>` 並回傳佔位字串 `outbox://<token>`；agent 把它
+  原樣、單獨一行貼進回覆（規則由每回合的 system prompt 下達，既有房間立即生效）。
+- router 在送出前（`core._take_turn` → `file_links.publish_file_links`）驗證那個目錄裡
+  恰好一個一般檔（`O_NOFOLLOW` + `fstat`、大小 ≤ `FILE_LINK_MAX_BYTES`，預設 50 MB）、
+  複製到房間 mount 之外的 `data/_files/<room_id>/<token>/`、刪掉 outbox 那份、順手清掉
+  該房間過期的連結，最後把佔位字串換成 `{PUBLIC_BASE_URL}/files/<room_id>/<token>`。
+- `GET /files/{room_id}/{token}` 只從 `_files/` 出檔，永遠 `Content-Disposition:
+  attachment` + `X-Content-Type-Options: nosniff`；room_id／token 格式錯、查無此檔、
+  非一般檔、超過 `FILE_LINK_TTL_HOURS`（預設 24 小時）一律回同一種 `404`。
+- 權限模型是**能力型連結**：token 256 bit 猜不到，誰拿到連結誰能下載，TTL 限制暴露
+  窗口——與 LINE 原生傳檔同級（收到的人本來就能轉傳）。以身份驗證限制只有房間成員能
+  開是 Phase 2。
+- `PUBLIC_BASE_URL` 留空＝停用：佔位字串換成一句「此部署未設定檔案下載連結」，容器端
+  不知情、行為不變。
+- 對應：`file_links.py`、`src/hermes/plugin/local-tools/`（`share_file`）、
+  [`docs/file-share-design.md`](file-share-design.md)。
 
 ## 5. 非功能需求
 
@@ -406,7 +432,7 @@ flowchart TD
 
 | 項目 | 說明 |
 |---|---|
-| Outbound media | Agent 主動產生的圖片／語音／影片送回 LINE；需要新協定（agent 寫檔 + marker）+ router 自建簽名 token 檔案伺服端點 + 公開 HTTPS URL |
+| Outbound media（image/video/audio message） | Agent 主動產生的圖片／語音／影片以 LINE 原生的 image/video/audio message 送回（縮圖預覽、可在聊天視窗內播放）。**檔案本身已有出路**（FR-12：`share_file` + `GET /files/…` 下載連結），缺的只是把圖片改用 image message 而非連結呈現 |
 | Slow-LLM postback 按鈕 | Quick reply／postback event 處理 |
 | 引用回覆偵測 | 使用者「回覆」bot 訊息視同點名，需簿記 `sentMessages[].id` 對 `quotedMessageId` |
 | 自動以 OA displayName 當呼叫詞 | 目前呼叫詞須手動設定 `GROUP_TRIGGER_PREFIXES` |
@@ -452,6 +478,7 @@ flowchart TD
 - [`docs/google-workspace-integration-summary.md`](google-workspace-integration-summary.md) — Google OAuth 整合架構決策
 - [`docs/hermes-agent-line-gateway-comparison.md`](hermes-agent-line-gateway-comparison.md) — 為何不用 Hermes 內建 LINE gateway、Phase 2 缺口清單
 - [`docs/router-hermes-agent-protocol.md`](router-hermes-agent-protocol.md) — router ↔ container HTTP 協定
+- [`docs/file-share-design.md`](file-share-design.md) — agent 產出的檔案怎麼交給使用者（FR-12）
 - [`docs/env-data-paths.md`](env-data-paths.md) — 環境變數與路徑
 - [`docs/testing-paths.md`](testing-paths.md) — 端到端測試方式
 - [`docs/troubleshooting.md`](troubleshooting.md) — 運行期 debug

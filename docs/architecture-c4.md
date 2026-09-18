@@ -84,7 +84,8 @@ flowchart TB
   subgraph alice["Alice Office"]
     router["<b>Alice Office Router</b><br/>[Container: Python 3.12 / FastAPI]<br/><i>驗簽、解析各 channel wire format、事件 dedup、<br/>Google OAuth gate、群組 addressed/observe 判斷、<br/>session-epoch 輪替、依 room_key 分派到房間容器、<br/>把回覆送回房間</i>"]:::container
     hermes["<b>Hermes Agent 容器（每房間一個）</b><br/>[Container: Docker image nousresearch/hermes-agent]<br/><i>hermes_&lt;room_key&gt;，port 8642；gateway + 該房間自己的<br/>MCP servers / plugins / skills；容器間互不相通<br/>（內部行程結構見下方放大圖）</i>"]:::container
-    roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens、<br/>group_state/（observed buffer）、<br/>router_state/（session epoch）、<br/>logs/*.log——每房間各自一份</i>")]:::container
+    roomdata[("<b>房間資料 data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>host 目錄 bind mount → /opt/data（HERMES_HOME）<br/>sessions、skills、kanban.db、state.db、config.yaml、<br/>mcp/、plugins/、Google tokens、<br/>group_state/（observed buffer）、<br/>router_state/（session epoch）、<br/>outbox/（agent 要交給使用者的檔案）、<br/>logs/*.log——每房間各自一份</i>")]:::container
+    pubfiles[("<b>已發佈檔案 data/_files/&lt;room_key&gt;/</b><br/>[Container: 檔案系統（data store）]<br/><i>router 專屬，<b>不在任何房間的 mount 內</b>；<br/>agent 的 outbox 檔驗證後複製到這裡，<br/>GET /files/… 只從這裡出檔，TTL 過期即刪</i>")]:::container
 
     subgraph logging["選配 profile：集中式 log（deploy/logging/，預設不啟用；自己的 logging_net，不接 hermes_global_net）"]
       alloy["<b>Alloy</b><br/>[Container: grafana/alloy v1.19]<br/><i>discovery.docker 依 alice.role label 動態發現容器並收 stdout；<br/>local.file_match tail 每房間的 logs/*.log；<br/>relabel 成 service / room_id / container / source / file / level</i>"]:::container
@@ -98,10 +99,12 @@ flowchart TB
   router -- "Reply → Push fallback、下載媒體<br/>（linebot SDK / HTTPS）" --> line
   dev -- "POST /webhooks/api/messages<br/>（HTTPS + Bearer token）" --> router
   employee -- "/oauth/start、/oauth/callback<br/>（瀏覽器 / HTTPS）" --> router
+  employee -- "點回覆裡的下載連結<br/>GET /files/&lt;room_key&gt;/&lt;token&gt;（瀏覽器 / HTTPS）" --> router
   router -- "OAuth 2.0 以 code 換取 token（HTTPS）" --> google
   router -- "建立 / 啟動 / 查詢 hermes_&lt;room_key&gt;<br/>（docker SDK，只在 container_manager.py）" --> docker
   router -- "POST /v1/chat/completions<br/>（HTTP，session id = room_key，HERMES_API_SERVER_KEY）" --> hermes
-  router -- "write-once seed（config.yaml、mcp/、plugins/、SOUL.md）<br/>tokens.json／observed.jsonl／session.json 讀寫（檔案系統）" --> roomdata
+  router -- "write-once seed（config.yaml、mcp/、plugins/、SOUL.md）<br/>tokens.json／observed.jsonl／session.json 讀寫（檔案系統）<br/>讀 outbox/&lt;token&gt;/ 並清掉（檔案系統）" --> roomdata
+  router -- "驗證後複製、TTL 過期清除、出檔（檔案系統）" --> pubfiles
   hermes -- "HERMES_HOME 讀寫（bind mount）；<br/>每次開機自行補齊 sessions / skills / db" --> roomdata
   hermes -- "chat completions（HTTPS）" --> llm
   hermes -- "Calendar / Gmail / Drive MCP 以房間 token 呼叫（HTTPS）" --> google
@@ -167,9 +170,10 @@ flowchart TB
   docker["<b>Docker Engine</b><br/>[Software System：外部]"]:::ext
   hermes["<b>Hermes Agent 容器</b><br/>[Container]<br/><i>hermes_&lt;room_key&gt;:8642</i>"]:::container
   roomdata[("<b>data/&lt;room_key&gt;/</b><br/>[Container: 檔案系統]")]:::container
+  pubfiles[("<b>data/_files/&lt;room_key&gt;/</b><br/>[Container: 檔案系統，房間 mount 之外]")]:::container
 
   subgraph router["Alice Office Router（FastAPI process）"]
-    main["<b>main</b><br/>[Component: FastAPI app]<br/><i>組裝：enabled_adapters 掛到 /webhooks/&lt;name&gt;<br/>（LINE 另掛舊 /webhook）＋ oauth_router</i>"]:::comp
+    main["<b>main</b><br/>[Component: FastAPI app]<br/><i>組裝：enabled_adapters 掛到 /webhooks/&lt;name&gt;<br/>（LINE 另掛舊 /webhook）＋ oauth_router ＋ files_router</i>"]:::comp
     registry["<b>channels.enabled_adapters</b><br/>[Component: Python 函式]<br/><i>靜態 registry：LINE 恆啟用；<br/>API channel 依 API_CHANNEL_TOKEN 決定</i>"]:::comp
     line_adapter["<b>channels.line — LineAdapter</b><br/>[Component: FastAPI router + linebot SDK]<br/><i>verify（HMAC 驗簽）｜events（wire format 解析＋<br/>媒體/貼圖/位置→佔位文字、mention_is_self 判斷）｜<br/>profiles（群組成員顯示名稱查詢，15 分鐘 TTL cache）｜<br/>dedup（事件去重）｜client（Reply → Push fallback）｜<br/>format（長度/則數切分）；addressed＝mention∨呼叫詞，<br/>判斷邏輯在 adapter 本身（_is_addressed）</i>"]:::comp
     api_adapter["<b>channels.api — ApiChannelAdapter</b><br/>[Component: FastAPI router]<br/><i>Bearer 驗證；room_key 形狀白名單<br/>（line_* / api_*）；同步回傳原始 markdown</i>"]:::comp
@@ -180,6 +184,7 @@ flowchart TB
     cm["<b>container_manager</b><br/>[Component: Python 模組 + docker SDK]<br/><i>get_or_create_container：docker 生命週期＋<br/>config.yaml 渲染；呼叫 room_seed 完成房間初始化</i>"]:::comp
     room_seed["<b>room_seed</b><br/>[Component: Python 模組，無 docker SDK]<br/><i>ensure_mcp_seed／ensure_plugin_seed／ensure_soul_seed／<br/>ensure_google_seed：write-once 複製 template／deployment<br/>secrets 到 data/&lt;room_id&gt;/，已存在就跳過</i>"]:::comp
     hc["<b>hermes_client</b><br/>[Component: httpx client]<br/><i>ask_hermes_agent：POST /v1/chat/completions，<br/>session id 依 epoch 衍生，維持對話連續性</i>"]:::comp
+    flinks["<b>file_links</b><br/>[Component: Python 模組 + FastAPI router]<br/><i>publish_file_links：把回覆裡的 outbox://&lt;token&gt; 驗證、<br/>複製到 _files/、改寫成下載網址｜<br/>GET /files/&lt;room&gt;/&lt;token&gt;：只從 _files/ 出檔，<br/>attachment + nosniff，逾 TTL 一律 404</i>"]:::comp
   end
 
   main -- "啟動時取得啟用的 adapters" --> registry
@@ -194,6 +199,9 @@ flowchart TB
   core -- "peek/record/clear observed buffer、<br/>組 prompt、判斷 silence" --> group_ctx
   core -- "check_reset_command／reset_session（手動重置）、<br/>begin_turn／complete_turn（自動輪替、epoch 讀寫）" --> sess_hyg
   core -- "ask_hermes_agent(url, session_id, text)" --> hc
+  core -- "publish_file_links(reply_text, room_key)<br/>→ 已改寫成下載網址的文字" --> flinks
+  flinks -- "讀 outbox/&lt;token&gt;/（O_NOFOLLOW）並清掉" --> roomdata
+  flinks -- "複製、出檔、掃過期" --> pubfiles
   cm -- "docker SDK" --> docker
   cm -- "ensure_mcp_seed／ensure_plugin_seed／<br/>ensure_soul_seed／ensure_google_seed" --> room_seed
   room_seed -- "write-once seed" --> roomdata

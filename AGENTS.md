@@ -30,6 +30,7 @@ WebFetch），不要憑記憶寫 API 呼叫——這兩個都是會改版的外�
 | 改群組聊天「該回覆／該旁觀」的判斷機制前 | `docs/group-chat-design.md` |
 | 追訊息解析、去重、批次的實作細節 | `docs/line-hermes-message-flow.md` |
 | 改 router ↔ 容器內 agent 的 HTTP 協定前 | `docs/router-hermes-agent-protocol.md` |
+| 改 agent 把檔案交給使用者的機制（`share_file`／`outbox://`／`/files/` 下載連結／TTL／權限邊界）前 | `docs/file-share-design.md` |
 | 要設定或除錯 Google Workspace 整合（Calendar／Gmail／Drive OAuth）前 | `docs/google-workspace-setup.md` |
 | 改 session epoch 輪替／交接摘要／`/new` 重置／閒置與 token 門檻前 | `docs/session-hygiene.md` |
 | 搞不清 `DATA_DIR`／`HOST_DATA_DIR`／`HERMES_TEMPLATES_DIR` 誰是誰 | `docs/env-data-paths.md` |

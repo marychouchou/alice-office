@@ -302,7 +302,17 @@ sequenceDiagram
 - **隔離靠 container，不靠協定**：協定本身（Bearer + session header）很單純，
   真正的房間隔離來自「一個 room_id 一個 Docker container」這個更外層的設計。
 - **container 對 LINE 零知情**：不傳憑證、不傳 LINE 專屬欄位，agent 收到的只是
-  「文字 + session id」，出站媒體、回覆分段、Markdown 清理等 LINE 專屬邏輯全部
-  留在 router 端處理。
+  「文字 + session id」，回覆分段、Markdown 清理等 LINE 專屬邏輯全部留在 router
+  端處理。
+- **出站檔案走 `outbox://` 佔位字串**（見 `docs/file-share-design.md`）：LINE 不允許
+  bot 傳檔案，所以 agent 要交檔案給使用者時呼叫 `share_file` 工具，工具把檔案複製到
+  `$HERMES_HOME/outbox/<token>/<檔名>`（router 端的 `data/<room_id>/outbox/…`）並回傳
+  佔位字串 `outbox://<token>`，agent 原樣貼進回覆。router 在 `core._take_turn` 送出前
+  （`file_links.publish_file_links`）驗證那個目錄裡恰好一個一般檔（`O_NOFOLLOW` +
+  `fstat` + 大小上限）、複製到房間 mount 之外的 `data/_files/<room_id>/<token>/`、刪掉
+  outbox 那份，最後把佔位字串換成 `{PUBLIC_BASE_URL}/files/<room_id>/<token>`。
+  檔案系統是這條路的唯一介面：**容器不需要知道自己的 room_id 或 router 的公開網址，
+  所以沒有新增任何容器 env，既有房間不必重建**；沒設 `PUBLIC_BASE_URL` 時 router 把
+  佔位字串換成一句「未設定」提示，容器端一樣不知情。
 - **媒體走檔案系統、不走 API body**：避免疊床架屋改用 base64 多模態，也繞開了
   `api_server` 本身不支援 file/audio/video content part 的限制。
