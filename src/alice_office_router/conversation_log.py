@@ -140,9 +140,10 @@ class TurnEnvelope(BaseModel):
             the channel resolved one.
         sender_name: JSONL only (never logged). The group speaker's display
             name, if resolved.
-        gate_status: The Google OAuth gate's verdict ("ok"/"notice"; also
-            "blocked" in envelopes written before 2026-09-18), or None when
-            the gate was short-circuited (observe, reset).
+        gate_status: The Google OAuth gate's verdict ("ok"/"notice"),
+            "auth_link" when the reply carried an authorization link, "blocked"
+            in envelopes written before 2026-09-18, or None when the gate was
+            short-circuited (observe, reset).
         rotated: Whether this turn rotated the room to a fresh session epoch.
         agent_duration_ms: Wall time of the agent HTTP call, or None if no call
             was made.

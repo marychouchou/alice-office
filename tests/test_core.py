@@ -338,6 +338,40 @@ async def test_a_speaker_without_a_google_token_still_reaches_the_agent(
     assert warmups == {}
 
 
+async def test_auth_marker_in_a_reply_becomes_the_speaker_s_authorization_link(
+    tmp_path: Path,
+) -> None:
+    """A Google tool that reported "no token" ends as a clickable link, not a placeholder."""
+    from alice_office_router.auth_links import AUTH_MARKER
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path, PUBLIC_BASE_URL="https://router.example.com")
+    settings.google_web_creds_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.google_web_creds_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text=f"要看你的行事曆，先授權：\n{AUTH_MARKER}")),
+        ),
+    ):
+        result = await process_inbound(_msg("明天有什麼會"), settings)
+
+    assert result.texts == [
+        "要看你的行事曆，先授權：\n請點此連結 Google 帳號（只會連結你自己的帳號）：\n"
+        "https://router.example.com/oauth/start"
+        "?user_id=line_room_AAA&member=line_room_aaa"
+    ]
+    # The issued link outranks the gate's own "ok" in the turn envelope.
+    assert result.envelope.gate_status == "auth_link"
+    # The question is parked for the resume step to re-run after authorization.
+    assert settings.room_pending_auth_path("line_room_AAA", "line_room_aaa").exists()
+
+
 async def test_an_unidentified_group_speaker_still_reaches_the_agent(tmp_path: Path) -> None:
     """A group speaker LINE won't name has no token by definition — and is not gated for it."""
     from alice_office_router.core import process_inbound

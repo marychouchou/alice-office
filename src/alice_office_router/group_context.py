@@ -51,6 +51,9 @@ GROUP_SYSTEM_PROMPT = (
     "如果你判斷這則訊息其實不需要回應，請只輸出 NO_REPLY。"
     "要把檔案交給使用者只能用 share_file 工具，把它回傳的 outbox://… 連結原樣單獨一行貼在回覆裡；"
     "直接貼檔案路徑或 MEDIA: 標籤使用者看不到。"
+    "任何 Google 工具（行事曆／Gmail／Drive）回報沒有 token、未授權或找不到已驗證帳號時，"
+    "在回覆裡把 google-auth://request 原樣單獨一行放上，並簡短說明你需要授權做什麼；"
+    "不要自己編授權網址。"
 )
 
 # Ephemeral system message layered on top of the room's core prompt for one 1:1
@@ -72,6 +75,9 @@ DIRECT_SYSTEM_PROMPT = (
     "先用工具（例如 image_ocr）重新讀取檔案，不要憑印象作答。\n"
     "- 要把檔案交給使用者只能用 share_file 工具，把它回傳的 outbox://… 連結原樣單獨一行貼在回覆裡；"
     "直接貼檔案路徑或 MEDIA: 標籤使用者看不到。\n"
+    "- 任何 Google 工具（行事曆／Gmail／Drive）回報沒有 token、未授權或找不到已驗證帳號時，"
+    "在回覆裡把 google-auth://request 原樣單獨一行放上，並簡短說明你需要授權做什麼；"
+    "不要自己編授權網址。\n"
     "- 不確定或資訊不足就直接問使用者，不要編造。"
 )
 

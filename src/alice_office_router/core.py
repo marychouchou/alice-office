@@ -27,6 +27,7 @@ import structlog
 from pydantic import ValidationError
 from structlog.contextvars import bound_contextvars
 
+from alice_office_router.auth_links import publish_auth_links
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import get_or_create_container
@@ -383,7 +384,8 @@ class RouteResult:
     Attributes:
         texts: Texts to send back to the room, in delivery order.
         outcome: How the turn ended (see conversation_log.Outcome).
-        gate_status: The Google OAuth gate's verdict, or None when the gate
+        gate_status: The Google OAuth gate's verdict, "auth_link" when the
+            reply carried an authorization link instead, or None when the gate
             was short-circuited (observe, reset).
         session_id: The session id sent to Hermes, if an agent call was made.
         rotated: Whether this turn rotated the room's session epoch.
@@ -708,7 +710,16 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         # still inside the room's lock — so publishing a file is serialized
         # against the room's next turn (file_links.publish_file_links). The
         # notices above never carry a marker, which is why they skip it.
-        texts.append(await publish_file_links(turn.text, msg.room_key, config))
+        text = await publish_file_links(turn.text, msg.room_key, config)
+        # Second seam, same lock, same reason: a Google tool that reported "no
+        # token" made the agent paste google-auth://request, which only the
+        # router can turn into this speaker's own authorization link
+        # (auth_links.publish_auth_links). An issued link outranks whatever
+        # the gate had to say — the turn's headline is now "go authorize".
+        text, requested = await publish_auth_links(text, msg, config)
+        if requested:
+            status = "auth_link"
+        texts.append(text)
     return RouteResult(
         texts=texts,
         outcome=turn.outcome,
