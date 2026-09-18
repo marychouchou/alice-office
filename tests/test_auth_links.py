@@ -213,6 +213,33 @@ async def test_a_longer_run_of_marker_characters_is_not_a_marker(tmp_path: Path)
     assert requested is False
 
 
+async def test_a_fabricated_query_string_right_after_the_marker_is_discarded(
+    tmp_path: Path,
+) -> None:
+    """A `?scope=...` the agent invents and glues onto the marker must not survive.
+
+    Observed in practice: the agent imitates a real OAuth URL by appending its
+    own query string directly after the marker with no separating whitespace.
+    Left unmatched, that tail would stick to the *real* link with no
+    separator (`...&member=line_u...?scope=calendar&prompt=consent`),
+    corrupting the `member` query value into gibberish and turning a working
+    link into a 400. The whole fabricated tail must be swallowed by the same
+    substitution, not just the bare marker.
+    """
+    settings = _settings(tmp_path)
+    text = f"請點這裡：{AUTH_MARKER}?scope=calendar&prompt=consent 完成後告訴我。"
+
+    result, requested = await publish_auth_links(text, _direct_msg(), settings)
+
+    assert requested is True
+    assert "?scope=calendar" not in result
+    assert "prompt=consent" not in result
+    assert f"user_id={ROOM}&member={ROOM_MEMBER}" in result
+    # Nothing but the marker's own tail was consumed — surrounding text stays.
+    assert result.startswith("請點這裡：")
+    assert result.endswith("完成後告訴我。")
+
+
 # ---------------------------------------------------------------------------
 # pending records
 # ---------------------------------------------------------------------------

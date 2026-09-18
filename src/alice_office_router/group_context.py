@@ -55,7 +55,7 @@ GROUP_SYSTEM_PROMPT = (
     "任何 Google 工具（行事曆／Gmail／Drive）失敗而原因跟憑證有關時——沒有 token、未授權、"
     "找不到已驗證帳號、tokens are no longer valid、re-authenticate、restart the server、"
     "授權已過期、憑證失效，都算——一律在回覆裡把 google-auth://request 原樣單獨一行放上，"
-    "並簡短說明你需要授權做什麼；不要自己編授權網址，也不要只叫使用者自己去設定裡重新授權。"
+    "並簡短說明你需要授權做什麼；那一行只能有這個字串，不要自己編授權網址，不要在後面加任何符號或參數（例如 ?scope=…），也不要只叫使用者自己去設定裡重新授權。"
 )
 
 # Ephemeral system message layered on top of the room's core prompt for one 1:1
@@ -81,7 +81,7 @@ DIRECT_SYSTEM_PROMPT = (
     "- 任何 Google 工具（行事曆／Gmail／Drive）失敗而原因跟憑證有關時——沒有 token、未授權、"
     "找不到已驗證帳號、tokens are no longer valid、re-authenticate、restart the server、"
     "授權已過期、憑證失效，都算——一律在回覆裡把 google-auth://request 原樣單獨一行放上，"
-    "並簡短說明你需要授權做什麼；不要自己編授權網址，也不要只叫使用者自己去設定裡重新授權。\n"
+    "並簡短說明你需要授權做什麼；那一行只能有這個字串，不要自己編授權網址，不要在後面加任何符號或參數（例如 ?scope=…），也不要只叫使用者自己去設定裡重新授權。\n"
     "- 不確定或資訊不足就直接問使用者，不要編造。"
 )
 

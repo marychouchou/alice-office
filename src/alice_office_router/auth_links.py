@@ -57,7 +57,17 @@ AUTH_MARKER = "google-auth://request"
 # Matched as a whole token, so `google-auth://requests` (or any longer run of
 # marker characters) is left alone — same trailing-lookahead reason as
 # file_links._MARKER_RE, where \b would not do the job.
-_MARKER_RE = re.compile(re.escape(AUTH_MARKER) + r"(?![A-Za-z0-9_-])")
+#
+# The optional `(?:[?#][^\s]*)?` also swallows anything the agent tacks on
+# immediately after the marker with no separating whitespace — observed in
+# practice as a fabricated `?scope=calendar&prompt=consent` suffix, imitating
+# a real OAuth URL it has seen in training. Left unmatched, that suffix would
+# survive substitution stuck directly onto the real link with no separator
+# (`...&member=line_u_t10_old?scope=calendar&prompt=consent`), corrupting the
+# `member` query value and turning a working link into a 400. Consuming it
+# here means the whole fabricated tail is discarded along with the marker, so
+# only the router's own URL reaches the user.
+_MARKER_RE = re.compile(re.escape(AUTH_MARKER) + r"(?:[?#][^\s]*)?(?![A-Za-z0-9_-])")
 
 # Shown in place of a marker when LINE would not tell us who spoke: a group
 # member who never added the OA as a friend has no userId we can key a token
