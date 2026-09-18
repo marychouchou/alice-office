@@ -174,6 +174,9 @@ write-once config.yaml 不受影響。
    記錄 `/v2/bot/message/reply`、`/push` 的 JSON 到 stdout 與檔案，並對 profile／group member
    查詢回固定假資料。目的：後面每一步的 e2e 都能在本機看到 router 送出了什麼。同 commit 更新
    `.env.example`、`docker-compose.yml`、`docs/testing-paths.md`。
+0c. **測試工具**：`scripts/test_webhook.py` 加 `--sender-id`／`--mention`／`--event follow|join`；
+   `scripts/google_reauth.py` 加 `--member`；`scripts/simulate_oauth.py`（本機直接觸發
+   `on_authorized` hook，跳過 Google）。見 §6b。
 1. `google_tokens.py`＋Settings 路徑＋legacy 遷移＋symlink 換檔。1:1 行為不變（成員＝房間）。
    測試：成員檔格式、symlink 相對路徑、原子換檔、遷移、None 身分、disabled no-op。
 2. OAuth routes member 化（start 多 `member` 參數、`_pending` 三元組、callback 寫成員檔）；
@@ -206,6 +209,45 @@ write-once config.yaml 不受影響。
 - 容器內：`docker exec hermes_<room> ls -l /opt/google-workspace/` 確認 symlink 解析正確。
 - Oregon 部署：依 memory 的 upgrade 流程；`.env` 刪 `GOOGLE_OAUTH_GATE`；rebuild image
   才能把 SKILL.md 送到既有房間（system prompt 的規則不用 rebuild 就生效）。
+
+## 6b. 測試計畫（逐情境）
+
+前置工具（列入 §5 step 0c）：
+- `scripts/test_webhook.py` 群組訊息加 `--sender-id`（`source.userId`）與 `--mention`（在 text
+  前加對 bot 的 mention，讓 `addressed` 為真）；另加 `--event follow|join` 送非訊息事件。
+- `scripts/google_reauth.py` 加 `--member <member_key>`，改寫 `members/<member_key>.json`
+  （預設 member＝房間 account_key，等於舊行為）。
+- 本機 LINE stub（§5 step 0b）：`uv run python scripts/line_stub.py`，router 用
+  `LINE_API_BASE_URL=http://localhost:8099` 啟動；所有 reply／push 都在 `data/_line_stub/requests.jsonl`。
+- 真 Google token 來源：本機既有房間的成員檔（`data/<room>/google/members/*.json`）複製一份即可，
+  不用每次走瀏覽器。
+
+記號：`R1`＝個人房 `U_T10_ALICE`；`G1`＝群組 `C_T10_GROUP`，成員 `U_T10_A`、`U_T10_B`。
+`M(x)`＝`account_key(x)`。每個情境跑完都看三樣：stub 記錄的回覆、`ls -l data/<room>/google/`、
+`data/<room>/router_state/` 底下的 pending 與 turn envelope（`gate_status`）。
+
+| # | 情境 | 步驟 | 預期 |
+|---|---|---|---|
+| T1 | 個人房、無 token、非 Google 問題 | `test_webhook.py --user-id U_T10_ALICE --text "今天幾號"` | 直接回答；envelope `gate_status=ok`、`outcome=replied`；`tokens.json -> members/line_u_t10_alice.json`（目標不存在） |
+| T2 | 個人房、無 token、Google 問題 | 同上 `--text "明天有什麼會議"` | 回覆含 `/oauth/start?user_id=U_T10_ALICE&member=line_u_t10_alice`，不含 `google-auth://`；`pending_auth/line_u_t10_alice.json` 存在，內容＝原 InboundMessage；`gate_status=auth_link` |
+| T3 | 授權完成自動接續 | 把真 token 複製成 `members/line_u_t10_alice.json`，再呼叫 hook：`curl /oauth/callback` 走不通（要 Google code），改用 `uv run python -c` 直接 `await core.resume_pending_auth(...)`，或在 stub 模式提供 `scripts/simulate_oauth.py` | stub 收到一則 **push**（非 reply）到 `U_T10_ALICE`，內容是行事曆答案；pending 檔被刪；再跑一次 hook 不會重送 |
+| T4 | pending 過期 | 寫 pending 後把 ts 改成 11 分鐘前，跑 T3 的 hook | 不重跑、無 push、pending 被刪、log 一行 info |
+| T5 | 群組 A／B 各自拿連結 | `--group-id C_T10_GROUP --sender-id U_T10_A --mention --text "明天有什麼會"`；再以 `U_T10_B` 問信件 | 兩則回覆各含 `member=u_t10_a`／`member=u_t10_b`，開頭有各自的 `sender_name`；兩次 turn 之間 `tokens.json` 的 readlink 由 `members/u_t10_a.json` 變 `members/u_t10_b.json` |
+| T6 | 群組只有 A 授權 | 把真 token 複製成 `members/u_t10_a.json`；A 問行事曆；B 問行事曆 | A 得到答案；B 仍拿到自己的連結；`members/u_t10_b.json` 不存在 |
+| T7 | 群組匿名發話者 | `--group-id C_T10_GROUP --mention --text "明天有什麼會"`（不給 sender-id） | 固定提示「LINE 沒提供你的身分…」，不含連結；`tokens.json -> members/_anonymous.json`；不寫 pending |
+| T8 | 群組未點名 | 同 T5 但不加 `--mention` | `outcome=observed`，不換 symlink、不呼叫 agent |
+| T9 | 既有房間遷移 | 在新房目錄先放一般檔 `google/tokens.json`（真 token，key＝`M(room)`），再送一則訊息 | `tokens.json` 變 symlink → `members/line_u….json`，內容就是原本那份；Google 問題直接有答案 |
+| T10 | 缺 Drive scope | 成員檔的 `scope` 拿掉 drive，問 Gmail | 先一則 notice（連結含 `member=`），再一則答案；`gate_status=notice` |
+| T11 | 容器層：換檔真的生效 | 房間容器跑著，host 端 `select_member_tokens` 切到 A，`docker exec hermes_<G1>` 用 `/opt/tools/.venv/bin/python` 走 stdio 對 gmail MCP 呼叫 `tools/call`（profile 類唯讀工具）；切到 B（無檔）再呼叫 | A：回 Google 資料；B：回 `Error: No token found…` 且文字含 `google-auth://request` |
+| T12 | 容器層：刷新寫回成員檔 | 把 A 成員檔的 `expiry_date` 改成過去，重做 T11 的 A | 呼叫成功；`members/u_t10_a.json` 的 mtime 更新、`tokens.json` 仍是 symlink |
+| T13 | 暖機觸發 | `--event follow --user-id U_T10_NEW`；`--event join --group-id C_T10_NEW` | `docker ps` 幾秒內出現 `hermes_line_…`；log 有 `Agent warm` |
+| T14 | API channel 不推播 | 用 `/webhooks/api/messages` 問 Google 問題後跑 T3 的 hook | 回覆含連結；hook 只記 log、不重跑 |
+| T15 | 人工：真 LINE | 手機 1:1 問行事曆 → 點連結 → Google 同意 → 回 LINE | 不用再傳，答案自己出現；群組再做一次 T5 的兩人流程 |
+| T16 | 人工：Oregon | 依 upgrade 流程部署後重做 T15；`.env` 刪 `GOOGLE_OAUTH_GATE` | 同 T15；既有 Oregon 房間第一則訊息後目錄完成遷移 |
+
+單元測試對應：T1–T2／T5–T8 在 `tests/test_core.py`、`tests/test_auth_links.py`；T3–T4／T14 在
+`tests/test_core.py`（stub adapter）；T9／T11 的 host 端邏輯在 `tests/test_google_tokens.py`；
+T10 在 `tests/test_google_oauth.py`。
 
 ## 7. 已知限制與後續
 

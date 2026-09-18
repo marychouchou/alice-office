@@ -472,11 +472,40 @@ data/&lt;room&gt;/router_state/pending_auth/
 </table>
 </div>
 
+<h2 id="testplan">測試計畫（逐情境）</h2>
+<p>記號：<code>R1</code> 是個人房 <code>U_T10_ALICE</code>；<code>G1</code> 是群組 <code>C_T10_GROUP</code>，成員 <code>U_T10_A</code>、<code>U_T10_B</code>。每個情境跑完看三樣：stub 記錄的回覆、<code>ls -l data/&lt;room&gt;/google/</code>、<code>router_state/</code> 底下的 pending 與 turn envelope。</p>
+<p>前置工具：偽造 webhook 腳本要加 <code>--sender-id</code>、<code>--mention</code>、<code>--event follow|join</code>；<code>google_reauth.py</code> 要加 <code>--member</code>；另加一支 <code>simulate_oauth.py</code> 在本機直接觸發授權完成的 hook，跳過 Google。真 Google token 從本機既有房間的成員檔複製即可。</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>#</th><th>情境</th><th>步驟</th><th>預期</th></tr></thead>
+  <tbody>
+    <tr><td>T1</td><td>個人房、無 token、非 Google 問題</td><td>送「今天幾號」</td><td>直接回答；envelope gate_status=ok；tokens.json 已是 symlink，目標不存在</td></tr>
+    <tr><td>T2</td><td>個人房、無 token、Google 問題</td><td>送「明天有什麼會議」</td><td>回覆含 <code>/oauth/start?user_id=U_T10_ALICE&amp;member=line_u_t10_alice</code>，不含 marker；pending 檔存在；gate_status=auth_link</td></tr>
+    <tr><td>T3</td><td>授權完成自動接續</td><td>把真 token 複製成成員檔，跑 simulate_oauth</td><td>stub 收到一則 push（不是 reply），內容是行事曆答案；pending 被刪；再跑一次不重送</td></tr>
+    <tr><td>T4</td><td>pending 過期</td><td>pending 的 ts 改成 11 分鐘前，再跑 T3</td><td>不重跑、無 push、pending 被刪、一行 info log</td></tr>
+    <tr><td>T5</td><td>群組 A、B 各自拿連結</td><td>A 點名問行事曆；B 點名問信件</td><td>兩則回覆各含 member=u_t10_a、member=u_t10_b，開頭有各自名字；兩回合之間 symlink 目標由 A 換成 B</td></tr>
+    <tr><td>T6</td><td>群組只有 A 授權</td><td>真 token 放進 members/u_t10_a.json；A 問；B 問</td><td>A 得到答案；B 仍拿到自己的連結；B 的成員檔不存在</td></tr>
+    <tr><td>T7</td><td>群組匿名發話者</td><td>點名但不給 sender-id</td><td>固定提示「LINE 沒提供你的身分…」，不含連結；symlink 指向 _anonymous；不寫 pending</td></tr>
+    <tr><td>T8</td><td>群組未點名</td><td>同 T5 但不 mention</td><td>outcome=observed；不換 symlink、不呼叫 agent</td></tr>
+    <tr><td>T9</td><td>既有房間遷移</td><td>新房目錄先放一般檔 tokens.json（真 token），再送一則訊息</td><td>tokens.json 變 symlink，內容搬到 members/line_u….json；Google 問題直接有答案</td></tr>
+    <tr><td>T10</td><td>缺 Drive scope</td><td>成員檔 scope 拿掉 drive，問 Gmail</td><td>先一則 notice（連結含 member），再一則答案；gate_status=notice</td></tr>
+    <tr><td>T11</td><td>容器層：換檔生效</td><td>host 切到 A，docker exec 走 stdio 對 gmail MCP 呼叫唯讀工具；切到 B（無檔）再呼叫</td><td>A 回 Google 資料；B 回 Error: No token found，且文字含 google-auth://request</td></tr>
+    <tr><td>T12</td><td>容器層：刷新寫回成員檔</td><td>A 成員檔 expiry_date 改成過去，重做 T11 的 A</td><td>呼叫成功；members/u_t10_a.json 的 mtime 更新；tokens.json 仍是 symlink</td></tr>
+    <tr><td>T13</td><td>暖機觸發</td><td>送 follow 事件；送 join 事件</td><td>docker ps 幾秒內出現該房容器；log 有 Agent warm</td></tr>
+    <tr><td>T14</td><td>API channel 不推播</td><td>用 API channel 問 Google 問題後跑 T3</td><td>回覆含連結；hook 只記 log、不重跑</td></tr>
+    <tr><td>T15</td><td>人工：真 LINE</td><td>手機 1:1 問行事曆 → 點連結 → Google 同意 → 回 LINE；群組再做一次 T5</td><td>不用再傳，答案自己出現</td></tr>
+    <tr><td>T16</td><td>人工：Oregon</td><td>依 upgrade 流程部署後重做 T15；.env 刪 GOOGLE_OAUTH_GATE</td><td>同 T15；既有房間第一則訊息後完成遷移</td></tr>
+  </tbody>
+</table>
+</div>
+<p>T1 到 T14 全部能由 router 這邊自動跑完，T15、T16 需要真人與真手機。</p>
+
 <h2 id="steps">實作順序</h2>
 <p>每一步可獨立 commit，測試全綠再進下一步。</p>
 <ol class="steps">
   <li><div><b>前置</b><small>feat/file-share-links 上 task9 的變更先 commit，本計畫依賴它的 reply seam。從它開 feat/lazy-google-auth。</small></div></li>
   <li><div><b>LINE API 可指向本機 stub</b><small>LINE_API_BASE_URL 設定與 scripts/line_stub.py，讓 reply 與 push 的內容能在本機看到。小改動，先做，後面每步都用得到。</small></div></li>
+  <li><div><b>測試工具</b><small>偽造 webhook 腳本加 sender-id、mention、follow/join 事件；google_reauth.py 加 member；新增 simulate_oauth.py。</small></div></li>
   <li><div><b>成員 token 存放與換檔</b><small>新模組 google_tokens.py：成員檔讀寫、symlink 換檔、既有檔遷移。Settings 加三個路徑。個人房間行為不變。</small></div></li>
   <li><div><b>OAuth 路由與 gate 逐人化</b><small>/oauth/start 多 member 參數，callback 寫成員檔。刪 blocked、刪 GOOGLE_OAUTH_GATE。_take_turn 接上換檔。</small></div></li>
   <li><div><b>授權連結 marker</b><small>gmail 與 drive 錯誤文字、system prompt、SKILL.md 加規則。新模組 auth_links.py 在 reply seam 換連結並寫 pending。</small></div></li>
