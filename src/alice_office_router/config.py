@@ -18,7 +18,11 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 class Settings(BaseSettings):
     """Application settings loaded from environment variables or .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    # extra="ignore": .env also carries compose-only variables the router never
+    # reads (GRAFANA_ADMIN_PASSWORD, SEARXNG_SECRET — see .env.example). With
+    # pydantic-settings' default "forbid", any such key made every request 500
+    # with "Extra inputs are not permitted".
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     LINE_CHANNEL_SECRET: str
     LINE_CHANNEL_ACCESS_TOKEN: str
@@ -84,10 +88,23 @@ class Settings(BaseSettings):
     # Names must match seeded plugin directory names under HERMES_TEMPLATES_DIR/plugin/.
     DEFAULT_PLUGINS: str = "local-tools"
     # Public HTTPS base URL of this router (no trailing slash), e.g.
-    # https://your-domain. Used to build the Google OAuth redirect_uri
-    # ({url}/oauth/callback) and the auth links sent to LINE users. Must also
-    # be added to the GCP Web application client's Authorized redirect URIs.
-    GOOGLE_OAUTH_PUBLIC_URL: str = ""
+    # https://your-domain — the one address users' browsers reach it at
+    # (typically a Cloudflare tunnel). Everything the router hands a user to
+    # open is built on it: the Google OAuth redirect_uri ({url}/oauth/callback,
+    # which must also be registered in the GCP Web application client's
+    # Authorized redirect URIs) and auth links (google_oauth.py), and the
+    # file-download links behind the agent's share_file tool (file_links.py).
+    # Empty (default) = Google OAuth cannot run and share_file links are
+    # replaced with a fixed "not configured" notice. Renamed from
+    # GOOGLE_OAUTH_PUBLIC_URL on 2026-09-17; the old name is not read.
+    PUBLIC_BASE_URL: str = ""
+    # How long a published file-download link stays valid, measured from the
+    # mtime of the router's own copy under published_files_dir.
+    FILE_LINK_TTL_HOURS: int = 24
+    # Largest single file the router will publish a download link for; an
+    # outbox entry above this is rejected and the marker becomes the fixed
+    # "invalid or expired" notice.
+    FILE_LINK_MAX_BYTES: int = 50 * 1024 * 1024
     # When False, the /oauth/start and /oauth/callback routes still work, but
     # inbound LINE messages are never blocked pending Google authorization
     # (see google_oauth.check_google_authorization).
@@ -359,6 +376,54 @@ class Settings(BaseSettings):
         """
         return self.DATA_DIR / room_id / "router_state"
 
+    @property
+    def published_files_dir(self) -> Path:
+        """Router-local path to the cross-room published-download directory.
+
+        Returns:
+            DATA_DIR / "_files" — one <room_id>/<token>/<name> per published
+            file (file_links.py). Underscore-prefixed like conversations_dir
+            so it never collides with a room directory, and deliberately
+            OUTSIDE every data/<room_id>/ mount: this is the only place the
+            download route reads from, so a room's own agent can neither plant
+            a symlink here nor extend a link's TTL by touching the file.
+        """
+        return self.DATA_DIR / "_files"
+
+    def room_published_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's published downloads.
+
+        Args:
+            room_id: Unique identifier for the chatroom, same raw (original
+                case) value used for DATA_DIR / room_id elsewhere — must not
+                be lowercased, or the download route's lookup would miss the
+                directory publish wrote.
+
+        Returns:
+            DATA_DIR / "_files" / room_id — holds one <token>/ subdirectory
+            per file published for this room, each with exactly one file in
+            it. Expired subdirectories are swept the next time this room
+            publishes (file_links.ensure_published).
+        """
+        return self.published_files_dir / room_id
+
+    def room_outbox_dir(self, room_id: str) -> Path:
+        """Router-local path to one room's agent-written handoff directory.
+
+        Args:
+            room_id: Unique identifier for the chatroom (see
+                room_published_dir).
+
+        Returns:
+            DATA_DIR / room_id / "outbox" — the agent's side of the file
+            handoff: its share_file tool writes <token>/<name> in here
+            (as /opt/data/outbox/ inside the container) and the router reads
+            it once, copies the file to room_published_dir, then deletes the
+            token directory. Everything in here is agent-controlled and is
+            validated on read, never served directly.
+        """
+        return self.DATA_DIR / room_id / "outbox"
+
     def group_trigger_prefixes(self) -> tuple[str, ...]:
         """Parse GROUP_TRIGGER_PREFIXES into the non-empty call-words to match.
 
@@ -380,7 +445,20 @@ class Settings(BaseSettings):
             credentials file has been placed under google_web_creds_path
             (the deployment-level seed source, not any room's own copy).
         """
-        return bool(self.GOOGLE_OAUTH_PUBLIC_URL) and self.google_web_creds_path.exists()
+        return bool(self.PUBLIC_BASE_URL) and self.google_web_creds_path.exists()
+
+    @property
+    def file_links_enabled(self) -> bool:
+        """Whether this deployment can hand the agent's files to users as links.
+
+        Returns:
+            True when PUBLIC_BASE_URL is set. Read in exactly one place
+            (file_links.publish_file_links): the download route is mounted
+            unconditionally (nothing is published, so everything 404s) and no
+            room-initialization step depends on this, so there is no second
+            "is it enabled" branch to keep in sync.
+        """
+        return bool(self.PUBLIC_BASE_URL)
 
 
 def get_settings() -> Settings:

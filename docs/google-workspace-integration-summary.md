@@ -102,7 +102,7 @@ flowchart TD
 - `src/hermes/mcp/google-calendar/` — 薄註冊 manifest（`command: google-calendar-mcp`）
 - `src/hermes/runtime/pyproject.toml` — 加 `mcp`/`httpx`/`requests`（`/opt/tools/.venv`）
 - `scripts/google_reauth.py` — 本機瀏覽器一次性授權腳本
-- Settings：`GOOGLE_OAUTH_PUBLIC_URL`、`GOOGLE_OAUTH_GATE`；憑證種子放 `data/_google/`（gitignored，部署層放一次），逐房副本在 `data/<room_id>/google/`（見上方 2026-07-11 更新）
+- Settings：`PUBLIC_BASE_URL`、`GOOGLE_OAUTH_GATE`；憑證種子放 `data/_google/`（gitignored，部署層放一次），逐房副本在 `data/<room_id>/google/`（見上方 2026-07-11 更新）
 
 ## 驗證結果（全部通過）
 
@@ -247,7 +247,7 @@ def gmail_request(method, path, **kwargs) -> dict:
 
 ## 尚未驗證／上線前待辦
 
-1. **真實 Google 授權流程**（需要瀏覽器＋真實 LINE 使用者）：`.env` 的 `GOOGLE_OAUTH_PUBLIC_URL` 目前是 E2E 用的 `http://localhost:8000`，要換成公開網域，並把 `{url}/oauth/callback` 加進 GCP Web client 的 Authorized redirect URIs
+1. **真實 Google 授權流程**（需要瀏覽器＋真實 LINE 使用者）：`.env` 的 `PUBLIC_BASE_URL` 目前是 E2E 用的 `http://localhost:8000`，要換成公開網域，並把 `{url}/oauth/callback` 加進 GCP Web client 的 Authorized redirect URIs
 2. `.env` 已改 `HERMES_IMAGE=alice-hermes-agent:v3`
 3. Linux 部署時每個房間的 `data/<room_id>/google/` 都需可被 uid 10000 讀寫，新房間建立時
    要記得補（macOS Docker Desktop 不用管）

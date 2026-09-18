@@ -273,7 +273,7 @@ docker inspect hermes_<room_id> | jq '.[0].Config.Labels, .[0].HostConfig.LogCon
 
 ### 2.5 Google OAuth 卡住
 
-1. 確認這個部署真的啟用了：`GOOGLE_OAUTH_PUBLIC_URL` 有沒有設 + 部署層級的
+1. 確認這個部署真的啟用了：`PUBLIC_BASE_URL` 有沒有設 + 部署層級的
    `data/_google/gcp-oauth.keys.json` 是否存在（`Settings.google_oauth_enabled`）。
 2. 確認房間自己有沒有拿到憑證副本（write-once，由 `ensure_google_seed` 複製）：
    `ls data/<room_id>/google/` 應該看得到 `gcp-oauth.keys.json`。
@@ -283,7 +283,7 @@ docker inspect hermes_<room_id> | jq '.[0].Config.Labels, .[0].HostConfig.LogCon
    room`、`Google OAuth token exchange failed for`、`Failed to read Google
    tokens for account`。
 5. 需要本機手動重新走一次授權流程時，用 `uv run python scripts/google_reauth.py
-   <room_id>`，或直接開 `<GOOGLE_OAUTH_PUBLIC_URL>/oauth/start?user_id=<room_id>`。
+   <room_id>`，或直接開 `<PUBLIC_BASE_URL>/oauth/start?user_id=<room_id>`。
 
 ### 2.6 改了 config.yaml / skills / MCP / SOUL.md 沒生效
 

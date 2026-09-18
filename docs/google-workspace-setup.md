@@ -14,7 +14,7 @@ agent 實際如何透過 MCP 操作 Calendar／Gmail／Drive）見
 2. 設定 OAuth 同意畫面（Consent screen）。
 3. 建立**兩個** OAuth 用戶端 ID（兩者用途不同，缺一不可）：
    - **Web application**：Authorized redirect URIs 加入
-     `{GOOGLE_OAUTH_PUBLIC_URL}/oauth/callback`（LINE 使用者瀏覽器走的授權流程用，
+     `{PUBLIC_BASE_URL}/oauth/callback`（LINE 使用者瀏覽器走的授權流程用，
      router 的 `/oauth/start` `/oauth/callback` 兩個路由靠它）。
    - **Desktop app（Installed）**：`@cocal/google-calendar-mcp` 跟
      `scripts/google_reauth.py` 用它識別身份，走 localhost redirect，不需要在
@@ -52,11 +52,11 @@ data/<room_id>/google/tokens.json                    ← 執行期自動產生�
 
 | 變數 | 說明 |
 |------|------|
-| `GOOGLE_OAUTH_PUBLIC_URL` | 這個 router 的公開 HTTPS base URL（不含結尾斜線）。留空（預設）＝整個 Google 整合停用：oauth 路由回 400、新房間不 seed 這三個 MCP、訊息也不會被攔。 |
+| `PUBLIC_BASE_URL` | 這個 router 的公開 HTTPS base URL（不含結尾斜線），全站共用（檔案下載連結也用它）。2026-09-17 由 `GOOGLE_OAUTH_PUBLIC_URL` 改名而來。Google 整合的開關是「它已設 **且** Web application 憑證檔存在」；任一缺＝整個 Google 整合停用：oauth 路由回 400、新房間不 seed 這三個 MCP、訊息也不會被攔。 |
 | `GOOGLE_OAUTH_GATE` | 預設 `true`。設 `false` 時 oauth 路由照常運作，只是不擋任何房間的訊息（適合先把 MCP 跑起來、還沒想清楚要不要強制授權的階段）。 |
 
 `Settings.google_oauth_enabled`（`config.py`）同時檢查
-`GOOGLE_OAUTH_PUBLIC_URL` 非空**且** `data/_google/gcp-oauth.keys.json` 存在，兩者缺一都視為停用。
+`PUBLIC_BASE_URL` 非空**且** `data/_google/gcp-oauth.keys.json` 存在，兩者缺一都視為停用。
 
 ## 訊息授權判斷流程
 
@@ -99,7 +99,7 @@ key 當成 `room_id` 傳給 `Settings.room_google_dir()`，在 Linux（case-sens
 
 - **改 Google 相關設定要重建房間 container**：`_build_volume_config` 只在
   container **建立**當下決定要不要掛這個房間的 `google/` 資料夾——先前用停用狀態
-  建立的房間，之後補上 `GOOGLE_OAUTH_PUBLIC_URL` 跟 credentials 也不會自動補掛，
+  建立的房間，之後補上 `PUBLIC_BASE_URL` 跟 credentials 也不會自動補掛，
   需要 `docker rm -f hermes_<room_id>` 重建。
 - **write-once 對 Google MCP 一樣適用**：`gmail`／`drive`／`google-calendar` 三個
   manifest 都有 `requires_google_oauth: true`，`ensure_mcp_seed` 只在

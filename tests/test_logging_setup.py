@@ -170,6 +170,19 @@ async def test_request_emits_one_access_line_with_request_id(client: AsyncClient
     assert len(str(access[0]["request_id"])) == 32
 
 
+async def test_access_line_masks_a_file_download_token(client: AsyncClient) -> None:
+    """A download token is a credential; the log stream leaves the host."""
+    stream = _capture(_settings())
+    room = "line_U0123456789abcdef0123456789abcdef"
+    token = "Qm3fZ9xL-aB7cD1eF4gH6iJ8kL0mN2oP5qR7sT9uV1w"
+
+    await client.get(f"/files/{room}/{token}")
+
+    access = [r for r in _records(stream) if r["event"] == "http_request"]
+    assert access[0]["path"] == f"/files/{room}/Qm3fZ9xL..."
+    assert token not in stream.getvalue()
+
+
 async def test_each_request_gets_its_own_request_id(client: AsyncClient) -> None:
     stream = _capture(_settings())
 

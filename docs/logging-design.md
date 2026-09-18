@@ -196,7 +196,11 @@ SSE 的 `hermes.tool.progress` 事件（`status: running`/`completed`）也不�
 `docs/router-hermes-agent-protocol.md` 的偵察結論），這次先不做，留給下一輪視需要決定。
 
 **Access log 一行**：`event="http_request"`、`method`、`path`、`status`、`duration_ms`。
-LINE webhook 的 body 不記錄（見 §6）。
+LINE webhook 的 body 不記錄（見 §6）。`path` 會先過
+`logging_setup._redact_path`：`GET /files/<room>/<token>` 的 token 就是那個檔案的下載
+憑證（見 `docs/file-share-design.md`），所以只留前 8 碼（`…/Qm3fZ9xL...`）——夠把 access
+行對上 `file_link_published` 事件，但不能拿去下載。其他路由的路徑沒有秘密（OAuth 的
+`state`／`user_id` 在 query string，本來就不記）。
 
 **規則**：`logger.info(f"... room [{room_id}] ...")` 這種把識別子塞進訊息文字的寫法，
 在新程式碼中改成 `logger.info("Creating container", extra={"room_id": …})` 或直接依賴

@@ -71,9 +71,9 @@ Alloy。症狀是 Loki 裡查不到任何 `source="file"` 的行、但 `source="
 
 還有一個對應關係要記得：`local.file_match` 的 glob 是
 `/rooms/*/logs/*.log`（單層 `*`），所以**它假設每個房間目錄都直接坐落在
-`HOST_DATA_DIR` 底下**。`data/_conversations/`、`data/_google/` 這兩個非房間目錄
-因為沒有 `logs/` 子目錄而自然被跳過；以後若在 `data/` 下新增別的東西，要確認它
-不會意外長出 `logs/*.log`。glob 撈到之後還有一道白名單：`config.alloy` 的 `keep`
+`HOST_DATA_DIR` 底下**。`data/_conversations/`、`data/_google/`、`data/_files/`
+這三個非房間目錄因為沒有 `logs/` 子目錄而自然被跳過；以後若在 `data/` 下新增別的
+東西，要確認它不會意外長出 `logs/*.log`。glob 撈到之後還有一道白名單：`config.alloy` 的 `keep`
 規則只留 Hermes 已知的那幾個檔名（`agent` / `errors` / `gateway` / `mcp-stderr` /
 `container-boot` / …），因為房間的 agent 對自己的 `/opt/data` 有寫入權，任意檔名
 等於任意 Loki label 值。Hermes 換版帶來新的 log 檔名時，要同步加進那個 regex，否則
@@ -83,6 +83,28 @@ Alloy。症狀是 Loki 裡查不到任何 `source="file"` 的行、但 `source="
 `logging_net` 上，跟房間容器所在的 `hermes_global_net` 完全不相通（見
 `docs/logging-design.md` §6），所以 `/rooms` 掛錯就是真的什麼都收不到，沒有網路那條
 備援。
+
+## 房間目錄 vs 底線目錄：誰在 mount 裡、誰在 mount 外
+
+`DATA_DIR` 底下只有兩種東西，差別是**房間的 agent 碰不碰得到**：
+
+| 路徑 | 在房間 mount 內？ | 誰寫 | 用途 |
+|---|---|---|---|
+| `data/<room_id>/…` | ✅ 是（`/opt/data`） | Hermes + router 的 seed | 房間的全部家當：`config.yaml`、`skills/`、`state.db`、`incoming/`、`group_state/`、`router_state/` |
+| `data/<room_id>/outbox/<token>/<檔名>` | ✅ 是（`/opt/data/outbox/`） | **agent**（`share_file` 工具） | 「這個檔要給使用者」的交接區；router 讀一次、複製走、刪掉（見下一列） |
+| `data/_google/` | ❌ 否 | operator | 部署層的 GCP 憑證 seed 來源 |
+| `data/_conversations/<room_key>.jsonl` | ❌ 否 | router | 每輪的 turn envelope（不含回覆內容） |
+| `data/_files/<room_id>/<token>/<檔名>` | ❌ 否 | **router** | 真正對外出檔的地方，`GET /files/…` 只從這裡讀 |
+
+底線開頭的三個目錄名字這樣取，是因為房間目錄名一定是 `line_…`／`api_…`（見
+`channels/api.py` 的 `_ROOM_KEY_RE`），所以永遠不會撞名。
+
+`outbox/` 與 `_files/` 是同一件事的兩端，分成兩個目錄是刻意的：`data/<room_id>/` 整個
+是 agent 的 `HERMES_HOME`，agent 對它有完整寫入權，可以在 `outbox/` 放 symlink 指到別
+的房間、可以 `touch` 把 mtime 往後推、可以繞過工具直接塞超大檔。所以 router 在改寫連結
+時把檔案**複製一次**到房外的 `_files/`（複製當下用 `O_NOFOLLOW` 開檔、`fstat` 確認是
+一般檔、檢查大小），下載 route 只信 `_files/`，TTL 看的也是 router 自己寫下的 mtime。
+細節見 [`docs/file-share-design.md`](file-share-design.md)。
 
 ## `ROUTER_IN_DOCKER` 是決定 router 自己活在哪個世界的開關
 

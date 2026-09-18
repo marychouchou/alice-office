@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from alice_office_router.channels import enabled_adapters
 from alice_office_router.config import get_settings
 from alice_office_router.core import cancel_warmups
+from alice_office_router.file_links import files_router
 from alice_office_router.google_oauth import oauth_router
 from alice_office_router.logging_setup import RequestContextMiddleware, configure_logging
 
@@ -59,3 +60,7 @@ for adapter in enabled_adapters(_settings):
         app.include_router(adapter.api_router(), prefix=_LEGACY_LINE_WEBHOOK_PATH)
 
 app.include_router(oauth_router)
+# Unconditional, like oauth_router: with PUBLIC_BASE_URL unset the router
+# never hands out a link, so the route simply finds nothing and 404s. Gating
+# the mount would put a second "is this enabled" branch outside file_links.
+app.include_router(files_router)

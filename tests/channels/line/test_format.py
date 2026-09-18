@@ -81,5 +81,18 @@ class TestFormatForLine:
     def test_strips_markdown_then_splits(self) -> None:
         assert format_for_line("**hi**") == ["hi"]
 
+    def test_file_download_link_survives_unchanged(self) -> None:
+        """A published file link must reach LINE character-for-character.
+
+        The token's alphabet ([A-Za-z0-9_-]) is chosen so none of the Markdown
+        stripping (italics, bullets, markdown-link rewriting) can touch it.
+        """
+        url = (
+            "https://router.example.com/files/line_U0123456789abcdef0123456789abcdef"
+            "/Qm3fZ9xL-aB7cD1eF4gH6iJ8kL0mN2oP5qR7sT9uV1w"
+        )
+        text = f"摘要做好了，完整檔案：\n{url}"
+        assert format_for_line(text) == [text]
+
     def test_blank_text_returns_empty_list(self) -> None:
         assert format_for_line("") == []

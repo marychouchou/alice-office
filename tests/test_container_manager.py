@@ -568,7 +568,7 @@ def _settings_with_google(tmp_path: Path, *, enabled: bool) -> Settings:
         HERMES_API_SERVER_KEY="test_api_server_key",
         LLM_BASE_URL="https://spark2-vllm.dalue.co/v1",
         LLM_MODEL="qwen3-next",
-        GOOGLE_OAUTH_PUBLIC_URL="https://router.example.com" if enabled else "",
+        PUBLIC_BASE_URL="https://router.example.com" if enabled else "",
     )
     if enabled:
         settings.google_web_creds_path.parent.mkdir(parents=True, exist_ok=True)

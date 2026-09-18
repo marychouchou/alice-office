@@ -56,7 +56,7 @@ manifest 佔位符、tokens.json 的 key、OAuth start/callback 流程、gate �
 ## requires_google_oauth
 
 跟 `gmail/`、`drive/` 一樣，這份 manifest 有 `requires_google_oauth: true`——
-只有當這個部署設定了 `GOOGLE_OAUTH_PUBLIC_URL` 且部署層的種子來源
+只有當這個部署設定了 `PUBLIC_BASE_URL` 且部署層的種子來源
 `data/_google/gcp-oauth.keys.json` 存在時（`Settings.google_oauth_enabled`），
 新建立的房間才會 seed 這個 MCP。因為是 write-once，先前在停用狀態下建立的房間
 即使之後補齊設定也不會回頭補 seed，需要整個重建該房間。

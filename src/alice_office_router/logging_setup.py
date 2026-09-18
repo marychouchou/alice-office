@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import re
 import time
 from uuid import uuid4
 
@@ -36,6 +37,29 @@ _TIMESTAMPER = structlog.processors.TimeStamper(fmt="iso", utc=True, key="ts")
 # The access log line is emitted by the middleware below, not by uvicorn (whose
 # own access logger is left handler-less by configure_logging).
 _access_logger = structlog.stdlib.get_logger("alice_office_router.access")
+
+# A file-download URL carries its own credential in the path: whoever can read
+# `/files/<room>/<token>` can fetch the file (file_links.py). The access line
+# below logs the raw path, and that stream leaves the host for the log
+# collector, so the token is masked down to the same 8-character prefix
+# file_links itself logs — enough to line an access line up with the
+# `file_link_published` event, useless as a key. No other route puts a secret
+# in its path (OAuth's state and user_id ride the query string, which is
+# never logged).
+_PATH_SECRET_RE = re.compile(r"(/files/[^/]+/)([A-Za-z0-9_-]{8})[A-Za-z0-9_-]{35}")
+
+
+def _redact_path(path: str) -> str:
+    """Mask any credential a request path carries, for the access log.
+
+    Args:
+        path: The raw ASGI `scope["path"]`.
+
+    Returns:
+        The path with a download token truncated to its first 8 characters;
+        any other path is returned unchanged.
+    """
+    return _PATH_SECRET_RE.sub(r"\1\2...", path)
 
 
 def _render_processors(log_format: str) -> list[Processor]:
@@ -189,7 +213,7 @@ class RequestContextMiddleware:
             _access_logger.info(
                 "http_request",
                 method=str(scope.get("method", "")),
-                path=str(scope.get("path", "")),
+                path=_redact_path(str(scope.get("path", ""))),
                 status=status,
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
