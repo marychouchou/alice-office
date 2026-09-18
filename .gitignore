@@ -39,6 +39,9 @@ data/
 data.bak-*/
 tmp/
 CLAUDE.local.md
+# 本機專用的 compose 覆寫（port mapping、掛載差異因機器而異，如 cloudflared ingress
+# 轉到不同 port）；docker compose 會自動疊上，但不進版控
+docker-compose.override.yml
 
 # .claude/ 底下只有 rules/（path-scoped 的 agent 規則）與 skills/（project-level
 # skills）要進版控，其餘（settings.local.json、快取等）是個人／機器本地的
