@@ -3,25 +3,36 @@
 Adapted from google-workspace-pack's reauth_all_scopes.py. Runs a local
 HTTP server on localhost, opens the system browser to Google's OAuth
 consent screen using the Desktop/Installed OAuth client credentials, and
-stores the resulting token in that room's own tokens.json under
-data/<room_id>/google/ — the same per-room file the router's /oauth/callback
-route and that room's gmail/drive/google-calendar MCP read from (see
-alice_office_router.room_seed.ensure_google_seed; each room's
-Google data is isolated, not shared across rooms).
+stores the resulting token in one *member's* own token file under
+data/<room_id>/google/members/ — the same per-member file the router's
+/oauth/callback route writes and that room's gmail/drive/google-calendar
+MCP read from, through the room's tokens.json symlink (see
+alice_office_router.google_tokens module docstring; each room's Google data
+is isolated, not shared across rooms).
 
 Usage:
     uv run python scripts/google_reauth.py <room_id>
-    uv run python scripts/google_reauth.py U196d1445f7fe156eac44c02106f364ec
+    uv run python scripts/google_reauth.py line_U196d1445f7fe156eac44c02106f364ec
+
+    # 群組房間：指定要寫入哪個成員的 token 檔（預設是房間自己的 account_key，
+    # 也就是舊行為 —— 只適合 1:1 房間，成員就是房間本身）
+    uv run python scripts/google_reauth.py line_C4af4980629... --member u_t10_a
 
 The room_id argument must be the *exact* room id used elsewhere for this
 room (same case) — it becomes the data/<room_id>/ directory name, and
 diverging case would silently create a second, empty directory instead of
 authorizing the room the LINE webhook actually talks to. The token dict
-*inside* tokens.json is still keyed by the lowercased account_key (see
-alice_office_router.google_oauth.account_key) — @cocal/google-calendar-mcp's
+*inside* the member file is still keyed by the lowercased account_key (see
+alice_office_router.google_tokens.account_key) — @cocal/google-calendar-mcp's
 GOOGLE_ACCOUNT_MODE validation rejects LINE's uppercase-prefixed room ids,
 so that lowercased key must match what the router's oauth routes and every
-MCP's env use.
+MCP's env use, regardless of which member file it lives in.
+
+--member does not choose which member file the router's tokens.json symlink
+currently points at — that happens per-turn (google_tokens.select_member_tokens),
+driven by who is actually speaking. This script only deposits a token; make
+that member speak (or run scripts/simulate_oauth.py) to have the room pick
+it up.
 """
 
 from __future__ import annotations
@@ -29,6 +40,7 @@ from __future__ import annotations
 import argparse
 import http.server
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -36,10 +48,30 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 
+# Import-order workaround for a circular import currently in src/:
+# google_tokens.py imports channels.base.InboundMessage (type hint only), and
+# importing the `channels` submodule for the first time always runs
+# channels/__init__.py first — which eagerly imports channels.api -> core ->
+# auth_links -> google_oauth -> google_tokens, landing back here before this
+# module has finished defining account_key/save_member_tokens/etc. Touching
+# `channels` first (the same order main.py's own imports happen to use) lets
+# that cycle unwind cleanly instead of raising ImportError. See this task's
+# report for the actual fix (make google_tokens.py's InboundMessage import
+# TYPE_CHECKING-only — it's never used at runtime there).
+import alice_office_router.channels  # noqa: F401
+from alice_office_router.config import Settings, get_settings
+from alice_office_router.google_tokens import account_key, load_member_tokens, save_member_tokens
+
 # Deployment-level seed source (the operator's one-time drop location — see
 # README「Google Workspace 整合」). Not room-specific: every room's own
 # credentials copy starts as a copy of this same file.
 DEFAULT_CREDENTIALS_PATH = Path("./data/_google/gcp-oauth.keys.installed.json")
+
+# The shape google_tokens.account_key() produces (and @cocal/google-calendar-mcp
+# accepts) — --member becomes a filename under the room's members/ directory,
+# so it is checked against this before being trusted (mirrors google_oauth.py's
+# own _MEMBER_KEY_RE for /oauth/start's `member` query param).
+_MEMBER_KEY_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 SCOPES = " ".join(
     [
@@ -155,20 +187,21 @@ def exchange_code(code: str, creds: dict[str, str]) -> dict[str, object]:
         return result
 
 
-def ensure_room_credentials_copy(tokens_path: Path, credentials_path: Path) -> None:
+def ensure_room_credentials_copy(room_google_dir: Path, credentials_path: Path) -> None:
     """Copy the Desktop/Installed credentials file into a room's own google/ dir, once.
 
     Mirrors room_seed.ensure_google_seed's write-once semantics: a
     room's calendar MCP reads its own per-room mount, not any shared
-    location, so this room needs its own copy of the credentials file
-    alongside its tokens.json for token refresh to work after this script
-    hands off to the running container.
+    location, so this room needs its own copy of the credentials file for
+    token refresh to work after this script hands off to the running
+    container.
 
     Args:
-        tokens_path: This room's own tokens.json path (google/ dir sibling).
+        room_google_dir: This room's own google/ directory
+            (Settings.room_google_dir(room_id)).
         credentials_path: Source Desktop/Installed credentials file to copy from.
     """
-    dest = tokens_path.parent / "gcp-oauth.keys.installed.json"
+    dest = room_google_dir / "gcp-oauth.keys.installed.json"
     if dest.exists():
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -176,29 +209,36 @@ def ensure_room_credentials_copy(tokens_path: Path, credentials_path: Path) -> N
     print(f"Seeded room credentials: {credentials_path} -> {dest}")
 
 
-def save_token(tokens_path: Path, account_key: str, token_data: dict[str, object]) -> None:
-    """Merge a freshly exchanged token into this room's own tokens.json.
+def save_token(
+    config: Settings, room_id: str, member_key: str, token_data: dict[str, object]
+) -> None:
+    """Merge a freshly exchanged token into one member's own Google token file.
+
+    Goes through google_tokens.save_member_tokens (temp-file-then-rename)
+    instead of writing tokens.json directly — tokens.json is now a symlink
+    the router repoints at whichever member is currently speaking
+    (google_tokens.select_member_tokens), so it must never be written to as
+    a plain file.
 
     Args:
-        tokens_path: Path to this room's own tokens.json file.
-        account_key: Lowercased room id to store the token under.
+        config: Application settings (resolves data/<room_id>/google/members/).
+        room_id: Raw LINE room/user/group id (original case).
+        member_key: Which member's token file to write (see --member).
         token_data: Google's token endpoint JSON response.
     """
-    tokens_path.parent.mkdir(parents=True, exist_ok=True)
-    existing: dict[str, object] = {}
-    if tokens_path.exists():
-        existing = json.loads(tokens_path.read_text(encoding="utf-8"))
-
+    inner_key = account_key(room_id)
+    tokens = load_member_tokens(config, room_id, member_key)
     expires_in = token_data.get("expires_in", 0)
-    existing[account_key] = {
+    tokens[inner_key] = {
         "access_token": token_data["access_token"],
         "refresh_token": token_data.get("refresh_token", ""),
         "expiry_date": int(time.time() * 1000) + int(expires_in) * 1000,  # type: ignore[call-overload]
         "token_type": "Bearer",
         "scope": SCOPES,
     }
-    tokens_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    print(f"Token saved under account '{account_key}' in {tokens_path}")
+    save_member_tokens(config, room_id, member_key, tokens)
+    path = config.room_google_member_tokens_path(room_id, member_key)
+    print(f"Token saved under account '{inner_key}' in member file {path}")
 
 
 def _wait_for_callback(timeout: float = 120.0) -> None:
@@ -230,7 +270,7 @@ def build_args() -> argparse.Namespace:
         help=(
             "LINE room/user/group id to authorize — must match the exact case used "
             "elsewhere for this room (it becomes the data/<room_id>/ directory name); "
-            "lowercased only for the token dict key inside tokens.json"
+            "lowercased only for the token dict key inside the member file"
         ),
     )
     parser.add_argument(
@@ -240,12 +280,12 @@ def build_args() -> argparse.Namespace:
         help=f"Path to the Desktop/Installed GCP OAuth client JSON (default: {DEFAULT_CREDENTIALS_PATH})",
     )
     parser.add_argument(
-        "--tokens",
-        type=Path,
+        "--member",
         default=None,
         help=(
-            "Path to this room's own tokens.json to write "
-            "(default: ./data/<room_id>/google/tokens.json)"
+            "Which member's token file to write, under data/<room_id>/google/members/ "
+            "(default: account_key(room_id) — today's 1:1-room behavior, where the "
+            "member IS the room). Must match ^[a-z0-9_-]{1,64}$ — it becomes a filename."
         ),
     )
     return parser.parse_args()
@@ -254,17 +294,24 @@ def build_args() -> argparse.Namespace:
 def main() -> None:
     """Entry point: run the interactive browser OAuth flow and save the token."""
     args = build_args()
-    account_key = args.room_id.lower()
-    if account_key != args.room_id:
-        print(f"Note: normalizing account key to lowercase: '{args.room_id}' -> '{account_key}'")
+    inner_key = account_key(args.room_id)
+    if inner_key != args.room_id:
+        print(f"Note: normalizing account key to lowercase: '{args.room_id}' -> '{inner_key}'")
 
-    tokens_path: Path = args.tokens or Path(f"./data/{args.room_id}/google/tokens.json")
+    member_key = args.member or inner_key
+    if not _MEMBER_KEY_RE.fullmatch(member_key):
+        print(f"[ERROR] --member 格式不符 ^[a-z0-9_-]{{1,64}}$：{member_key!r}")
+        raise SystemExit(1)
+
+    config = get_settings()
 
     creds = load_installed_credentials(args.credentials)
     state = json.dumps({"nonce": time.time()})  # simple opaque state, single local user
     auth_url = build_auth_url(creds["client_id"], state)
 
-    print(f"Opening authorization URL for account '{account_key}'...\n\n{auth_url}\n")
+    print(
+        f"Opening authorization URL for room '{args.room_id}' member '{member_key}'...\n\n{auth_url}\n"
+    )
     webbrowser.open(auth_url)
     _wait_for_callback()
 
@@ -281,9 +328,9 @@ def main() -> None:
         print(f"Token exchange failed: {token_data}")
         raise SystemExit(1)
 
-    save_token(tokens_path, account_key, token_data)
-    ensure_room_credentials_copy(tokens_path, args.credentials)
-    print(f"\nSuccess! Account '{account_key}' now has all Google scopes.")
+    save_token(config, args.room_id, member_key, token_data)
+    ensure_room_credentials_copy(config.room_google_dir(args.room_id), args.credentials)
+    print(f"\nSuccess! Member '{member_key}' (account '{inner_key}') now has all Google scopes.")
 
 
 if __name__ == "__main__":

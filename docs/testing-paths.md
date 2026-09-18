@@ -107,6 +107,26 @@ log 標 `"matched": false`,SDK 永遠不會炸。
 ⚠️ `LINE_API_BASE_URL` 只給本機測試用,正式部署一定要留空(＝真的 LINE
 Platform)。log 檔寫在 `data/` 底下,已經在 `.gitignore` 裡,不會進版控。
 
+#### 🟠+ 群組與事件
+
+群組訊息除了 `--group-id`,還可以加 `--sender-id`(模擬 source 裡帶
+`userId` 的已加好友成員——LINE 真實群組訊息的樣子;不給就是匿名發話者)與
+`--mention`(文字前加對 bot 的 @mention,讓 `_is_addressed` 判定為真)。
+`--event follow|join` 送一個沒有 `message` 的事件(加好友/被拉進群組),測
+LINE 事件層的分派,不用真的送一則訊息:
+
+```bash
+uv run python scripts/test_webhook.py --group-id "C_GROUP" --sender-id "U_A" --mention --text "明天有什麼會"
+uv run python scripts/test_webhook.py --event follow --user-id "U_NEW"
+uv run python scripts/test_webhook.py --event join --group-id "C_NEW"
+```
+
+Google 授權相關的測試不用每次都走瀏覽器:`scripts/google_reauth.py --member
+<member_key>` 把授權結果寫進指定成員檔(不給就是 `account_key(room_id)`,
+即 1:1 房間的舊行為);`scripts/simulate_oauth.py <room_id> <member_key>
+--from-member-file <既有成員檔>` 直接複製一份現成 token 進房間的成員檔,
+略過瀏覽器整段流程(見 `docs/google-auth-per-member-plan.md` §6b)。
+
 ### 🟢 測試路 B:API curl(`/webhooks/api/messages`)
 
 回覆是**一段式**的:curl 的連線一直掛著,router 在這條連線裡同步跑完

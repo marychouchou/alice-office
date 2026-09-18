@@ -55,6 +55,19 @@ Router 必須先啟動：
     成功時可確認：
       ls data/<userId>/incoming/
 
+[12] 群組訊息 + 指定發話者 userId + @mention（模擬群組裡一個已加好友的成員
+     問問題並點名 bot；docs/google-auth-per-member-plan.md §6b T5）
+    uv run python scripts/test_webhook.py --group-id "C_T10_GROUP" --sender-id "U_T10_A" --mention --text "明天有什麼會"
+    uv run python scripts/test_webhook.py --group-id "C_T10_GROUP" --sender-id "U_T10_B" --mention --text "幫我看一下信件"
+
+[13] 群組訊息 + @mention，但不給 --sender-id（模擬 LINE 沒提供身分的匿名發話
+     者，例如還沒加 OA 好友的群組成員；T7）
+    uv run python scripts/test_webhook.py --group-id "C_T10_GROUP" --mention --text "明天有什麼會"
+
+[14] 送 follow／join 事件（沒有 message，只驗證暖機觸發點；T13）
+    uv run python scripts/test_webhook.py --event follow --user-id "U_T10_NEW"
+    uv run python scripts/test_webhook.py --event join --group-id "C_T10_NEW"
+
 看 log 的方式
 -------------
 即時追蹤特定容器的 log（把 <userId> 換成實際 ID）：
@@ -172,25 +185,74 @@ def make_user_message(user_id: str, text: str) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def make_group_message(group_id: str, text: str) -> str:
+# Fake @mention label prepended to the text when --mention is set. LINE's
+# real mention text is whatever the OA's display name is; only `isSelf`
+# (never the label's characters) drives Event.mention_is_self / _is_addressed
+# (channels/line/events.py), so any plain-ASCII label is fine for a fake body
+# — ASCII also keeps the index/length math trivial (1 UTF-16 unit per char).
+_MENTION_LABEL = "@bot"
+
+
+def _mention_message(text: str) -> tuple[str, dict[str, object]]:
+    """Prefix `text` with a self-@mention and build LINE's `mention` object.
+
+    Mirrors channels/line/events.py's Mention/Mentionee shape: `isSelf: true`
+    is the one field `Event.mention_is_self` checks; `index`/`length` count
+    UTF-16 code units over the final text (see `_strip_self_mentions`), both
+    trivial here since `_MENTION_LABEL` is plain ASCII at position 0.
+
+    Args:
+        text: The message text the mention prefix is added in front of.
+
+    Returns:
+        (text with the "@bot " prefix, the `message.mention` object).
+    """
+    full_text = f"{_MENTION_LABEL} {text}"
+    mention: dict[str, object] = {
+        "mentionees": [
+            {
+                "index": 0,
+                "length": len(_MENTION_LABEL),
+                "type": "user",
+                "userId": "U" + "0" * 32,  # fake bot userId; only isSelf is read
+                "isSelf": True,
+            }
+        ]
+    }
+    return full_text, mention
+
+
+def make_group_message(
+    group_id: str, text: str, *, sender_id: str = "", mention: bool = False
+) -> str:
     """Build a LINE webhook body simulating a group text message.
 
     Args:
         group_id: Simulated LINE groupId.
-        text: Message text.
+        text: Message text (before any --mention prefix is applied).
+        sender_id: If set, added as `source.userId` next to `groupId` — LINE's
+            real shape for a message from a group member who has added the OA
+            as a friend. Left empty, the source carries no userId (LINE's
+            shape for a member who hasn't — an unidentified/anonymous
+            speaker, see `channels/line/events.Event.sender_id`).
+        mention: If True, prefix the text with a self-@mention of the bot and
+            attach the matching `message.mention` object, so
+            `LineAdapter._is_addressed` treats this message as addressed.
 
     Returns:
         JSON string.
     """
-    payload = {
-        "events": [
-            {
-                "type": "message",
-                "source": {"type": "group", "groupId": group_id},
-                "message": {"type": "text", "text": text},
-            }
-        ]
-    }
+    source: dict[str, object] = {"type": "group", "groupId": group_id}
+    if sender_id:
+        source["userId"] = sender_id
+
+    message: dict[str, object] = {"type": "text", "text": text}
+    if mention:
+        full_text, mention_obj = _mention_message(text)
+        message["text"] = full_text
+        message["mention"] = mention_obj
+
+    payload = {"events": [{"type": "message", "source": source, "message": message}]}
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -282,6 +344,67 @@ def make_verification_ping() -> str:
         JSON string.
     """
     return json.dumps({"events": []})
+
+
+def make_follow_event(user_id: str) -> str:
+    """Build a LINE webhook body simulating a "follow" event (added as a friend).
+
+    No `message` — this only exercises event-level dispatch (e.g. the
+    follow/join -> warm_room trigger of docs/google-auth-per-member-plan.md
+    §3.5/§5 step 5). Shape per LINE's FollowEvent schema (line-openapi
+    webhook.yml): a message-less event whose only event-specific field is
+    `replyToken` (plus the common `mode`/`timestamp`/`deliveryContext`
+    envelope fields every event carries).
+
+    Args:
+        user_id: Simulated LINE userId who just added the OA as a friend.
+
+    Returns:
+        JSON string.
+    """
+    payload = {
+        "events": [
+            {
+                "type": "follow",
+                "mode": "active",
+                "timestamp": int(time.time() * 1000),
+                "source": {"type": "user", "userId": user_id},
+                "webhookEventId": "stub-follow-event",
+                "deliveryContext": {"isRedelivery": False},
+                "replyToken": "stub-reply-token-follow",
+                "follow": {"isUnblocked": False},
+            }
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def make_join_event(group_id: str) -> str:
+    """Build a LINE webhook body simulating a "join" event (bot added to a group).
+
+    Shape per LINE's JoinEvent schema (line-openapi webhook.yml): a
+    message-less event whose only event-specific field is `replyToken`.
+
+    Args:
+        group_id: Simulated LINE groupId the OA was just added to.
+
+    Returns:
+        JSON string.
+    """
+    payload = {
+        "events": [
+            {
+                "type": "join",
+                "mode": "active",
+                "timestamp": int(time.time() * 1000),
+                "source": {"type": "group", "groupId": group_id},
+                "webhookEventId": "stub-join-event",
+                "deliveryContext": {"isRedelivery": False},
+                "replyToken": "stub-reply-token-join",
+            }
+        ]
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +605,26 @@ def build_args() -> argparse.Namespace:
     parser.add_argument("--text", default="你好，測試一下", help="訊息內容")
     parser.add_argument("--user-id", default="U_LOCAL_TEST", help="模擬的 LINE userId")
     parser.add_argument("--group-id", default="", help="改用 groupId（設定後忽略 --user-id）")
+    parser.add_argument(
+        "--sender-id",
+        default="",
+        help=(
+            "群組訊息的發話者 userId（僅搭配 --group-id 有效）：LINE 真實群組訊息會把它放在 "
+            "source.userId，跟 groupId 並列；不給就是 LINE 沒提供身分的匿名發話者"
+        ),
+    )
+    parser.add_argument(
+        "--mention",
+        action="store_true",
+        help="群組訊息前面加上對 bot 的 @mention，讓 _is_addressed 判定為真（僅搭配 --group-id 有效）",
+    )
+    parser.add_argument(
+        "--event",
+        choices=["follow", "join"],
+        default="",
+        help="送一個沒有 message 的事件：follow（source=user，用 --user-id）"
+        "或 join（source=group，用 --group-id）",
+    )
     parser.add_argument("--wait", type=int, default=WAIT_SECONDS, help="等待 LLM 回應的秒數")
     parser.add_argument(
         "--send-timeout",
@@ -506,6 +649,36 @@ def build_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _build_event_test(args: argparse.Namespace) -> tuple[str, str, str] | None:
+    """Build the (body, room_id, label) for --event follow|join.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        (body, room_id, label) ready for run_test, or None if the id the
+        chosen event needs (--user-id for follow, --group-id for join) is
+        missing — the caller should stop without sending anything.
+    """
+    if args.event == "follow":
+        if not args.user_id:
+            print("[ERROR] --event follow 需要 --user-id")
+            return None
+        return (
+            make_follow_event(args.user_id),
+            args.user_id,
+            f"Follow 事件測試（userId={args.user_id}）",
+        )
+    if not args.group_id:
+        print("[ERROR] --event join 需要 --group-id")
+        return None
+    return (
+        make_join_event(args.group_id),
+        args.group_id,
+        f"Join 事件測試（groupId={args.group_id}）",
+    )
+
+
 def main() -> None:
     """Entry point."""
     args = build_args()
@@ -526,10 +699,22 @@ def main() -> None:
         print(f"Ping → {status} {text}")
         return
 
-    if args.group_id:
-        body = make_group_message(args.group_id, args.text)
+    if args.event:
+        event_case = _build_event_test(args)
+        if event_case is None:
+            return
+        body, room_id, label = event_case
+    elif args.group_id:
+        body = make_group_message(
+            args.group_id, args.text, sender_id=args.sender_id, mention=args.mention
+        )
         room_id = args.group_id
-        label = f"Group 訊息測試（groupId={args.group_id}）"
+        label = f"Group 訊息測試（groupId={args.group_id}"
+        if args.sender_id:
+            label += f", sender={args.sender_id}"
+        if args.mention:
+            label += ", mention"
+        label += "）"
     elif args.sticker:
         body = make_sticker_message(args.user_id)
         room_id = args.user_id
