@@ -34,6 +34,17 @@ Router 送回覆是**另開一條連線打 LINE 的伺服器**（見 docs/testin
 - `POST /v2/bot/message/validate/*`、`/v2/bot/chat/loading/start`：回 200 空物件
   （LINE 官方也是空 body）。
 - 其他路徑：一律 200 `{}` 並在 log 記 `"matched": false`，讓 SDK 永遠不會炸。
+
+額外：假的 Google token 端點
+----------------------------
+這支 stub 順便扮演 Google 的 OAuth token 端點（`POST /token`），因為 Google 授權
+的 e2e 卡在同一個地方——`/oauth/callback` 要拿 `code` 去跟 Google 換 token，本機
+沒有真的 `code`。起 stub 時加 `--google-token-file <一份現成的成員 token 檔>`，
+router 端設 `GOOGLE_TOKEN_URL=http://localhost:8099/token`，`/oauth/callback` 就會
+拿到那份 token 的內容（`expires_in` 固定 3600、`scope` 沿用檔案裡的），整條
+`/oauth/start` → `/oauth/callback` → 寫成員檔 → `on_authorized` → 重跑 pending
+訊息因此可以完全在本機走完（見 `scripts/simulate_oauth.py`）。沒給那個旗標時
+`POST /token` 一律回 400，免得誤以為「換到 token 了」。
 """
 
 from __future__ import annotations
@@ -54,6 +65,10 @@ DEFAULT_PORT = 8099
 DEFAULT_LOG_PATH = Path(__file__).resolve().parent.parent / "data" / "_line_stub" / "requests.jsonl"
 # 假 profile 的顯示名稱取 userId 末幾碼，剛好夠分辨兩個不同的假使用者。
 _ID_SUFFIX_LEN = 4
+# 假 Google token 端點的路徑（router 端的 GOOGLE_TOKEN_URL 指到這裡）。
+GOOGLE_TOKEN_PATH = "/token"
+# 回給 router 的 access token 壽命（秒）。Google 真實值就是 3600。
+GOOGLE_TOKEN_EXPIRES_IN = 3600
 
 JsonObject = dict[str, object]
 # (URL 上抓到的參數, 請求 body) -> 回應 body
@@ -159,6 +174,39 @@ def resolve_response(method: str, path: str, body: JsonObject) -> tuple[JsonObje
     return {}, False
 
 
+def google_token_response(member_file: Path) -> JsonObject:
+    """Build Google's token-endpoint JSON out of an existing member token file.
+
+    A member token file holds exactly one entry, keyed by the room's
+    account_key (see src/alice_office_router/google_tokens.py); its token data
+    already carries everything the router's exchange reads back. `expires_in`
+    is synthesized because the stored form is an absolute `expiry_date` — the
+    router recomputes that from `expires_in` when it stores the result.
+
+    Args:
+        member_file: Path to a `data/<room>/google/members/<key>.json` file
+            (a legacy per-room `tokens.json` has the same shape).
+
+    Returns:
+        A token response payload in Google's wire format.
+
+    Raises:
+        OSError: If the file cannot be read.
+        ValueError: If it is not JSON, or does not hold exactly one entry.
+    """
+    data: dict[str, dict[str, object]] = json.loads(member_file.read_text(encoding="utf-8"))
+    if len(data) != 1:
+        raise ValueError(f"expected exactly one entry in {member_file}, found {len(data)}")
+    ((_account_key, token),) = data.items()
+    return {
+        "access_token": str(token.get("access_token", "")),
+        "refresh_token": str(token.get("refresh_token", "")),
+        "expires_in": GOOGLE_TOKEN_EXPIRES_IN,
+        "scope": str(token.get("scope", "")),
+        "token_type": "Bearer",
+    }
+
+
 def log_request(record: JsonObject, log_path: Path) -> None:
     """Emit one request record as a JSON line to stdout and the log file.
 
@@ -203,6 +251,7 @@ class LineStubHandler(BaseHTTPRequestHandler):
         server: BaseServer,
         *,
         log_path: Path,
+        google_token_file: Path | None = None,
     ) -> None:
         """Bind this handler to a log file.
 
@@ -211,8 +260,11 @@ class LineStubHandler(BaseHTTPRequestHandler):
             client_address: The peer address (passed straight through).
             server: The owning server (passed straight through).
             log_path: File every request record is appended to.
+            google_token_file: Member token file POST /token answers from;
+                None (the default) makes that endpoint reply 400.
         """
         self.log_path = log_path
+        self.google_token_file = google_token_file
         # BaseHTTPRequestHandler serves the whole request inside __init__,
         # so log_path must already be set before this call.
         super().__init__(request, client_address, server)
@@ -248,45 +300,81 @@ class LineStubHandler(BaseHTTPRequestHandler):
             return {}, raw
         return (parsed if isinstance(parsed, dict) else {}), raw
 
+    def _google_token(self) -> tuple[JsonObject, int, bool]:
+        """Answer the fake Google token endpoint.
+
+        Returns:
+            (payload, HTTP status, matched). Without --google-token-file this
+            is a 400: a 200 with an empty body would look to the router like a
+            token exchange that "worked" but returned no access_token.
+        """
+        if self.google_token_file is None:
+            return (
+                {
+                    "error": "invalid_request",
+                    "error_description": "stub started without --google-token-file",
+                },
+                400,
+                True,
+            )
+        try:
+            return google_token_response(self.google_token_file), 200, True
+        except (OSError, ValueError) as exc:
+            return ({"error": "invalid_grant", "error_description": str(exc)}, 400, True)
+
     def _handle(self) -> None:
         """Route, answer, and log one request."""
         path = self.path.split("?", 1)[0]
         body, raw = self._read_body()
-        payload, matched = resolve_response(self.command, path, body)
+        is_token = self.command == "POST" and path == GOOGLE_TOKEN_PATH
+        if is_token:
+            payload, status, matched = self._google_token()
+        else:
+            payload, matched = resolve_response(self.command, path, body)
+            status = 200
         record: JsonObject = {
             "ts": datetime.now(UTC).isoformat(),
             "method": self.command,
             "path": path,
             "matched": matched,
-            "body": body or raw,
+            "status": status,
+            # The token exchange is the one call whose request carries the OAuth
+            # client_secret and whose response carries a real access/refresh
+            # token, so neither is written out — only the field names are.
+            "body": "<token exchange request>" if is_token else (body or raw),
             "texts": reply_texts(body),
-            "response": payload,
+            "response": sorted(payload) if is_token else payload,
         }
         if not matched:
             record["warning"] = "unknown LINE endpoint — answered 200 {} so the SDK won't raise"
         log_request(record, self.log_path)
-        self._respond(payload)
+        self._respond(payload, status)
 
-    def _respond(self, payload: JsonObject) -> None:
-        """Write a 200 JSON response.
+    def _respond(self, payload: JsonObject, status: int = 200) -> None:
+        """Write a JSON response.
 
         Args:
             payload: Body to serialize.
+            status: HTTP status code (200 for every LINE endpoint).
         """
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
 
-def make_server(port: int, log_path: Path) -> ThreadingHTTPServer:
+def make_server(
+    port: int, log_path: Path, google_token_file: Path | None = None
+) -> ThreadingHTTPServer:
     """Create the stub HTTP server (bound, not yet serving).
 
     Args:
         port: TCP port to bind on localhost; 0 picks a free one (tests).
         log_path: File every request record is appended to.
+        google_token_file: Member token file POST /token answers from; None
+            (the default) makes that endpoint reply 400.
 
     Returns:
         A ThreadingHTTPServer whose handler logs to `log_path`.
@@ -295,7 +383,13 @@ def make_server(port: int, log_path: Path) -> ThreadingHTTPServer:
     def handler_factory(
         request: socket.socket, client_address: tuple[str, int], server: BaseServer
     ) -> LineStubHandler:
-        return LineStubHandler(request, client_address, server, log_path=log_path)
+        return LineStubHandler(
+            request,
+            client_address,
+            server,
+            log_path=log_path,
+            google_token_file=google_token_file,
+        )
 
     return ThreadingHTTPServer(("127.0.0.1", port), handler_factory)
 
@@ -310,12 +404,27 @@ def main() -> None:
         default=DEFAULT_LOG_PATH,
         help=f"請求紀錄檔（一行一個 JSON，預設 {DEFAULT_LOG_PATH}）",
     )
+    parser.add_argument(
+        "--google-token-file",
+        type=Path,
+        default=None,
+        help=(
+            "一份現成的成員 token 檔（data/<room>/google/members/<key>.json）。給了才會開"
+            f"假的 Google token 端點 POST {GOOGLE_TOKEN_PATH}，讓 router 的 /oauth/callback "
+            "不用真的 Google 也能換到 token（router 端設 GOOGLE_TOKEN_URL 指過來）；不給就回 400"
+        ),
+    )
     args = parser.parse_args()
 
-    server = make_server(args.port, args.log)
+    server = make_server(args.port, args.log, args.google_token_file)
     port = server.server_address[1]
     print(f"LINE stub listening on http://localhost:{port}  (log: {args.log})")
     print(f"router 端請設 LINE_API_BASE_URL=http://localhost:{port} 後重啟；Ctrl-C 結束。")
+    if args.google_token_file is not None:
+        print(
+            f"假 Google token 端點已開：POST {GOOGLE_TOKEN_PATH}（來源 {args.google_token_file}）；"
+            f"router 端請設 GOOGLE_TOKEN_URL=http://localhost:{port}{GOOGLE_TOKEN_PATH}"
+        )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

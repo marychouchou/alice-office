@@ -66,7 +66,9 @@ from alice_office_router.room_seed import ensure_google_seed
 logger = logging.getLogger(__name__)
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+# The token endpoint is Settings.GOOGLE_TOKEN_URL, not a constant here: local
+# e2e runs point it at scripts/line_stub.py so the callback can be walked
+# without Google (docs/testing-paths.md).
 
 # How long to wait on Google's token endpoint before giving up. Without it the
 # per-request AsyncClient would inherit httpx's no-timeout default, so a hung
@@ -254,7 +256,8 @@ async def _exchange_code_for_token(
 
     Args:
         code: Authorization code returned by Google.
-        config: Application settings (for the redirect_uri).
+        config: Application settings (for the redirect_uri and the token
+            endpoint, which local e2e runs redirect to a stub).
         client_id: Web application OAuth client id.
         client_secret: Web application OAuth client secret.
 
@@ -263,7 +266,7 @@ async def _exchange_code_for_token(
     """
     async with httpx.AsyncClient(timeout=_TOKEN_EXCHANGE_TIMEOUT_SECONDS) as client:
         response = await client.post(
-            GOOGLE_TOKEN_URL,
+            config.GOOGLE_TOKEN_URL,
             data={
                 "code": code,
                 "client_id": client_id,

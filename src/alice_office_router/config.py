@@ -108,6 +108,15 @@ class Settings(BaseSettings):
     # replaced with a fixed "not configured" notice. Renamed from
     # GOOGLE_OAUTH_PUBLIC_URL on 2026-09-17; the old name is not read.
     PUBLIC_BASE_URL: str = ""
+    # OAuth 2.0 token endpoint the /oauth/callback exchanges its authorization
+    # code at. The default is Google's own, which is what every real
+    # deployment wants. Set it ONLY for local end-to-end testing, to point the
+    # exchange at scripts/line_stub.py's POST /token
+    # (http://localhost:8099/token), so the whole callback path — store the
+    # member token, fire the on_authorized hook, resume the parked message —
+    # can be walked without a browser and without Google
+    # (docs/testing-paths.md, scripts/simulate_oauth.py).
+    GOOGLE_TOKEN_URL: str = "https://oauth2.googleapis.com/token"
     # How long a published file-download link stays valid, measured from the
     # mtime of the router's own copy under published_files_dir.
     FILE_LINK_TTL_HOURS: int = 24

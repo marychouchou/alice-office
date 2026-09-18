@@ -93,6 +93,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -106,7 +107,11 @@ import httpx
 ENV_FILE = Path(__file__).parent.parent / ".env"
 # Legacy alias of the canonical LINE webhook path /webhooks/line; kept working
 # while the LINE OA console still points here (see channel-interface-plan.md).
-ROUTER_URL = "http://localhost:8000/webhook"
+# Overridable because the port-8000 router is often the docker-compose one
+# while the code under test runs on the host on another port: set the env var
+# ROUTER_URL (whole URL, path included) to aim somewhere else.
+DEFAULT_ROUTER_URL = "http://localhost:8000/webhook"
+ROUTER_URL = os.environ.get("ROUTER_URL", DEFAULT_ROUTER_URL)
 WAIT_SECONDS = 8  # how long to wait for LLM to respond before checking logs
 # POST /webhook 本身的 client 端逾時。router 立刻回 200，但第一次對一個全新房間
 # 送訊息時，建容器 + 等 Hermes health check 最多可能到 60 秒（見 README），這條

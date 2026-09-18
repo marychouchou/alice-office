@@ -61,6 +61,46 @@ def test_unknown_route_is_answered_empty_and_flagged() -> None:
     assert matched is False
 
 
+def test_google_token_response_is_built_from_a_member_token_file(tmp_path: Path) -> None:
+    """POST /token replays an existing member token in Google's wire shape."""
+    member_file = tmp_path / "line_u_room.json"
+    member_file.write_text(
+        json.dumps(
+            {
+                "line_u_room": {
+                    "access_token": "access-123",
+                    "refresh_token": "refresh-123",
+                    "expiry_date": 1,
+                    "token_type": "Bearer",
+                    "scope": "https://www.googleapis.com/auth/calendar",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = line_stub.google_token_response(member_file)
+
+    assert payload == {
+        "access_token": "access-123",
+        "refresh_token": "refresh-123",
+        # The stored form is an absolute expiry_date; the router recomputes
+        # one from expires_in, so the stub hands back a lifetime instead.
+        "expires_in": line_stub.GOOGLE_TOKEN_EXPIRES_IN,
+        "scope": "https://www.googleapis.com/auth/calendar",
+        "token_type": "Bearer",
+    }
+
+
+def test_google_token_response_rejects_a_multi_account_file(tmp_path: Path) -> None:
+    """A member file holds exactly one entry; anything else is not one."""
+    member_file = tmp_path / "two.json"
+    member_file.write_text(json.dumps({"a": {}, "b": {}}), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        line_stub.google_token_response(member_file)
+
+
 # ---------------------------------------------------------------------------
 # The running server — request logging and a real SDK round-trip
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from alice_office_router.config import Settings
 from alice_office_router.google_oauth import (
+    _exchange_code_for_token,
     _pending,
     account_key,
     auth_url_for,
@@ -351,6 +352,46 @@ class TestOAuthCallback:
             )
 
         assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# GOOGLE_TOKEN_URL (the exchange endpoint, redirectable for local e2e)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenEndpointSetting:
+    async def _post_call(self, settings: Settings) -> tuple[object, ...]:
+        """Run one code exchange against a mocked httpx and return its call args.
+
+        Args:
+            settings: The settings whose GOOGLE_TOKEN_URL is under test.
+
+        Returns:
+            The positional arguments httpx.AsyncClient.post was called with.
+        """
+        token_response = MagicMock()
+        token_response.json.return_value = {"access_token": "access-123"}
+        post = AsyncMock(return_value=token_response)
+        with patch.object(httpx.AsyncClient, "post", new=post):
+            await _exchange_code_for_token("auth-code", settings, "client-id", "client-secret")
+        return tuple(post.call_args.args)
+
+    async def test_defaults_to_googles_own_token_endpoint(self, tmp_path: Path) -> None:
+        """Any deployment that sets nothing still talks to Google."""
+        settings = _settings(tmp_path)
+
+        args = await self._post_call(settings)
+
+        assert settings.GOOGLE_TOKEN_URL == "https://oauth2.googleapis.com/token"
+        assert args[0] == "https://oauth2.googleapis.com/token"
+
+    async def test_exchange_posts_to_the_configured_url(self, tmp_path: Path) -> None:
+        """Local e2e points it at scripts/line_stub.py instead (docs/testing-paths.md)."""
+        settings = _settings(tmp_path, GOOGLE_TOKEN_URL="http://localhost:8099/token")
+
+        args = await self._post_call(settings)
+
+        assert args[0] == "http://localhost:8099/token"
 
 
 # ---------------------------------------------------------------------------
