@@ -111,7 +111,7 @@ LINE Platform → POST /webhooks/line（LineAdapter）→ core.process_inbound �
 ## Commands
 
 - `uv sync` — 安裝依賴
-- `uv run fastapi dev` — 啟動開發伺服器（localhost:8000）
+- `uv run fastapi dev src/alice_office_router/main.py --reload-dir src` — 啟動開發伺服器（localhost:8000；src layout 所以要指定檔案，`--reload-dir src` 避免 data/ 的寫入觸發重載）
 - `uv run pytest` — 執行所有測試
 - `uv run pytest tests/test_foo.py::test_bar -v` — 執行單一測試
 - `uv run pytest --cov=src --cov-report=term-missing` — 含覆蓋率
