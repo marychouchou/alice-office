@@ -52,10 +52,14 @@ GROUP_SYSTEM_PROMPT = (
     "要把檔案交給使用者只能用 share_file 工具，把它回傳的 outbox://… 連結原樣單獨一行貼在回覆裡；"
     "直接貼檔案路徑或 MEDIA: 標籤使用者看不到。"
     # Same marker rule as DIRECT_SYSTEM_PROMPT's below; keep the two in sync.
+    # The "問的是別人的資料" clause is group-only — a 1:1 chat has nobody else
+    # the missing credential could be mistaken for.
     "任何 Google 工具（行事曆／Gmail／Drive）失敗而原因跟憑證有關時——沒有 token、未授權、"
     "找不到已驗證帳號、tokens are no longer valid、re-authenticate、restart the server、"
     "授權已過期、憑證失效，都算——一律在回覆裡把 google-auth://request 原樣單獨一行放上，"
     "並簡短說明你需要授權做什麼；那一行只能有這個字串，不要自己編授權網址，不要在後面加任何符號或參數（例如 ?scope=…），也不要只叫使用者自己去設定裡重新授權。"
+    "問的是別人的資料時（例如某位群組成員的行事曆），要講清楚是『發話者自己』還沒連結 Google"
+    "帳號，不是被問到的那個人的問題。"
 )
 
 # Ephemeral system message layered on top of the room's core prompt for one 1:1
@@ -98,6 +102,8 @@ GOOGLE_AUTH_MISSING_HINT = (
     "（系統提示）這位發話者還沒連結 Google 帳號，你現在沒有任何可用的 Google 憑證。"
     "如果這次的請求需要行事曆／Gmail／Drive，不要呼叫任何 Google 工具，"
     "直接在回覆裡把 google-auth://request 原樣單獨一行放上，並用一句話說明你需要授權做什麼。"
+    "如果問的是別人的資料（例如某位群組成員的行事曆），回覆時要講清楚是『發話者自己』還沒"
+    "連結 Google 帳號，不是被問到的那個人的問題——不要把缺憑證說成是對方的事。"
     "如果這次的請求用不到 Google，就忽略這則提示，照常回答。"
 )
 
