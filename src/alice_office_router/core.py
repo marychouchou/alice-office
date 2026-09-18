@@ -30,7 +30,7 @@ from structlog.contextvars import bound_contextvars
 from alice_office_router.auth_links import publish_auth_links, read_pending_auth
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
-from alice_office_router.container_manager import get_or_create_container
+from alice_office_router.container_manager import get_or_create_container, refresh_google_mount
 from alice_office_router.conversation_log import Outcome, TurnEnvelope
 from alice_office_router.file_links import publish_file_links
 from alice_office_router.google_oauth import check_google_authorization
@@ -327,13 +327,40 @@ def warm_room(room_key: str, config: Settings) -> None:
     task.add_done_callback(lambda _done: _warmups.pop(room_key, None))
 
 
+def _resumed_message(msg: InboundMessage) -> InboundMessage:
+    """Prefix a parked message with what changed while it was parked.
+
+    A resumed turn re-enters the room's *existing* Hermes session, whose last
+    few turns all say "you are not authorized yet". Replayed verbatim, the
+    question is answered from that history — the agent repeats the refusal
+    without ever retrying a Google tool (seen in the group e2e of
+    docs/google-auth-per-member-plan.md §6b). One system-voiced sentence ahead
+    of the original text is what tells it the world has moved on. Channel-free
+    on purpose: the LINE adapter's own lead line announces the authorization to
+    the room, this one is addressed to the agent.
+
+    Args:
+        msg: The parked inbound message, exactly as first received.
+
+    Returns:
+        A copy whose text carries the prefix; every identity field is
+        untouched, so the turn still runs as the same speaker in the same room.
+    """
+    # Named only in a group, matching auth_links._link_text: a 1:1 room has
+    # nobody else the authorization could have belonged to.
+    who = f"{msg.sender_name} " if msg.is_group and msg.sender_name else ""
+    prefix = f"（系統：{who}剛完成 Google 授權，請重新執行剛才的請求。）"
+    return msg.model_copy(update={"text": f"{prefix}{msg.text}"})
+
+
 async def resume_pending_auth(room_key: str, member_key: str, config: Settings) -> None:
     """Re-run whatever a member parked before they went off to authorize.
 
     The router half of the Google authorization resume
     (docs/google-auth-per-member-plan.md §3.4): `auth_links` parked the message
     that made the agent ask for a link, and this picks it up once the token is
-    on disk, so the member gets their answer without retyping the question.
+    on disk, so the member gets their answer without retyping the question. It
+    goes back in with a system-voiced prefix (`_resumed_message`), not verbatim.
 
     Registered as `google_oauth.on_authorized` from main.py — a hook rather
     than an import, since google_oauth is imported *by* core — and run as a
@@ -368,7 +395,7 @@ async def resume_pending_auth(room_key: str, member_key: str, config: Settings) 
         struct_logger.info(
             "auth_resume_started", room_key=room_key, member=member_key, channel=msg.channel
         )
-        await adapter.resume(msg)
+        await adapter.resume(_resumed_message(msg))
     except Exception as exc:
         # Deliberately broad, like google_oauth._run_authorized's: a resume is
         # a whole agent turn's worth of code reached from a detached task.
@@ -746,7 +773,13 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
     # turn lock, which is what makes the swap safe: it can only ever land
     # between turns, never under a tool call already using the file.
     member = member_key_for(msg)
-    await asyncio.to_thread(select_member_tokens, config, msg.room_key, member)
+    swapped = await asyncio.to_thread(select_member_tokens, config, msg.room_key, member)
+    if swapped:
+        # Docker Desktop for macOS leaves the container's view of the replaced
+        # symlink stuck at EINVAL until something opendir()s the mount; see
+        # container_manager.refresh_google_mount. Still inside the room lock,
+        # still before the agent turn — the MCPs must not read it in between.
+        await asyncio.to_thread(refresh_google_mount, msg.room_key)
 
     # Never blocks a message since 2026-09-18: the only thing left to say is
     # "your token predates the Drive scope", which rides ahead of the reply.

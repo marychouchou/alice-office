@@ -264,9 +264,25 @@ def test_select_is_a_noop_when_google_oauth_is_disabled(tmp_path: Path) -> None:
     """A deployment without Google OAuth must not grow a google/ directory per room."""
     settings = _settings(tmp_path, google=False)
 
-    select_member_tokens(settings, ROOM, ROOM_KEY)
+    assert select_member_tokens(settings, ROOM, ROOM_KEY) is False
 
     assert not settings.room_google_dir(ROOM).exists()
+
+
+def test_select_reports_whether_the_link_actually_moved(tmp_path: Path) -> None:
+    """The return value drives the after-swap work, so it must be exact, not "was called".
+
+    True on the first turn (no link yet) and whenever the speaker changes;
+    False for the 1:1 steady state, where repointing at the same target every
+    turn would make container_manager.refresh_google_mount exec per message.
+    """
+    settings = _settings(tmp_path)
+
+    assert select_member_tokens(settings, ROOM, "u_sender_1") is True
+    assert select_member_tokens(settings, ROOM, "u_sender_1") is False
+    assert select_member_tokens(settings, ROOM, "u_sender_2") is True
+    assert select_member_tokens(settings, ROOM, None) is True
+    assert select_member_tokens(settings, ROOM, None) is False
 
 
 # ---------------------------------------------------------------------------

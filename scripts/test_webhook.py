@@ -21,7 +21,7 @@ Router 必須先啟動：
     uv run python scripts/test_webhook.py --text "請建立一個叫做 weather_report 的技能，功能是查詢天氣"
 
     執行後確認技能是否寫入：
-    ls data/<userId>/skills/
+    ls data/line_<userId>/skills/
 
 [5] 測試 group 來源（groupId 路由）
     uv run python scripts/test_webhook.py --group-id "C_GROUP_001" --text "大家好"
@@ -45,7 +45,7 @@ Router 必須先啟動：
 [10] 測試位置事件（驗證佔位文字轉換）
     uv run python scripts/test_webhook.py --location
 
-[11] 測試圖片事件（驗證下載並落地到 data/<userId>/incoming/）
+[11] 測試圖片事件（驗證下載並落地到 data/line_<userId>/incoming/）
     uv run python scripts/test_webhook.py --image-message-id "<真實 LINE messageId>"
 
     注意：router 會用真實的 LINE Content API 下載這個 messageId 的內容，所以
@@ -53,7 +53,7 @@ Router 必須先啟動：
     使用者傳圖時的 container log 或 router log 找到），假造的 ID 會下載失敗
     （router 會記錄錯誤並略過該事件，這是預期行為，不代表程式壞掉）。
     成功時可確認：
-      ls data/<userId>/incoming/
+      ls data/line_<userId>/incoming/
 
 [12] 群組訊息 + 指定發話者 userId + @mention（模擬群組裡一個已加好友的成員
      問問題並點名 bot；docs/google-auth-per-member-plan.md §6b T5）
@@ -70,11 +70,11 @@ Router 必須先啟動：
 
 看 log 的方式
 -------------
-即時追蹤特定容器的 log（把 <userId> 換成實際 ID）：
-    docker logs -f hermes_<userId>
+即時追蹤特定容器的 log（容器名是 hermes_ + 房間 key，房間 key 是 line_ + LINE ID）：
+    docker logs -f hermes_line_<userId>
 
 例如預設測試的容器：
-    docker logs -f hermes_U_LOCAL_TEST
+    docker logs -f hermes_line_U_LOCAL_TEST
 
 Log 判讀重點（container log，看 hermes agent 有沒有收到訊息）：
     POST /v1/chat/completions 200   → hermes agent api_server 收到並回覆了訊息
@@ -418,7 +418,13 @@ def make_join_event(group_id: str) -> str:
 
 
 def container_name(room_id: str) -> str:
-    """Return the expected container name for a given room_id.
+    """Return the expected container name for a given LINE id.
+
+    Containers are named after the *room key* core routes on, not the bare
+    LINE id: `hermes_line_<userId|groupId|roomId>` (container_manager.
+    _container_name over channels/line/events.py's `line_` prefix). Everything
+    this script is given on the command line is a bare LINE id, so the prefix
+    is added here — without it every container check printed 不存在 ❌.
 
     Args:
         room_id: The LINE userId / groupId / roomId.
@@ -426,7 +432,7 @@ def container_name(room_id: str) -> str:
     Returns:
         Docker container name string.
     """
-    return f"hermes_{room_id}"
+    return f"hermes_line_{room_id}"
 
 
 def get_container_status(room_id: str) -> str | None:

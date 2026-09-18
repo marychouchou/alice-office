@@ -280,6 +280,63 @@ async def test_token_symlink_is_swapped_to_the_speaker_before_the_gate(tmp_path:
     assert order == ["select", "gate"]
 
 
+async def test_a_real_symlink_swap_nudges_the_container_s_google_mount(tmp_path: Path) -> None:
+    """Docker Desktop leaves the replaced symlink at EINVAL until the mount is opendir()ed.
+
+    The nudge has to sit between the swap and the agent turn — both still
+    under the room lock — or the Google MCPs read the stale handle.
+    """
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+    order: list[str] = []
+
+    def _record_agent(*args: object, **kwargs: object) -> AgentReply:
+        order.append("agent")
+        return AgentReply(text="好")
+
+    with (
+        patch("alice_office_router.core.select_member_tokens", return_value=True),
+        patch("alice_office_router.core.refresh_google_mount") as mock_refresh,
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_C1:8642",
+        ),
+        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+    ):
+        mock_refresh.side_effect = lambda *args: order.append("refresh")
+        mock_ask.side_effect = _record_agent
+        await process_inbound(_group_msg(sender_id="U_SPEAKER"), settings)
+
+    mock_refresh.assert_called_once_with("line_C1")
+    assert order == ["refresh", "agent"]
+
+
+async def test_no_symlink_change_means_no_container_exec(tmp_path: Path) -> None:
+    """The 1:1 steady state repoints nothing, so it must not pay a docker exec per message."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path)
+
+    with (
+        patch("alice_office_router.core.select_member_tokens", return_value=False),
+        patch("alice_office_router.core.refresh_google_mount") as mock_refresh,
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="好")),
+        ),
+    ):
+        await process_inbound(_msg(), settings)
+
+    mock_refresh.assert_not_called()
+
+
 async def test_token_symlink_swap_for_a_direct_room_uses_the_room_key(tmp_path: Path) -> None:
     """A 1:1 room's member is the room itself, so it swaps to the same file every turn."""
     from alice_office_router.core import process_inbound
@@ -464,9 +521,53 @@ async def test_resume_pending_auth_hands_the_parked_message_to_its_adapter(
 
     await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
 
-    assert stub_adapter.resumed == [msg]
+    assert len(stub_adapter.resumed) == 1
+    resumed = stub_adapter.resumed[0]
+    assert resumed.text.endswith("明天有什麼會議")
+    # Identity is untouched: same room, same channel, same speaker.
+    assert resumed.model_dump(exclude={"text"}) == msg.model_dump(exclude={"text"})
     # Single-shot: the record is consumed, so authorizing twice never re-asks.
     assert not path.exists()
+
+
+async def test_resume_tells_the_agent_the_authorization_just_happened(
+    tmp_path: Path, stub_adapter: _StubAdapter
+) -> None:
+    """Replayed verbatim, the question is answered from the session's "not authorized" history.
+
+    Seen in the group e2e: the resumed turn repeated "you still need to
+    authorize" without retrying a single Google tool. The system-voiced prefix
+    is what makes the agent try again.
+    """
+    from alice_office_router.core import resume_pending_auth
+
+    settings = _settings(DATA_DIR=tmp_path)
+    _park(settings, _msg("明天有什麼會議"), "line_room_aaa")
+
+    await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
+
+    assert stub_adapter.resumed[0].text == (
+        "（系統：剛完成 Google 授權，請重新執行剛才的請求。）明天有什麼會議"
+    )
+
+
+async def test_resume_in_a_group_names_who_authorized(
+    tmp_path: Path, stub_adapter: _StubAdapter
+) -> None:
+    """A group turn carries several people's history, so the prefix has to say whose token this is."""
+    from alice_office_router.core import resume_pending_auth
+
+    settings = _settings(DATA_DIR=tmp_path)
+    msg = _group_msg("明天有什麼會議", sender_id="U1", sender_name="王小明").model_copy(
+        update={"room_key": "line_C_GROUP"}
+    )
+    _park(settings, msg, "u1")
+
+    await resume_pending_auth("line_C_GROUP", "u1", settings)
+
+    assert stub_adapter.resumed[0].text == (
+        "（系統：王小明 剛完成 Google 授權，請重新執行剛才的請求。）明天有什麼會議"
+    )
 
 
 async def test_resume_pending_auth_does_nothing_when_no_message_is_parked(

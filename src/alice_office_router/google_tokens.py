@@ -207,7 +207,7 @@ def migrate_legacy_tokens(config: Settings, room_id: str) -> None:
     logger.info(f"Migrated legacy tokens.json of room [{room_id}] to {dest}")
 
 
-def select_member_tokens(config: Settings, room_id: str, member_key: str | None) -> None:
+def select_member_tokens(config: Settings, room_id: str, member_key: str | None) -> bool:
     """Point this room's tokens.json at one member's own token file.
 
     Creates or replaces ``data/<room_id>/google/tokens.json`` as a *relative*
@@ -225,9 +225,16 @@ def select_member_tokens(config: Settings, room_id: str, member_key: str | None)
         member_key: The speaker's account key, or None for an unidentified
             group speaker — which points at ANONYMOUS_MEMBER, a file that is
             never written.
+
+    Returns:
+        True only when the link actually moved (a different member now, or no
+        link at all before). False for the two no-ops: Google is disabled for
+        this deployment, or the link already names this member — the 1:1
+        steady state. Callers use it to run the after-swap work exactly on the
+        turns that need it (core._take_turn nudges the container's mount).
     """
     if not config.google_oauth_enabled:
-        return
+        return False
     # A room can reach its first turn before its container (and thus its
     # google/ dir) exists; ensure_google_seed is the idempotent way to get
     # the directory *and* this room's credential copies in place.
@@ -239,7 +246,7 @@ def select_member_tokens(config: Settings, room_id: str, member_key: str | None)
     # readlink, not resolve(): the comparison is about the link itself, and
     # the target usually does not exist yet.
     if tokens_path.is_symlink() and tokens_path.readlink() == target:
-        return
+        return False
 
     tmp_path = tokens_path.with_name(f".{tokens_path.name}.{secrets.token_hex(8)}")
     tmp_path.symlink_to(target)
@@ -249,6 +256,7 @@ def select_member_tokens(config: Settings, room_id: str, member_key: str | None)
         tmp_path.unlink(missing_ok=True)
         raise
     logger.info(f"Room [{room_id}] Google tokens.json now points at {target}")
+    return True
 
 
 def check_member_token(config: Settings, room_id: str, member_key: str | None) -> str:
