@@ -18,8 +18,10 @@ from __future__ import annotations
 import logging
 import time
 
-from linebot.v3.messaging import AsyncApiClient, AsyncMessagingApi, Configuration
+from linebot.v3.messaging import AsyncApiClient, AsyncMessagingApi
 from linebot.v3.messaging.exceptions import ApiException
+
+from alice_office_router.channels.line.client import build_configuration
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,11 @@ _CACHE = _ProfileCache()
 
 
 async def _fetch_display_name(
-    source_type: str | None, native_room_id: str, user_id: str, token: str
+    source_type: str | None,
+    native_room_id: str,
+    user_id: str,
+    token: str,
+    api_base_url: str | None,
 ) -> str:
     """Fetch a group/room member's display name from the LINE Messaging API.
 
@@ -101,6 +107,8 @@ async def _fetch_display_name(
         native_room_id: The bare LINE groupId/roomId (never a room_key).
         user_id: The bare LINE userId of the member to look up.
         token: LINE channel access token for authentication.
+        api_base_url: Optional LINE API base URL override (see
+            client.build_configuration); None means the real LINE Platform.
 
     Returns:
         The member's display name as reported by LINE.
@@ -109,7 +117,7 @@ async def _fetch_display_name(
         linebot.v3.messaging.exceptions.ApiException: If the LINE API rejects
             the request (e.g. the member has left the room).
     """
-    configuration = Configuration(access_token=token)
+    configuration = build_configuration(token, api_base_url)
     async with AsyncApiClient(configuration) as api_client:
         messaging_api = AsyncMessagingApi(api_client)
         if source_type == "room":
@@ -120,7 +128,11 @@ async def _fetch_display_name(
 
 
 async def _lookup_display_name(
-    source_type: str | None, native_room_id: str, user_id: str, token: str
+    source_type: str | None,
+    native_room_id: str,
+    user_id: str,
+    token: str,
+    api_base_url: str | None,
 ) -> str | None:
     """Return a member's display name from cache or the LINE API, or None.
 
@@ -129,6 +141,8 @@ async def _lookup_display_name(
         native_room_id: The bare LINE groupId/roomId.
         user_id: The bare LINE userId of the member to look up.
         token: LINE channel access token for authentication.
+        api_base_url: Optional LINE API base URL override (see
+            client.build_configuration); None means the real LINE Platform.
 
     Returns:
         The display name, or None when the lookup fails (logged, never raised —
@@ -143,7 +157,7 @@ async def _lookup_display_name(
     if cached is not None:
         return cached
     try:
-        name = await _fetch_display_name(source_type, native_room_id, user_id, token)
+        name = await _fetch_display_name(source_type, native_room_id, user_id, token, api_base_url)
     except ApiException as exc:
         logger.info(f"Could not resolve LINE member {user_id} in {native_room_id}: {exc}")
         return None
@@ -155,7 +169,11 @@ async def _lookup_display_name(
 
 
 async def resolve_sender_name(
-    source_type: str | None, native_room_id: str | None, user_id: str | None, token: str
+    source_type: str | None,
+    native_room_id: str | None,
+    user_id: str | None,
+    token: str,
+    api_base_url: str | None = None,
 ) -> str:
     """Resolve a group speaker's display name, always returning something usable.
 
@@ -167,6 +185,8 @@ async def resolve_sender_name(
         native_room_id: The bare LINE groupId/roomId, or None if unresolvable.
         user_id: The speaker's bare LINE userId, or None if LINE omitted it.
         token: LINE channel access token for authentication.
+        api_base_url: Optional LINE API base URL override (see
+            client.build_configuration); None means the real LINE Platform.
 
     Returns:
         The member's display name; the first 8 chars of the userId when the
@@ -175,7 +195,7 @@ async def resolve_sender_name(
     if not user_id:
         return _FALLBACK_MEMBER
     if native_room_id:
-        name = await _lookup_display_name(source_type, native_room_id, user_id, token)
+        name = await _lookup_display_name(source_type, native_room_id, user_id, token, api_base_url)
         if name:
             return name
     return user_id[:_ID_PREFIX_LEN]

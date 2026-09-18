@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from linebot.v3.messaging.exceptions import ApiException
 
 from alice_office_router.channels.line.client import (
+    build_configuration,
     download_line_content,
     push_line_message,
     reply_line_message,
     show_loading_animation,
 )
+
+_CLIENT = "alice_office_router.channels.line.client"
 
 
 async def test_push_line_message_calls_messaging_api() -> None:
@@ -139,3 +142,54 @@ async def test_show_loading_animation_swallows_api_exception(
         record.levelno == logging.WARNING and "U123" in record.getMessage()
         for record in caplog.records
     )
+
+
+# ---------------------------------------------------------------------------
+# build_configuration — LINE_API_BASE_URL redirection (docs/testing-paths.md)
+# ---------------------------------------------------------------------------
+
+
+def test_build_configuration_leaves_sdk_hosts_alone_by_default() -> None:
+    """No base URL means host stays None, so the SDK picks its own LINE hosts."""
+    configuration = build_configuration("test_channel_token")
+
+    assert configuration.host is None
+    assert configuration.access_token == "test_channel_token"
+
+
+def test_build_configuration_uses_api_base_url_when_set() -> None:
+    """A base URL (the local stub) overrides the SDK's host for every call."""
+    configuration = build_configuration("test_channel_token", "http://localhost:8099")
+
+    assert configuration.host == "http://localhost:8099"
+
+
+def test_build_configuration_treats_empty_base_url_as_unset() -> None:
+    """An empty string must not become the host — that would break every URL."""
+    configuration = build_configuration("test_channel_token", "")
+
+    assert configuration.host is None
+
+
+async def test_push_line_message_threads_api_base_url_into_configuration() -> None:
+    """The caller's base URL reaches the SDK configuration the request uses."""
+    spy = MagicMock(wraps=build_configuration)
+    with (
+        patch(f"{_CLIENT}.build_configuration", new=spy),
+        patch(f"{_CLIENT}.AsyncMessagingApi.push_message", new=AsyncMock()),
+    ):
+        await push_line_message("room_AAA", "哈囉！", "test_channel_token", "http://localhost:8099")
+
+    spy.assert_called_once_with("test_channel_token", "http://localhost:8099")
+
+
+async def test_reply_line_message_threads_api_base_url_into_configuration() -> None:
+    """Same for the reply path, which is what an e2e test usually exercises."""
+    spy = MagicMock(wraps=build_configuration)
+    with (
+        patch(f"{_CLIENT}.build_configuration", new=spy),
+        patch(f"{_CLIENT}.AsyncMessagingApi.reply_message", new=AsyncMock()),
+    ):
+        await reply_line_message("reply_token_123", "哈囉！", "tok", "http://localhost:8099")
+
+    spy.assert_called_once_with("tok", "http://localhost:8099")

@@ -26,6 +26,16 @@ class Settings(BaseSettings):
 
     LINE_CHANNEL_SECRET: str
     LINE_CHANNEL_ACCESS_TOKEN: str
+    # Base URL every OUTBOUND LINE Messaging API call goes to (reply, push,
+    # loading animation, member profile, content download). Empty (default)
+    # means the line-bot-sdk's own hosts — api.line.me and api-data.line.me —
+    # i.e. the real LINE Platform, which is what any real deployment wants.
+    # Set it ONLY for local end-to-end testing, to point the router at
+    # scripts/line_stub.py (http://localhost:8099), which records what the
+    # router tried to send instead of needing a phone (docs/testing-paths.md).
+    # A trailing slash is stripped (see _strip_line_api_base_url_slash) because
+    # the SDK concatenates this with paths that already start with "/".
+    LINE_API_BASE_URL: str = ""
     DATA_DIR: Path = _DOCKER_DEFAULT_DATA_DIR
     HOST_DATA_DIR: Path = Path("/app/data")
     HERMES_IMAGE: str = "nousresearch/hermes-agent"
@@ -155,6 +165,23 @@ class Settings(BaseSettings):
     # False for a deployment contractually barred from keeping any per-turn
     # record; the same line still goes to stdout for the log collector.
     CONVERSATION_LOG_ENABLED: bool = True
+
+    @field_validator("LINE_API_BASE_URL")
+    @classmethod
+    def _strip_line_api_base_url_slash(cls, value: str) -> str:
+        """Normalize the LINE API base URL so callers never handle two forms.
+
+        The SDK builds request URLs as `host + "/v2/bot/..."`, so a value
+        entered with a trailing slash would produce a double slash. Stripping
+        it here means every reader can use the value as-is.
+
+        Args:
+            value: The raw base URL from the environment (possibly empty).
+
+        Returns:
+            The URL without any trailing slashes; an empty string stays empty.
+        """
+        return value.rstrip("/")
 
     @field_validator("LOG_LEVEL", mode="before")
     @classmethod

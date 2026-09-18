@@ -76,6 +76,37 @@ uv run python scripts/test_webhook.py --text "今天天氣如何?"
 用途:測 LINE 那段 code(驗簽、事件解析、去重、房間路由)。
 看回覆:router log 或 `scripts/debug_room.py <room_id>`,不在終端機 response 裡。
 
+#### 🟠+ 加掛本機 LINE stub:直接看到 router 回了什麼
+
+偽造 webhook 唯一的缺點就是「回覆看不到」——假 replyToken 一定被真 LINE 拒絕。
+把 router 的 `LINE_API_BASE_URL` 指到 `scripts/line_stub.py`(本機假 LINE
+Platform,只用標準函式庫),reply / push / 群組成員名稱查詢就全部落在本機,
+一行一個 JSON 印到 stdout 並附加到 log 檔:
+
+```bash
+# 終端機 1:起 stub(預設 8099 埠,log 預設 data/_line_stub/requests.jsonl)
+uv run python scripts/line_stub.py
+uv run python scripts/line_stub.py --port 9000 --log /tmp/line.jsonl   # 想換就換
+
+# 終端機 2:router 指向 stub(host 模式;容器模式改在 .env 設同一個變數再 up -d)
+LINE_API_BASE_URL=http://localhost:8099 uv run fastapi dev --reload-dir src
+
+# 終端機 3:照常送偽造 webhook
+uv run python scripts/test_webhook.py --text "今天天氣如何?"
+
+# 看 router 到底回了什麼(stub 的終端機已經印了,也可以撈檔)
+tail -f data/_line_stub/requests.jsonl | jq '{path, texts}'
+```
+
+stub 回的是 LINE 官方格式的成功回應(`sentMessages`),所以 router 這邊會判定
+「送出成功」,不會再 fallback 或報錯;群組測試時
+`GET /v2/bot/group/<groupId>/member/<userId>` 回固定假名稱
+`成員-<userId 末四碼>`,不需要真的群組成員。沒對到的端點一律回 200 `{}` 並在
+log 標 `"matched": false`,SDK 永遠不會炸。
+
+⚠️ `LINE_API_BASE_URL` 只給本機測試用,正式部署一定要留空(＝真的 LINE
+Platform)。log 檔寫在 `data/` 底下,已經在 `.gitignore` 裡,不會進版控。
+
 ### 🟢 測試路 B:API curl(`/webhooks/api/messages`)
 
 回覆是**一段式**的:curl 的連線一直掛著,router 在這條連線裡同步跑完
@@ -120,7 +151,7 @@ curl 說過的話。
 | LINE 段 code(驗簽/解析) | ✅ 測到 | ✅ 測到 | ✘ 跳過 |
 | core 段(gate/容器/agent) | ✅ 測到 | ✅ 測到 | ✅ 測到 |
 | **回覆方式** | 另開連線打 LINE API → 推播到手機 | 同左,但假 token 被拒 ❌ | **同一條連線的 HTTP response** |
-| 在哪看回覆 | 手機 | router log | 終端機(response body) |
+| 在哪看回覆 | 手機 | router log(掛 stub 後看 stub log) | 終端機(response body) |
 | 需要的憑證 | LINE secret + access token(router 端) | `.env` 的 LINE_CHANNEL_SECRET(算簽章用) | `.env` 的 API_CHANNEL_TOKEN |
 | 手機 | 要 | 不用 | 不用 |
 
@@ -128,7 +159,8 @@ curl 說過的話。
 
 - **改 core / 容器 / agent / MCP / plugin** → 🟢 curl(最快、回覆直接看得到、
   能互動,還能用 `line_…` 插進真房間重現問題)。
-- **改 `channels/line/` 的解析/驗簽/路由** → 🟠 偽造 webhook。
+- **改 `channels/line/` 的解析/驗簽/路由** → 🟠 偽造 webhook(想連回覆內容
+  一起看,就再掛 `scripts/line_stub.py`)。
 - **commit 前整條驗一次** → `uv run python scripts/e2e_smoke.py`
   (一鍵自動跑 🟢,加 `--line` 連 🟠 一起跑,測完自己清乾淨)。
 - **只有「真的送到 LINE、手機上的顯示效果」**(切則、長訊息、推播)要用手機——

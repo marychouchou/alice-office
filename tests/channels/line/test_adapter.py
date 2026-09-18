@@ -474,7 +474,7 @@ class TestDeliverReply:
         ):
             await LineAdapter()._deliver_reply("room_A", "hello", "reply_token_1", _settings())
 
-        mock_reply.assert_awaited_once_with("reply_token_1", "hello", TEST_TOKEN)
+        mock_reply.assert_awaited_once_with("reply_token_1", "hello", TEST_TOKEN, None)
         mock_push.assert_not_called()
 
     async def test_falls_back_to_push_when_reply_token_rejected(self) -> None:
@@ -488,7 +488,7 @@ class TestDeliverReply:
             await LineAdapter()._deliver_reply("room_A", "hello", "expired_token", _settings())
 
         mock_reply.assert_awaited_once()
-        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN)
+        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN, None)
 
     async def test_pushes_directly_when_no_reply_token(self) -> None:
         with (
@@ -498,7 +498,7 @@ class TestDeliverReply:
             await LineAdapter()._deliver_reply("room_A", "hello", None, _settings())
 
         mock_reply.assert_not_called()
-        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN)
+        mock_push.assert_awaited_once_with("room_A", "hello", TEST_TOKEN, None)
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +519,7 @@ async def test_process_and_reply_pushes_single_text_when_no_reply_token() -> Non
         await LineAdapter()._process_and_reply("line_room_AAA", "哈囉", _settings())
 
     # room_key comes in prefixed; the Push target is the stripped native id.
-    mock_push.assert_awaited_once_with("room_AAA", "哈囉，我是 Hermes", TEST_TOKEN)
+    mock_push.assert_awaited_once_with("room_AAA", "哈囉，我是 Hermes", TEST_TOKEN, None)
 
 
 async def test_process_and_reply_uses_reply_token_for_first_text() -> None:
@@ -554,8 +554,8 @@ async def test_process_and_reply_first_text_reply_token_rest_push() -> None:
             "line_room_AAA", "哈囉", _settings(), "reply_token_1"
         )
 
-    mock_reply.assert_awaited_once_with("reply_token_1", "notice", TEST_TOKEN)
-    mock_push.assert_awaited_once_with("room_AAA", "agent reply", TEST_TOKEN)
+    mock_reply.assert_awaited_once_with("reply_token_1", "notice", TEST_TOKEN, None)
+    mock_push.assert_awaited_once_with("room_AAA", "agent reply", TEST_TOKEN, None)
 
 
 async def test_process_and_reply_delivers_nothing_on_empty_texts() -> None:
@@ -675,7 +675,7 @@ class TestLoadingAnimation:
 
         assert order == ["loading", "push"]
         # Bare LINE user id (prefix stripped), 60 s — LINE's maximum.
-        stub_loading_animation.assert_awaited_with("room_AAA", TEST_TOKEN, 60)
+        stub_loading_animation.assert_awaited_with("room_AAA", TEST_TOKEN, 60, None)
 
     async def test_group_message_never_shows_the_animation(
         self, stub_loading_animation: AsyncMock
@@ -699,7 +699,9 @@ class TestLoadingAnimation:
         refreshed = asyncio.Event()
         calls: list[str] = []
 
-        async def _fake_loading(native_id: str, token: str, seconds: int = 60) -> None:
+        async def _fake_loading(
+            native_id: str, token: str, seconds: int = 60, api_base_url: str | None = None
+        ) -> None:
             calls.append(native_id)
             if len(calls) >= 2:
                 refreshed.set()

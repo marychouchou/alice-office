@@ -8,6 +8,7 @@ services:
     environment:
       - LINE_CHANNEL_SECRET=${LINE_CHANNEL_SECRET}
       - LINE_CHANNEL_ACCESS_TOKEN=${LINE_CHANNEL_ACCESS_TOKEN}
+      - LINE_API_BASE_URL=${LINE_API_BASE_URL:-}
       - HOST_DATA_DIR=${PWD}/data
       - HERMES_TEMPLATES_DIR=/app/hermes-templates
       - HERMES_IMAGE=${HERMES_IMAGE}

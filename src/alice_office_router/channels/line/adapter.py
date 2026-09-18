@@ -235,6 +235,7 @@ class LineAdapter:
             event.native_id,
             sender_id,
             config.LINE_CHANNEL_ACCESS_TOKEN,
+            config.LINE_API_BASE_URL or None,
         )
         background_tasks.add_task(
             self._process_and_reply,
@@ -412,8 +413,11 @@ class LineAdapter:
 
         native_id = self._native_id(room_key)
         token = config.LINE_CHANNEL_ACCESS_TOKEN
-        await show_loading_animation(native_id, token, _LOADING_ANIMATION_SECONDS)
-        refresher = asyncio.create_task(self._refresh_loading_animation(native_id, token))
+        api_base_url = config.LINE_API_BASE_URL or None
+        await show_loading_animation(native_id, token, _LOADING_ANIMATION_SECONDS, api_base_url)
+        refresher = asyncio.create_task(
+            self._refresh_loading_animation(native_id, token, api_base_url)
+        )
         try:
             yield
         finally:
@@ -422,7 +426,9 @@ class LineAdapter:
                 await refresher
 
     @staticmethod
-    async def _refresh_loading_animation(native_id: str, channel_access_token: str) -> None:
+    async def _refresh_loading_animation(
+        native_id: str, channel_access_token: str, api_base_url: str | None
+    ) -> None:
         """Re-issue the loading animation just before each one lapses.
 
         Runs as a companion task that `_loading_animation` cancels once the
@@ -431,11 +437,13 @@ class LineAdapter:
         Args:
             native_id: Bare LINE user id of the 1:1 chat.
             channel_access_token: LINE channel access token for authentication.
+            api_base_url: Optional LINE API base URL override (see
+                client.build_configuration); None means the real LINE Platform.
         """
         while True:
             await asyncio.sleep(_LOADING_REFRESH_INTERVAL)
             await show_loading_animation(
-                native_id, channel_access_token, _LOADING_ANIMATION_SECONDS
+                native_id, channel_access_token, _LOADING_ANIMATION_SECONDS, api_base_url
             )
 
     async def _deliver_texts(
@@ -491,7 +499,12 @@ class LineAdapter:
         """
         if reply_token:
             try:
-                await reply_line_message(reply_token, text, config.LINE_CHANNEL_ACCESS_TOKEN)
+                await reply_line_message(
+                    reply_token,
+                    text,
+                    config.LINE_CHANNEL_ACCESS_TOKEN,
+                    config.LINE_API_BASE_URL or None,
+                )
                 return True
             except ApiException as exc:
                 logger.info(
@@ -499,7 +512,9 @@ class LineAdapter:
                 )
 
         try:
-            await push_line_message(native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN)
+            await push_line_message(
+                native_id, text, config.LINE_CHANNEL_ACCESS_TOKEN, config.LINE_API_BASE_URL or None
+            )
         except Exception as exc:
             logger.error(f"Failed to push LINE reply for room {native_id}: {exc}")
             return False
