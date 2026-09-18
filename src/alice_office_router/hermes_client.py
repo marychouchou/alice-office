@@ -155,6 +155,23 @@ class _SessionEnvelope(BaseModel):
     session: _SessionCounts = Field(default_factory=_SessionCounts)
 
 
+class _SessionMessage(BaseModel):
+    """One row of `GET /api/sessions/{id}/messages` (only the fields we read)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    role: str | None = None
+    content: str | None = None
+
+
+class _SessionMessagesEnvelope(BaseModel):
+    """The `{"object": "list", "data": [...]}` response wrapper."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    data: list[_SessionMessage] = Field(default_factory=list)
+
+
 @dataclass
 class _StreamOutcome:
     """The running result of one streamed turn, folded chunk by chunk.
@@ -279,6 +296,49 @@ async def _fetch_session_counts(
         )
         return None, None
     return parsed.session.tool_call_count, parsed.session.api_call_count
+
+
+async def _fetch_last_assistant_text(
+    client: httpx.AsyncClient, base_url: str, session_id: str, api_key: str
+) -> str | None:
+    """Read the session's own message history and return its last assistant reply.
+
+    Fallback for a stream that ends with a usable finish_reason but carried no
+    content at all — observed when a turn ends via Hermes's own max-iterations
+    summary (`agent.chat_completion_helpers.handle_max_iterations`), which asks
+    the model for one last answer through a *non-streaming*
+    `chat.completions.create()` call that writes straight to Hermes's own
+    state.db without ever reaching the SSE stream this client reads. The
+    answer is real and already in Hermes's own history — `GET
+    /api/sessions/{id}/messages` returns the whole session, unpaginated — so
+    this is read from there instead of treating the turn as a hard failure.
+
+    Args:
+        client: The turn's own httpx client (reused for connection pooling).
+        base_url: Base URL of the Hermes agent container.
+        session_id: The session whose history to read.
+        api_key: Bearer token matching the container's API_SERVER_KEY.
+
+    Returns:
+        The last message with `role: "assistant"` and non-empty content
+        (an assistant message mid-tool-call has empty content, so those are
+        skipped), or None when the read failed or no such message exists.
+    """
+    url = f"{base_url}/api/sessions/{quote(session_id, safe='')}/messages"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = await client.get(url, headers=headers, timeout=_SESSION_STATS_TIMEOUT)
+        response.raise_for_status()
+        parsed = _SessionMessagesEnvelope.model_validate_json(response.content)
+    except (httpx.HTTPError, ValidationError) as exc:
+        logger.warning(
+            "hermes_session_messages_unavailable", session_id=session_id, error=type(exc).__name__
+        )
+        return None
+    for message in reversed(parsed.data):
+        if message.role == "assistant" and message.content:
+            return message.content
+    return None
 
 
 async def delete_hermes_session(base_url: str, session_id: str, api_key: str) -> None:
@@ -425,6 +485,45 @@ async def _consume_stream(response: httpx.Response, session_id: str) -> _StreamO
     return outcome
 
 
+def _resolve_reply_text(
+    outcome: _StreamOutcome, recovered_content: str | None, session_id: str
+) -> str:
+    """Decide a turn's final reply text, or raise why it has none.
+
+    Args:
+        outcome: The folded stream outcome.
+        recovered_content: The session-history fallback's answer (see
+            _fetch_last_assistant_text), or None when the stream itself
+            carried text, or when it didn't and the fallback found nothing
+            either.
+        session_id: The turn's session id, for the recovery warning log.
+
+    Returns:
+        `outcome.text` when non-empty; otherwise `recovered_content`, logged
+        as a warning since this path means the SSE stream itself came back
+        empty (observed on Hermes's own max-iterations summary path, which
+        answers outside the stream — see hermes-max-iterations-no-content-bug).
+
+    Raises:
+        ValueError: If Hermes reported a failed turn, or neither the stream
+            nor the history fallback carried any content.
+    """
+    failure = outcome.failure_message()
+    if failure is not None:
+        raise ValueError(f"Hermes agent failed: {failure}")
+    if outcome.text:
+        return outcome.text
+    if recovered_content:
+        logger.warning(
+            "hermes_agent_stream_empty_recovered_from_history",
+            session_id=session_id,
+            finish_reason=outcome.finish_reason,
+            chars=len(recovered_content),
+        )
+        return recovered_content
+    raise ValueError("Hermes agent response had no content")
+
+
 async def ask_hermes_agent(
     base_url: str,
     session_id: str,
@@ -481,7 +580,8 @@ async def ask_hermes_agent(
             silent for longer than idle_timeout_seconds.
         TimeoutError: If the turn was still streaming after max_seconds.
         ValueError: If Hermes reported a failed turn, or the stream carried no
-            reply content at all.
+            reply content and the session-history fallback
+            (_fetch_last_assistant_text) found none either.
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -508,6 +608,15 @@ async def ask_hermes_agent(
         after_tool_calls, after_api_calls = await _fetch_session_counts(
             client, base_url, session_id, api_key
         )
+        # Still inside the client's context, so this reuses the same pooled
+        # connection: a stream that carried no text but no failure either
+        # (the max-iterations summary path — see _fetch_last_assistant_text)
+        # has its real answer sitting in Hermes's own session history.
+        recovered_content: str | None = None
+        if not outcome.text and outcome.failure_message() is None:
+            recovered_content = await _fetch_last_assistant_text(
+                client, base_url, session_id, api_key
+            )
 
     tool_calls = _count_delta(after_tool_calls, before_tool_calls)
     api_calls = _count_delta(after_api_calls, before_api_calls)
@@ -530,12 +639,7 @@ async def ask_hermes_agent(
         api_calls=api_calls,
     )
 
-    failure = outcome.failure_message()
-    if failure is not None:
-        raise ValueError(f"Hermes agent failed: {failure}")
-    content = outcome.text
-    if not content:
-        raise ValueError("Hermes agent response had no content")
+    content = _resolve_reply_text(outcome, recovered_content, session_id)
     if outcome.finish_reason == "length" or outcome.hermes.partial:
         # Delivered anyway: half an answer beats none, and the user can ask for
         # the rest. Recurring truncation is an LLM max-tokens problem, not a

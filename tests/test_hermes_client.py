@@ -347,9 +347,82 @@ async def test_ask_hermes_agent_raises_when_hermes_reports_a_failed_turn() -> No
 
 
 async def test_ask_hermes_agent_raises_on_a_stream_with_no_content() -> None:
-    """A stream that finished without any text has no usable reply."""
+    """A stream that finished without any text has no usable reply.
+
+    The GET /api/sessions/{id}/messages fallback also 404s here (`_serving`
+    404s every GET), so this doubles as "the fallback read itself failed"
+    coverage; test_ask_hermes_agent_raises_when_history_fallback_has_no_text
+    below covers "the fallback succeeded but found nothing usable" instead.
+    """
     body = _body(_finish_chunk(), "data: [DONE]")
     with _serving(body), pytest.raises(ValueError, match="no content"):
+        await _ask()
+
+
+def _messages_handler(
+    body: bytes, history: list[dict[str, object]]
+) -> Callable[[httpx.Request], httpx.Response]:
+    """Build a handler serving `body` for the POST and `history` as the GET .../messages data.
+
+    Args:
+        body: SSE body to stream back for the turn's POST.
+        history: Rows for the `GET /api/sessions/{id}/messages` response's
+            `data` array (the session-history fallback ask_hermes_agent reads
+            when the stream itself carries no content).
+
+    Returns:
+        A handler for _mock_transport: routes the POST to `body`, a GET whose
+        path ends in "/messages" to `history`, and any other GET (the
+        tool/api call-count brackets) to the "session not found yet" 404.
+    """
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+        if request.url.path.endswith("/messages"):
+            return httpx.Response(
+                200, json={"object": "list", "session_id": "room_AAA", "data": history}
+            )
+        return _session_stats_not_found(request)
+
+    return _handler
+
+
+async def test_ask_hermes_agent_recovers_text_from_session_history_when_the_stream_is_empty() -> (
+    None
+):
+    """Hermes's own max-iterations summary never reaches the SSE stream; state.db still has it."""
+    body = _body(_finish_chunk(), "data: [DONE]")
+    history = [
+        {"role": "user", "content": "問題"},
+        # An assistant message mid-tool-call has empty content — must be
+        # skipped in favor of the later one that actually has text.
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "x"}]},
+        {"role": "tool", "content": "工具結果"},
+        {"role": "assistant", "content": "從歷史救回的答案"},
+    ]
+    with (
+        _mock_transport(_messages_handler(body, history)),
+        patch("alice_office_router.hermes_client.logger", new=Mock()) as log,
+    ):
+        reply = await _ask()
+
+    assert reply.text == "從歷史救回的答案"
+    assert log.warning.call_args[0] == ("hermes_agent_stream_empty_recovered_from_history",)
+    assert log.warning.call_args[1]["finish_reason"] == "stop"
+
+
+async def test_ask_hermes_agent_raises_when_history_fallback_has_no_text() -> None:
+    """The stream is empty and the fallback's history has no non-empty assistant message either."""
+    body = _body(_finish_chunk(), "data: [DONE]")
+    history = [
+        {"role": "user", "content": "問題"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "x"}]},
+    ]
+    with (
+        _mock_transport(_messages_handler(body, history)),
+        pytest.raises(ValueError, match="no content"),
+    ):
         await _ask()
 
 
