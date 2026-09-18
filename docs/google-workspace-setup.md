@@ -53,24 +53,26 @@ data/<room_id>/google/tokens.json                    ← 執行期自動產生�
 | 變數 | 說明 |
 |------|------|
 | `PUBLIC_BASE_URL` | 這個 router 的公開 HTTPS base URL（不含結尾斜線），全站共用（檔案下載連結也用它）。2026-09-17 由 `GOOGLE_OAUTH_PUBLIC_URL` 改名而來。Google 整合的開關是「它已設 **且** Web application 憑證檔存在」；任一缺＝整個 Google 整合停用：oauth 路由回 400、新房間不 seed 這三個 MCP、訊息也不會被攔。 |
-| `GOOGLE_OAUTH_GATE` | 預設 `true`。設 `false` 時 oauth 路由照常運作，只是不擋任何房間的訊息（適合先把 MCP 跑起來、還沒想清楚要不要強制授權的階段）。 |
 
 `Settings.google_oauth_enabled`（`config.py`）同時檢查
 `PUBLIC_BASE_URL` 非空**且** `data/_google/gcp-oauth.keys.json` 存在，兩者缺一都視為停用。
 
 ## 訊息授權判斷流程
 
-`check_google_authorization` 每則訊息都會跑一次，`ok`／`notice`／`blocked` 三種結果對應不同行為：
+> **2026-09-18 起不再擋訊息**：`blocked` 狀態與 `GOOGLE_OAUTH_GATE` 開關都已刪除，
+> 沒授權的訊息照常進 agent，授權連結改由「Google 工具真的回報沒 token」時才發
+> （逐人授權，見 [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)）。
+> 本節其餘文字待該計畫 step 6 一併改寫。
+
+`check_google_authorization` 每則要進 agent 的訊息都會跑一次，只剩 `ok`／`notice` 兩種結果：
 
 ```mermaid
 flowchart TD
-    Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"google_oauth_enabled<br/>且 GOOGLE_OAUTH_GATE？"}
+    Start(["收到訊息，準備呼叫 agent 前"]) --> Enabled{"google_oauth_enabled<br/>且認得出發話者？"}
     Enabled -- "否" --> Ok1["ok：直接放行"]
-    Enabled -- "是" --> HasToken{"這個房間自己的<br/>tokens.json 有 token？"}
-    HasToken -- "沒有" --> Blocked["blocked：回授權連結<br/>不呼叫 agent、背景暖機容器"]
-    HasToken -- "有" --> Expired{"access_token 過期？"}
-    Expired -- "是且無 refresh_token" --> Blocked
-    Expired -- "否，或有 refresh_token" --> Scopes{"scope 包含<br/>calendar/gmail.modify/drive？"}
+    Enabled -- "是" --> HasToken{"這位成員自己的<br/>token 檔有 token？"}
+    HasToken -- "沒有" --> Ok3["ok：照常呼叫 agent<br/>（工具真的失敗時才發授權連結）"]
+    HasToken -- "有" --> Scopes{"scope 包含<br/>calendar/gmail.modify/drive？"}
     Scopes -- "缺 Drive scope" --> Notice["notice：推播重新授權提示<br/>仍呼叫 agent（calendar/gmail 可用）"]
     Scopes -- "齊全" --> Ok2["ok：正常呼叫 agent"]
 ```

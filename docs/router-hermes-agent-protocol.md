@@ -55,7 +55,7 @@ flowchart TD
   一種）。
 - 三條路徑都會輪詢 `/health` 再回傳 URL（真實 Hermes image 要跑完 s6
   supervision、skill sync、gateway startup，比先前的 mock 慢很多）。2026-09-15 起
-  不再對「已 running」跳過等待：gate 擋下時的背景暖機（`core._warm_container`）和
+  不再對「已 running」跳過等待：背景暖機（`core.warm_room`）和
   operator `docker restart` 都會讓 container 先 running、api_server 晚一步才起來。
   已就緒的 container 第一次 poll 就回，穩態成本是每則一次 GET。
 
@@ -163,8 +163,9 @@ Body:
 
 ### 暖機探針與 `DELETE /api/sessions/{session_id}`
 
-Google gate 擋下一則訊息時，router 會在背景把房間暖起來（`core._warm_container` →
-`core._run_warmup`），**兩步**：
+Router 可以在背景把房間暖起來（`core.warm_room` → `core._run_warmup`），**兩步**：
+（2026-09-18 起觸發點不再是「Google gate 擋下訊息」——那個狀態已刪除；改接 LINE
+`follow`／`join`，見 `docs/google-auth-per-member-plan.md` §3.5，目前尚未接上。）
 
 1. `get_or_create_container`：把容器叫起來（30–60 秒的冷啟動）。
 2. **暖機探針**：對這個容器送一輪丟棄用的對話，session id 固定

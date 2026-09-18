@@ -105,10 +105,6 @@ class Settings(BaseSettings):
     # outbox entry above this is rejected and the marker becomes the fixed
     # "invalid or expired" notice.
     FILE_LINK_MAX_BYTES: int = 50 * 1024 * 1024
-    # When False, the /oauth/start and /oauth/callback routes still work, but
-    # inbound LINE messages are never blocked pending Google authorization
-    # (see google_oauth.check_google_authorization).
-    GOOGLE_OAUTH_GATE: bool = True
     # First-party API channel (TUI / mobile / dev) bearer token. Unset (None)
     # means the channel is not mounted at all (see channels.enabled_adapters).
     API_CHANNEL_TOKEN: str | None = None

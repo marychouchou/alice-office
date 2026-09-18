@@ -239,10 +239,12 @@ flowchart TD
 身為使用者，如果我要助理操作我的 Google 服務，我需要先授權；已經授權的部分不該被
 反覆打斷。
 
+> **2026-09-18 起**：`blocked` 狀態與 `GOOGLE_OAUTH_GATE` 開關已移除，未授權的訊息
+> 照常進 agent；本節其餘文字待 [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)
+> step 6 一併改寫。
+
 - 只有部署方設定 `PUBLIC_BASE_URL` 且放好 Web application 憑證時才啟用
-  （`Settings.google_oauth_enabled`）；`GOOGLE_OAUTH_GATE`（預設 `true`）可在已啟用
-  的部署上單獨關閉「擋訊息」這一步——設 `false` 時 `/oauth/start`、`/oauth/callback`
-  照常可用，但 inbound 訊息一律不因未授權被擋（等同 gate 永遠回 `ok`）。
+  （`Settings.google_oauth_enabled`）。
 - Gate 啟用時，每則訊息進 agent 前先跑 `check_google_authorization`，三態：
   - **blocked**：沒有 token，或 access token 過期且無 refresh token → 只回授權
     連結，不呼叫 agent；同時在背景建立房間目錄與容器（暖機），授權後的下一則不再

@@ -345,8 +345,8 @@ name=hermes_api_dev`、`ls data/api_dev/`。錯誤回應：token 不對 → `401
 ### 2.8 一鍵 e2e smoke test（整條管線的可重複驗收）
 
 `scripts/e2e_smoke.py` 把 2.7 的手動 curl 驗證固化成**一個指令**：它會自己起一個
-拋棄式的 uvicorn（另開一個 port，用進程環境變數注入 `API_CHANNEL_TOKEN` 並設
-`GOOGLE_OAUTH_GATE=false`，**不改動 `.env`**），依序打 API 通道的授權／驗證與一次
+拋棄式的 uvicorn（另開一個 port，用進程環境變數注入 `API_CHANNEL_TOKEN`，
+**不改動 `.env`**），依序打 API 通道的授權／驗證與一次
 真實 happy path（router → core → container_manager → 真容器 → 真 LLM → 回覆），
 最後把自己建立的 container／`data/` 資料夾清乾淨。
 

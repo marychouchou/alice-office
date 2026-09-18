@@ -88,6 +88,10 @@ _JSONL_ONLY_FIELDS = frozenset({"inbound_text", "sender_id", "sender_name"})
 # parse with a model that defaults missing fields.
 SCHEMA_VERSION = 1
 
+# "blocked" is no longer produced since 2026-09-18 (the Google gate stopped
+# blocking messages, docs/google-auth-per-member-plan.md): it stays in the
+# Literal because envelopes written before that date are still read back by
+# conversation_store / scripts/conversations.py.
 Outcome = Literal["replied", "observed", "reset", "blocked", "agent_failed", "silence"]
 
 # The envelope file holds the only copy of a message's text that ever leaves the
@@ -136,8 +140,9 @@ class TurnEnvelope(BaseModel):
             the channel resolved one.
         sender_name: JSONL only (never logged). The group speaker's display
             name, if resolved.
-        gate_status: The Google OAuth gate's verdict ("ok"/"notice"/"blocked"),
-            or None when the gate was short-circuited (observe, reset).
+        gate_status: The Google OAuth gate's verdict ("ok"/"notice"; also
+            "blocked" in envelopes written before 2026-09-18), or None when
+            the gate was short-circuited (observe, reset).
         rotated: Whether this turn rotated the room to a fresh session epoch.
         agent_duration_ms: Wall time of the agent HTTP call, or None if no call
             was made.

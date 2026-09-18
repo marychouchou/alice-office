@@ -22,7 +22,6 @@ from alice_office_router.session_hygiene import RESET_CONFIRMATION, SessionState
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"
 
-_BLOCKED_MSG = "請先授權 Google 帳號：https://example.com/oauth/start?user_id=room_aaa"
 _NOTICE_MSG = "缺少 Drive 授權：https://example.com/oauth/start?user_id=room_aaa"
 
 
@@ -129,7 +128,7 @@ def _group_msg(
 
 @pytest.fixture
 def warmups() -> Iterator[dict[str, asyncio.Task[None]]]:
-    """Give each gate-blocked test a clean warm-up registry.
+    """Give each warm-up test a clean warm-up registry.
 
     Yields:
         core's `_warmups` dict, emptied before and after the test so an
@@ -144,7 +143,7 @@ def warmups() -> Iterator[dict[str, asyncio.Task[None]]]:
 
 @pytest.fixture
 def probed() -> Iterator[set[str]]:
-    """Give each gate-blocked test a clean agent-probe registry.
+    """Give each warm-up test a clean agent-probe registry.
 
     Yields:
         core's `_probed` set, emptied before and after the test so a room
@@ -161,9 +160,9 @@ async def _settle_warmups() -> None:
     """Await every in-flight container warm-up.
 
     Must be called *inside* the test's `patch(...)` block: the warm-up task
-    resolves `core.get_or_create_container` when it first runs, which is only
-    after `process_inbound` has returned, so a test that leaves the patch
-    before settling would hand the real docker call to a worker thread.
+    resolves `core.get_or_create_container` only once it first runs, which is
+    after the call that started it has returned, so a test that leaves the
+    patch before settling would hand the real docker call to a worker thread.
     """
     from alice_office_router.core import _warmups
 
@@ -303,19 +302,82 @@ async def test_token_symlink_swap_for_a_direct_room_uses_the_room_key(tmp_path: 
     mock_select.assert_called_once_with(settings, "line_room_AAA", "line_room_aaa")
 
 
-async def test_blocked_returns_auth_message_and_warms_container_then_agent(
+async def test_a_speaker_without_a_google_token_still_reaches_the_agent(
+    tmp_path: Path, warmups: dict[str, asyncio.Task[None]]
+) -> None:
+    """The gate stopped blocking on 2026-09-18: an unauthorized room gets a real answer.
+
+    Deliberately runs the real `check_google_authorization` (Google fully
+    configured, no token anywhere) rather than a patched one — the point of
+    the test is that this combination no longer short-circuits the turn.
+    """
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path, PUBLIC_BASE_URL="https://router.example.com")
+    settings.google_web_creds_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.google_web_creds_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_room_AAA:8642",
+        ) as mock_get_container,
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="今天是 9 月 18 日")),
+        ) as mock_ask,
+    ):
+        result = await process_inbound(_msg("今天幾號"), settings)
+
+    mock_get_container.assert_called_once_with("line_room_AAA", settings)
+    mock_ask.assert_awaited_once()
+    assert result.texts == ["今天是 9 月 18 日"]
+    assert result.envelope.outcome == "replied"
+    assert result.envelope.gate_status == "ok"
+    # No warm-up is triggered any more: the turn itself resolved the container.
+    assert warmups == {}
+
+
+async def test_an_unidentified_group_speaker_still_reaches_the_agent(tmp_path: Path) -> None:
+    """A group speaker LINE won't name has no token by definition — and is not gated for it."""
+    from alice_office_router.core import process_inbound
+
+    settings = _settings(DATA_DIR=tmp_path, PUBLIC_BASE_URL="https://router.example.com")
+    settings.google_web_creds_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.google_web_creds_path.write_text("{}", encoding="utf-8")
+
+    with (
+        patch(
+            "alice_office_router.core.get_or_create_container",
+            return_value="http://hermes_line_C1:8642",
+        ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="好的")),
+        ) as mock_ask,
+    ):
+        result = await process_inbound(_group_msg(sender_id=None, sender_name=None), settings)
+
+    mock_ask.assert_awaited_once()
+    assert result.texts == ["好的"]
+    assert result.envelope.gate_status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# warm_room — container + agent warm-up (no production caller until step 5 of
+# docs/google-auth-per-member-plan.md wires LINE follow/join to it)
+# ---------------------------------------------------------------------------
+
+
+async def test_warm_room_starts_the_container_then_probes_the_agent(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:
-    """A "blocked" gate returns only the auth message; the agent sees the probe, not the user."""
-    from alice_office_router.core import WARMUP_PROMPT, process_inbound
+    """The warm-up runs in the background and spends one throwaway turn on the agent."""
+    from alice_office_router.core import WARMUP_PROMPT, warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
@@ -323,15 +385,14 @@ async def test_blocked_returns_auth_message_and_warms_container_then_agent(
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()) as mock_delete,
     ):
-        texts = (await process_inbound(_msg(), settings)).texts
-        # The reply is ready before the warm-up has run: nothing waited on it.
-        assert texts == [_BLOCKED_MSG]
+        warm_room("line_room_AAA", settings)
+        # Returns immediately: the caller never waits on the warm-up.
         assert "line_room_AAA" in warmups
         await _settle_warmups()
 
     mock_get_container.assert_called_once_with("line_room_AAA", settings)
-    # The user's own text is never sent: the one agent call is the throwaway
-    # probe, on its own session id and its own (short) ceiling.
+    # The one agent call is the throwaway probe, on its own session id and its
+    # own (short) ceiling — no user text is ever sent here.
     mock_ask.assert_awaited_once_with(
         "http://hermes_line_room_AAA:8642",
         "warmup-probe",
@@ -348,19 +409,15 @@ async def test_blocked_returns_auth_message_and_warms_container_then_agent(
     assert warmups == {}
 
 
-async def test_blocked_probe_failure_is_a_warning_and_leaves_the_room_unprobed(
+async def test_warm_room_probe_failure_is_a_warning_and_leaves_the_room_unprobed(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A failed probe costs the user's first turn its cold start, nothing else."""
-    from alice_office_router.core import process_inbound
+    """A failed probe costs the room's first real turn its cold start, nothing else."""
+    from alice_office_router.core import warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
@@ -372,35 +429,28 @@ async def test_blocked_probe_failure_is_a_warning_and_leaves_the_room_unprobed(
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()) as mock_delete,
         caplog.at_level(logging.WARNING, logger="alice_office_router.core"),
     ):
-        result = await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
 
-    # The blocked turn itself is untouched by the probe's outcome.
-    assert result.texts == [_BLOCKED_MSG]
-    assert result.envelope.outcome == "blocked"
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("warm-up probe failed" in message for message in warnings)
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     # A half-run probe may still have made Hermes create the session.
     mock_delete.assert_awaited_once()
-    # Not probed, so a later blocked message retries.
+    # Not probed, so a later warm-up retries.
     assert probed == set()
     assert warmups == {}
 
 
-async def test_blocked_probe_session_delete_failure_is_a_warning_only(
+async def test_warm_room_probe_session_delete_failure_is_a_warning_only(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """A stray probe session is worth a log line, not a re-probe of a warm agent."""
-    from alice_office_router.core import process_inbound
+    from alice_office_router.core import warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
@@ -412,7 +462,7 @@ async def test_blocked_probe_session_delete_failure_is_a_warning_only(
         ),
         caplog.at_level(logging.WARNING, logger="alice_office_router.core"),
     ):
-        await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -422,19 +472,15 @@ async def test_blocked_probe_session_delete_failure_is_a_warning_only(
     assert warmups == {}
 
 
-async def test_blocked_twice_probes_the_agent_only_once(
+async def test_warm_room_twice_probes_the_agent_only_once(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:
-    """A second blocked message after the first warm-up finished re-warms the container only."""
-    from alice_office_router.core import process_inbound
+    """A second warm-up after the first finished re-warms the container only."""
+    from alice_office_router.core import warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
@@ -442,31 +488,28 @@ async def test_blocked_twice_probes_the_agent_only_once(
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
     ):
-        await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
-        await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
 
     # Resolving an existing container is cheap; a second ~28k-token probe of an
-    # already-warm agent is not.
+    # already-warm agent is not. (Deduplication is in-flight only, so the
+    # second call does re-run the container step.)
     assert mock_get_container.call_count == 2
     mock_ask.assert_awaited_once()
     assert probed == {"line_room_AAA"}
 
 
-async def test_blocked_probe_unexpected_error_ends_in_the_error_log(
+async def test_warm_room_probe_unexpected_error_ends_in_the_error_log(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """An exception the probe does not expect is logged, not left on a dead task."""
-    from alice_office_router.core import process_inbound
+    from alice_office_router.core import warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
@@ -478,7 +521,7 @@ async def test_blocked_probe_unexpected_error_ends_in_the_error_log(
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()) as mock_delete,
         caplog.at_level(logging.ERROR, logger="alice_office_router.core"),
     ):
-        await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
 
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
@@ -491,19 +534,15 @@ async def test_blocked_probe_unexpected_error_ends_in_the_error_log(
     assert warmups == {}
 
 
-async def test_blocked_warmup_failure_is_logged_and_keeps_the_auth_reply(
+async def test_warm_room_container_failure_is_logged_and_skips_the_probe(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A warm-up that fails is logged for the operator; the blocked turn is unchanged."""
-    from alice_office_router.core import process_inbound
+    """A warm-up that fails is logged for the operator and leaves no entry behind."""
+    from alice_office_router.core import warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             side_effect=RuntimeError("did not become ready"),
@@ -512,28 +551,25 @@ async def test_blocked_warmup_failure_is_logged_and_keeps_the_auth_reply(
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
         caplog.at_level(logging.ERROR),
     ):
-        result = await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
 
     # No container, no probe: the second step never gets a URL to talk to.
     mock_ask.assert_not_awaited()
     assert probed == set()
-    assert result.texts == [_BLOCKED_MSG]
-    assert result.envelope.outcome == "blocked"
-    assert result.envelope.error is None
     errors = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
     assert len(errors) == 1
     assert "warm-up failed" in errors[0]
     assert "container: RuntimeError: did not become ready" in errors[0]
-    # A failed warm-up leaves no entry behind, so the next blocked message retries.
+    # A failed warm-up leaves no entry behind, so the next trigger retries.
     assert warmups == {}
 
 
-async def test_blocked_twice_warms_once_while_in_flight(
+async def test_warm_room_twice_warms_once_while_in_flight(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:
-    """A second blocked message during a running warm-up reuses it, not a second thread."""
-    from alice_office_router.core import process_inbound
+    """A second trigger during a running warm-up reuses it, not a second thread."""
+    from alice_office_router.core import warm_room
 
     settings = _settings()
     release = threading.Event()
@@ -544,18 +580,17 @@ async def test_blocked_twice_warms_once_while_in_flight(
 
     with (
         patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
-        patch(
             "alice_office_router.core.get_or_create_container", side_effect=_slow_container
         ) as mock_get_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
     ):
         try:
-            await process_inbound(_msg(), settings)
-            await process_inbound(_msg(), settings)
+            warm_room("line_room_AAA", settings)
+            # Let the first task reach its to_thread await before the second
+            # trigger, so the dedup is exercised on a genuinely in-flight one.
+            await asyncio.sleep(0)
+            warm_room("line_room_AAA", settings)
             assert len(warmups) == 1
         finally:
             # Release the parked thread and settle inside the patch even when
@@ -570,7 +605,7 @@ async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """Shutdown cancels the tracked warm-ups and says so; the thread finishes on its own."""
-    from alice_office_router.core import cancel_warmups, process_inbound
+    from alice_office_router.core import cancel_warmups, warm_room
 
     settings = _settings()
     release = threading.Event()
@@ -580,17 +615,13 @@ async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
         return "http://hermes_line_room_AAA:8642"
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch("alice_office_router.core.get_or_create_container", side_effect=_slow_container),
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
         patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
         caplog.at_level(logging.INFO, logger="alice_office_router.core"),
     ):
         try:
-            await process_inbound(_msg(), settings)
+            warm_room("line_room_AAA", settings)
             task = warmups["line_room_AAA"]
             # A task cancelled before its first step never enters the
             # coroutine (so nothing logs); let it reach the to_thread await.
@@ -605,28 +636,24 @@ async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
     assert warmups == {}
 
 
-async def test_blocked_warmup_retries_after_previous_finished(
+async def test_warm_room_retries_after_the_previous_one_finished(
     warmups: dict[str, asyncio.Task[None]],
 ) -> None:
-    """Deduplication is in-flight only: once a warm-up has finished, the next blocked message warms again."""
-    from alice_office_router.core import process_inbound
+    """Deduplication is in-flight only: once a warm-up has finished, the next one warms again."""
+    from alice_office_router.core import warm_room
 
     settings = _settings()
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
         patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
     ):
-        await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
-        await process_inbound(_msg(), settings)
+        warm_room("line_room_AAA", settings)
         await _settle_warmups()
 
     assert mock_get_container.call_count == 2
@@ -1167,31 +1194,30 @@ async def test_envelope_outcome_reset(tmp_path: Path) -> None:
     assert result.envelope.gate_status is None
 
 
-async def test_envelope_outcome_blocked_records_the_gate_status(
-    warmups: dict[str, asyncio.Task[None]],
-) -> None:
-    """A gate block is invisible to Hermes; the envelope is the only record of it."""
+async def test_envelope_records_the_gate_status_of_a_normal_turn(tmp_path: Path) -> None:
+    """The gate's verdict rides every envelope, so a room's turns stay queryable by it."""
     from alice_office_router.core import process_inbound
 
-    settings = _settings()
+    settings = _settings(DATA_DIR=tmp_path)
 
     with (
-        patch(
-            "alice_office_router.core.check_google_authorization",
-            return_value=("blocked", _BLOCKED_MSG),
-        ),
+        patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
             "alice_office_router.core.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
+        patch(
+            "alice_office_router.core.ask_hermes_agent",
+            new=AsyncMock(return_value=AgentReply(text="好")),
+        ),
     ):
         result = await process_inbound(_msg("幫我看 Drive"), settings)
-        await _settle_warmups()
 
-    assert result.envelope.outcome == "blocked"
-    assert result.envelope.gate_status == "blocked"
-    assert result.envelope.inbound_text == "幫我看 Drive"
-    assert result.envelope.session_id is None
+    assert result.envelope.outcome == "replied"
+    assert result.envelope.gate_status == "ok"
+    # A replied turn's text is already in state.db; the envelope must not copy it.
+    assert result.envelope.inbound_text is None
+    assert result.envelope.session_id == "line_room_AAA"
 
 
 async def test_envelope_outcome_agent_failed_records_the_error(tmp_path: Path) -> None:

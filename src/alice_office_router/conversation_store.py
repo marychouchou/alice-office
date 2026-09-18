@@ -59,6 +59,7 @@ BIND_TOLERANCE_SECONDS = 300.0
 # The outcomes that leave NO row in state.db: the message never reached the
 # agent. Only these are rendered from the envelope alone — "agent_failed" and
 # "silence" did reach Hermes, which recorded the user message itself.
+# "blocked" is only ever read, never written, since 2026-09-18 (see Outcome).
 UNRECORDED_OUTCOMES: frozenset[Outcome] = frozenset({"observed", "reset", "blocked"})
 
 _MESSAGE_COLUMNS = (

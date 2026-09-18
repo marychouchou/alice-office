@@ -102,7 +102,7 @@ flowchart TD
 - `src/hermes/mcp/google-calendar/` — 薄註冊 manifest（`command: google-calendar-mcp`）
 - `src/hermes/runtime/pyproject.toml` — 加 `mcp`/`httpx`/`requests`（`/opt/tools/.venv`）
 - `scripts/google_reauth.py` — 本機瀏覽器一次性授權腳本
-- Settings：`PUBLIC_BASE_URL`、`GOOGLE_OAUTH_GATE`；憑證種子放 `data/_google/`（gitignored，部署層放一次），逐房副本在 `data/<room_id>/google/`（見上方 2026-07-11 更新）
+- Settings：`PUBLIC_BASE_URL`；憑證種子放 `data/_google/`（gitignored，部署層放一次），逐房副本在 `data/<room_id>/google/`（見上方 2026-07-11 更新）
 
 ## 驗證結果（全部通過）
 

@@ -76,16 +76,19 @@ struct_logger = structlog.stdlib.get_logger(__name__)
 # number of rooms, which already costs a container each.
 _room_locks: dict[str, asyncio.Lock] = {}
 
-# In-flight warm-ups, one per room. A gate-"blocked" turn starts the room's
-# container here — and then warms its agent with one throwaway turn — so the
-# message the user sends after authorizing lands on a ready one instead of
-# paying the 30–60 s cold start and the agent's first-turn tax; the auth reply
-# itself is not delayed. Keyed by room so a second blocked message while the first
-# warm-up is still running reuses it instead of spawning another thread. The
-# entry is dropped when the task finishes (success or failure), so a later
-# blocked message retries a warm-up that failed — deduplication is in-flight
-# only, never "once ever". Holding the Task also keeps it from being garbage
-# collected mid-flight. Process-local, like `_room_locks`.
+# In-flight warm-ups, one per room. `warm_room` starts a room's container here
+# — and then warms its agent with one throwaway turn — so the room's first real
+# message lands on a ready agent instead of paying the 30–60 s cold start plus
+# the agent's first-turn tax. NOTE: nothing in production calls `warm_room` as
+# of this commit; it used to hang off the Google gate's "blocked" reply, which
+# no longer exists, and step 5 of docs/google-auth-per-member-plan.md §5 wires
+# it to LINE's `follow`/`join` events instead (earlier than before). Keyed by
+# room so a second trigger while the first warm-up is still running reuses it
+# instead of spawning another thread. The entry is dropped when the task
+# finishes (success or failure), so a later trigger retries a warm-up that
+# failed — deduplication is in-flight only, never "once ever". Holding the Task
+# also keeps it from being garbage collected mid-flight. Process-local, like
+# `_room_locks`.
 _warmups: dict[str, asyncio.Task[None]] = {}
 
 # The session id the warm-up probe turn runs under. Deliberately neither a room
@@ -106,9 +109,8 @@ _WARMUP_MAX_SECONDS = 120.0
 
 # Rooms whose agent this router process has already probed. Starting a
 # container is cheap to repeat; the probe is a real ~28k-token LLM call, and a
-# second blocked message (a user who messages twice before authorizing, or a
-# re-authorization gate later in the room's life) would land on an
-# already-warm container and pay it again for nothing. The in-flight dedup in
+# second warm-up trigger for the same room would land on an already-warm
+# container and pay it again for nothing. The in-flight dedup in
 # `_warmups` only covers warm-ups that overlap in time, so it cannot do this.
 # Known misses, both accepted: an operator's `docker restart` of a room's
 # container while the router stays up leaves this set stale, so that room's
@@ -213,7 +215,7 @@ async def _probe_agent(target_url: str, room_key: str, config: Settings) -> bool
     Returns:
         True when the probe turn completed (the room counts as probed), False
         when it failed — the caller then leaves the room unprobed so a later
-        blocked message retries.
+        warm-up retries.
     """
     started = time.perf_counter()
     probed = True
@@ -297,12 +299,12 @@ async def _run_warmup(room_key: str, config: Settings) -> None:
         _probed.add(room_key)
 
 
-def _warm_container(room_key: str, config: Settings) -> None:
+def warm_room(room_key: str, config: Settings) -> None:
     """Start the room's container and warm its agent in the background.
 
-    Returns immediately; the caller replies without waiting. Deduplicated per
-    room: one in-flight warm-up task per room (`_warmups`), and the agent probe
-    inside it runs at most once per room per process (`_probed`). No extra log
+    Returns immediately; the caller carries on without waiting. Deduplicated
+    per room: one in-flight warm-up task per room (`_warmups`), and the agent
+    probe inside it runs at most once per room per process (`_probed`). No extra log
     context needs binding: `asyncio.create_task` copies the current
     contextvars (process_inbound's `room_key`, the adapter's request fields)
     and `asyncio.to_thread` carries them into the worker thread, so every line
@@ -314,8 +316,8 @@ def _warm_container(room_key: str, config: Settings) -> None:
         config: Application settings.
     """
     # `done()` rather than membership: a finished task stays registered until
-    # its pop callback runs on the next loop iteration, and a blocked message
-    # landing in that window must still get its retry.
+    # its pop callback runs on the next loop iteration, and a trigger landing
+    # in that window must still get its retry.
     existing = _warmups.get(room_key)
     if existing is not None and not existing.done():
         return
@@ -676,7 +678,7 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         A RouteResult with the texts to deliver and everything the turn
         envelope records about how the turn went.
     """
-    # Manual session reset, before the OAuth gate: rotate to a fresh epoch
+    # Manual session reset, before the token swap and the gate: rotate to a fresh epoch
     # (no handoff — a deliberate clean slate), drop any group background so
     # it can't leak into the new epoch, and confirm without an agent turn.
     if check_reset_command(msg, config):
@@ -691,13 +693,9 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
     member = member_key_for(msg)
     await asyncio.to_thread(select_member_tokens, config, msg.room_key, member)
 
-    status, message = check_google_authorization(msg.room_key, config)
-    if status == "blocked" and message is not None:
-        # The room's first message is usually the blocked one, so this is
-        # where the container's cold start would otherwise land on the
-        # post-authorization message: start it now, reply without waiting.
-        _warm_container(msg.room_key, config)
-        return RouteResult(texts=[message], outcome="blocked", gate_status=status)
+    # Never blocks a message since 2026-09-18: the only thing left to say is
+    # "your token predates the Drive scope", which rides ahead of the reply.
+    status, message = check_google_authorization(msg.room_key, member, config)
 
     texts: list[str] = []
     if status == "notice" and message is not None:
@@ -730,8 +728,8 @@ async def _route(msg: InboundMessage, config: Settings) -> RouteResult:
 
     The whole pipeline in outcome order: an unaddressed group message is only
     observed; a manual reset command rotates the room's session and confirms
-    without an agent turn; the Google gate can block; otherwise the agent runs
-    (its "notice" message, if any, riding ahead of the reply).
+    without an agent turn; otherwise the agent runs, with the Google gate's
+    "notice" message, if any, riding ahead of its reply.
 
     Everything from the reset command onwards runs under the room's turn lock,
     so a room's messages queue instead of overlapping (`_room_locks`). The
@@ -749,8 +747,8 @@ async def _route(msg: InboundMessage, config: Settings) -> RouteResult:
     """
     # Observe short-circuit, before the OAuth gate and before the lock: an
     # unaddressed group message must neither ask the agent nor trigger an auth
-    # prompt; a blocked room still accumulates background to carry once
-    # authorized.
+    # prompt; it only accumulates background for the room's next real turn to
+    # carry.
     if msg.is_group and not msg.addressed:
         record_observed(config, msg.room_key, msg.sender_id, msg.sender_name, msg.text)
         return RouteResult(outcome="observed")
@@ -812,9 +810,7 @@ async def process_inbound(msg: InboundMessage, config: Settings) -> InboundResul
         An InboundResult. `texts` are in delivery order: an unaddressed group
         message is only observed and returns nothing; a manual reset command
         rotates the room's session and returns only the fixed confirmation
-        (agent not called); gate "blocked" returns only the authorization
-        message (the agent is not asked the user's question, though the
-        background warm-up does spend one throwaway turn on it); "notice" returns the notice followed by the
+        (agent not called); gate "notice" returns the notice followed by the
         agent reply; "ok" returns just the agent reply. A container/agent
         failure delivers a fixed notice in place of the reply (the timeout
         wording when the router stopped waiting), so the room is never answered
