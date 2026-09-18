@@ -12,6 +12,7 @@ Mounted only when `API_CHANNEL_TOKEN` is set (see channels.enabled_adapters).
 from __future__ import annotations
 
 import hmac
+import logging
 import re
 from typing import Annotated
 
@@ -36,6 +37,8 @@ from alice_office_router.core import process_inbound
 # download URL against the same two shapes — keep both in step; a third
 # consumer is the signal to extract one shared pattern.
 _ROOM_KEY_RE = re.compile(r"(?:line_[UCR][0-9a-f]{32}|api_[a-z0-9-]{1,32})")
+
+logger = logging.getLogger(__name__)
 
 
 class ApiInboundBody(BaseModel):
@@ -152,3 +155,21 @@ class ApiChannelAdapter:
             return {"replies": result.texts}
 
         return router
+
+    async def resume(self, msg: InboundMessage) -> None:
+        """Drop a message parked for this channel: nothing here can push.
+
+        Every other adapter answers a resume by pushing into the room it owns.
+        This channel has no room and no connection to push over — its client
+        asked over HTTP and that request was answered long ago — so a member
+        who triggered an authorization link from a TUI/dev client simply asks
+        again once they are done. Logged, never raised: core treats a dropped
+        resume as a completed one.
+
+        Args:
+            msg: The parked inbound message, which is discarded.
+        """
+        logger.info(
+            f"API channel cannot push; dropping the message parked for room "
+            f"[{msg.room_key}] before Google authorization"
+        )

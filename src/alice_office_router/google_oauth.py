@@ -109,10 +109,9 @@ _pending: dict[str, tuple[str, str, float]] = {}
 _MEMBER_KEY_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 # Called after a member's token is stored, so the router can pick up whatever
-# that member was waiting for (core.resume_pending_auth, registered from
-# main.py at step 4 of docs/google-auth-per-member-plan.md §5 — nothing
-# registers it yet). A hook rather than an import, so google_oauth never has
-# to import core, which imports it.
+# that member was waiting for: `core.resume_pending_auth`, registered by
+# main.py's lifespan (docs/google-auth-per-member-plan.md §3.4). A hook rather
+# than an import, so google_oauth never has to import core, which imports it.
 on_authorized: Callable[[str, str], Awaitable[None]] | None = None
 
 # Strong references to the in-flight hook tasks: asyncio holds only a weak
@@ -125,9 +124,16 @@ _NOTICE_MSG_TEMPLATE = (
     "授權完成後即可使用 Drive 功能！"
 )
 
-_SUCCESS_HTML = """
+# `https://line.me/R/nv/chat` opens LINE on its Chats tab — the only documented
+# scheme that just returns the user to the app (there is no generic "open LINE"
+# link, and `line://` is deprecated against app-takeover attacks):
+# https://developers.line.biz/en/docs/line-login/using-line-url-scheme/
+_LINE_CHATS_URL = "https://line.me/R/nv/chat"
+
+_SUCCESS_HTML = f"""
     <html><body>
     <h2>授權成功。如果你剛才有問題等著處理，答案稍後會直接出現在 LINE。</h2>
+    <p><a href="{_LINE_CHATS_URL}">回到 LINE</a></p>
     </body></html>
 """
 

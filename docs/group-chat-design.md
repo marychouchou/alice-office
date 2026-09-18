@@ -140,6 +140,10 @@ layered on top of core prompt、單次有效不進 config.yaml）：
   繁中自我介紹＋使用說明（「@我 或以呼叫詞開頭叫我；其他訊息我會安靜聽著當作背景」），
   文字常數放 `channels/line/`。不經 core、不問 agent。
 - join event 也要過 webhookEventId dedup。
+- join 同時觸發 `core.warm_room(room_key)`：被拉進群組就是「這個房間即將問第一個問題」
+  的最早訊號，容器與 agent 在這裡先暖起來，第一則訊息就不用等 30–60 秒冷啟動
+  （1:1 的對應訊號是 `follow`，同樣只暖機、不回話——見
+  `google-auth-per-member-plan.md` §3.5）。
 - `leave`／`memberLeft` 不能回（無 replyToken）→ 維持現狀（忽略）。
   `memberJoined` greeting V1 不做（避免吵）。
 

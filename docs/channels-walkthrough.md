@@ -79,13 +79,21 @@ class InboundMessage(BaseModel):
 
 ```python
 class ChannelAdapter(Protocol):
-    name: str                            # 也是 /webhooks/{name} 的路徑段
+    name: str                                            # 也是 /webhooks/{name} 的路徑段
     def api_router(self) -> APIRouter: ...
+    async def resume(self, msg: InboundMessage) -> None: ...
 ```
 
 用的是 `typing.Protocol`（結構型別）而不是 ABC 繼承——adapter 不需要 import 或繼承任何
-基底類別，只要「長得像」就算數。契約小到只有一個屬性一個方法：mount 需要知道的就這麼多，
+基底類別，只要「長得像」就算數。契約小到只有一個屬性兩個方法：mount 需要知道的就這麼多，
 其餘（怎麼驗簽、怎麼回覆）都是 adapter 的私事。
+
+`resume` 是唯一一個「不是使用者傳訊息」引發的入口：使用者完成 Google 授權後，
+core 會把當初觸發授權連結的那則訊息原樣交回來重跑一次（`google-auth-per-member-plan.md`
+§3.4）。此時 reply token 早就隨原 event 過期，所以回覆一律用 push；LINE adapter 因此把
+`_process_and_reply` 與 `resume` 收斂到同一個 `_run_turn(msg, config, reply_token=None)`，
+群組再多推一句「{發話者} 已完成 Google 授權」。**推不出去的通道就不推**——API 通道的
+`resume` 只記一行 log 就把訊息丟掉（它的 client 是同步 HTTP，早就拿到回應了）。
 
 ---
 
@@ -102,9 +110,18 @@ def enabled_adapters(config: Settings) -> list[ChannelAdapter]:
 
 ```python
 # main.py
-for adapter in enabled_adapters(get_settings()):
+_adapters = enabled_adapters(get_settings())
+register_adapters(_adapters)                 # 反向查找：channel 名 -> adapter
+for adapter in _adapters:
     app.include_router(adapter.api_router(), prefix=f"/webhooks/{adapter.name}")
 ```
+
+`register_adapters` / `adapter_for` 是同一份清單的**執行期反向索引**：mount 回答的是
+「訊息從哪裡進來」，registry 回答的是相反的問題——「手上只有一個 `InboundMessage`，
+它屬於哪個通道」。目前只有一個呼叫者：`core.resume_pending_auth` 收到 OAuth callback
+的通知時，唯一能用的路由鍵就是 `msg.channel`。狀態是 process-local 的 dict（比照
+`core._room_locks`），`register_adapters` 每次整份取代而不是累加，測試建第二個 app
+時不會殘留前一個 app 的 adapter。
 
 三個值得注意的決定：
 

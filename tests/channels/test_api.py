@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from alice_office_router.channels import enabled_adapters
+from alice_office_router.channels.api import ApiChannelAdapter
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.conversation_log import TurnEnvelope
@@ -247,3 +248,24 @@ async def test_records_delivered_none_when_there_is_nothing_to_return(
 
     assert response.json() == {"replies": []}
     assert mock_record.call_args.args[0].delivered is None
+
+
+# ---------------------------------------------------------------------------
+# resume — nothing to push into (docs/google-auth-per-member-plan.md §3.4)
+# ---------------------------------------------------------------------------
+
+
+async def test_resume_logs_and_drops_the_parked_message(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """This channel answers over HTTP, so a resumed message has nowhere to go."""
+    msg = InboundMessage(channel="api", room_key="api_dev", text="明天有什麼會議")
+
+    with (
+        caplog.at_level("INFO", logger=_API_MODULE),
+        patch(f"{_API_MODULE}.process_inbound", new=AsyncMock()) as mock_core,
+    ):
+        await ApiChannelAdapter().resume(msg)
+
+    mock_core.assert_not_awaited()
+    assert "api_dev" in caplog.text

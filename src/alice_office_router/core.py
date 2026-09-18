@@ -27,7 +27,7 @@ import structlog
 from pydantic import ValidationError
 from structlog.contextvars import bound_contextvars
 
-from alice_office_router.auth_links import publish_auth_links
+from alice_office_router.auth_links import publish_auth_links, read_pending_auth
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import get_or_create_container
@@ -80,10 +80,10 @@ _room_locks: dict[str, asyncio.Lock] = {}
 # In-flight warm-ups, one per room. `warm_room` starts a room's container here
 # — and then warms its agent with one throwaway turn — so the room's first real
 # message lands on a ready agent instead of paying the 30–60 s cold start plus
-# the agent's first-turn tax. NOTE: nothing in production calls `warm_room` as
-# of this commit; it used to hang off the Google gate's "blocked" reply, which
-# no longer exists, and step 5 of docs/google-auth-per-member-plan.md §5 wires
-# it to LINE's `follow`/`join` events instead (earlier than before). Keyed by
+# the agent's first-turn tax. Triggered from LINE's `follow` (1:1 friend add)
+# and `join` (added to a group) events — the moment a room appears, well before
+# its first question; it used to hang off the Google gate's "blocked" reply,
+# which no longer exists (docs/google-auth-per-member-plan.md §3.5). Keyed by
 # room so a second trigger while the first warm-up is still running reuses it
 # instead of spawning another thread. The entry is dropped when the task
 # finishes (success or failure), so a later trigger retries a warm-up that
@@ -325,6 +325,59 @@ def warm_room(room_key: str, config: Settings) -> None:
     task = asyncio.create_task(_run_warmup(room_key, config), name=f"warmup:{room_key}")
     _warmups[room_key] = task
     task.add_done_callback(lambda _done: _warmups.pop(room_key, None))
+
+
+async def resume_pending_auth(room_key: str, member_key: str, config: Settings) -> None:
+    """Re-run whatever a member parked before they went off to authorize.
+
+    The router half of the Google authorization resume
+    (docs/google-auth-per-member-plan.md §3.4): `auth_links` parked the message
+    that made the agent ask for a link, and this picks it up once the token is
+    on disk, so the member gets their answer without retyping the question.
+
+    Registered as `google_oauth.on_authorized` from main.py — a hook rather
+    than an import, since google_oauth is imported *by* core — and run as a
+    fire-and-forget task off the OAuth callback, which is why every failure
+    ends here as a log line: there is no request left to return it to, and an
+    unobserved task exception would only surface at garbage-collection time.
+
+    Args:
+        room_key: The room the member authorized in. Same value the hook is
+            given as `room_id`: `/oauth/start?user_id=` carries the prefixed
+            room key (see auth_links._link_text -> google_oauth.auth_url_for).
+        member_key: The member whose token was just stored.
+        config: Application settings.
+    """
+    # Imported here, not at module scope: `channels` builds the adapters, which
+    # import this module, so a top-level import would be a cycle.
+    from alice_office_router.channels import adapter_for
+
+    try:
+        msg = await asyncio.to_thread(read_pending_auth, config, room_key, member_key)
+        if msg is None:
+            # The normal case for a member who authorized without a question
+            # waiting (a re-authorization, an expired park, a second click).
+            struct_logger.info("auth_resume_empty", room_key=room_key, member=member_key)
+            return
+        adapter = adapter_for(msg.channel)
+        if adapter is None:
+            struct_logger.error(
+                "auth_resume_no_adapter", room_key=room_key, member=member_key, channel=msg.channel
+            )
+            return
+        struct_logger.info(
+            "auth_resume_started", room_key=room_key, member=member_key, channel=msg.channel
+        )
+        await adapter.resume(msg)
+    except Exception as exc:
+        # Deliberately broad, like google_oauth._run_authorized's: a resume is
+        # a whole agent turn's worth of code reached from a detached task.
+        struct_logger.error(
+            "auth_resume_failed",
+            room_key=room_key,
+            member=member_key,
+            error=_describe_error("resume", exc),
+        )
 
 
 def cancel_warmups() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -398,8 +399,146 @@ async def test_an_unidentified_group_speaker_still_reaches_the_agent(tmp_path: P
 
 
 # ---------------------------------------------------------------------------
-# warm_room — container + agent warm-up (no production caller until step 5 of
-# docs/google-auth-per-member-plan.md wires LINE follow/join to it)
+# resume_pending_auth — re-run what a member parked before authorizing
+# (docs/google-auth-per-member-plan.md §3.4)
+# ---------------------------------------------------------------------------
+
+
+class _StubAdapter:
+    """A ChannelAdapter stand-in that records (or refuses) what it is asked to resume."""
+
+    def __init__(self, name: str = "line", error: Exception | None = None) -> None:
+        self.name = name
+        self.error = error
+        self.resumed: list[InboundMessage] = []
+
+    def api_router(self) -> object:
+        raise NotImplementedError
+
+    async def resume(self, msg: InboundMessage) -> None:
+        self.resumed.append(msg)
+        if self.error is not None:
+            raise self.error
+
+
+@pytest.fixture
+def stub_adapter() -> Iterator[_StubAdapter]:
+    """Register a stub adapter as the only channel, restoring the real ones after.
+
+    Yields:
+        The registered stub; read `stub.resumed` to see what core handed it.
+    """
+    from alice_office_router import channels
+
+    saved = dict(channels._adapters)
+    stub = _StubAdapter()
+    channels.register_adapters([stub])
+    yield stub
+    channels.register_adapters(list(saved.values()))
+
+
+def _park(
+    settings: Settings, msg: InboundMessage, member_key: str, *, ts: float | None = None
+) -> Path:
+    """Write a pending-auth record the way auth_links.write_pending_auth does."""
+    from alice_office_router.auth_links import write_pending_auth
+
+    write_pending_auth(settings, msg.room_key, member_key, msg)
+    path = settings.room_pending_auth_path(msg.room_key, member_key)
+    if ts is not None:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["ts"] = ts
+        path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+async def test_resume_pending_auth_hands_the_parked_message_to_its_adapter(
+    tmp_path: Path, stub_adapter: _StubAdapter
+) -> None:
+    """The member gets their answer without retyping the question."""
+    from alice_office_router.core import resume_pending_auth
+
+    settings = _settings(DATA_DIR=tmp_path)
+    msg = _msg("明天有什麼會議")
+    path = _park(settings, msg, "line_room_aaa")
+
+    await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
+
+    assert stub_adapter.resumed == [msg]
+    # Single-shot: the record is consumed, so authorizing twice never re-asks.
+    assert not path.exists()
+
+
+async def test_resume_pending_auth_does_nothing_when_no_message_is_parked(
+    tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Authorizing with nothing waiting is the normal case, not an error."""
+    from alice_office_router.core import resume_pending_auth
+
+    with caplog.at_level(logging.INFO):
+        await resume_pending_auth("line_room_AAA", "line_room_aaa", _settings(DATA_DIR=tmp_path))
+
+    assert stub_adapter.resumed == []
+    assert "auth_resume_empty" in caplog.text
+
+
+async def test_resume_pending_auth_ignores_an_expired_record(
+    tmp_path: Path, stub_adapter: _StubAdapter
+) -> None:
+    """A question parked 11 minutes ago is stale; the member has moved on."""
+    from alice_office_router.auth_links import PENDING_AUTH_TTL_SECONDS
+    from alice_office_router.core import resume_pending_auth
+
+    settings = _settings(DATA_DIR=tmp_path)
+    path = _park(
+        settings,
+        _msg("明天有什麼會議"),
+        "line_room_aaa",
+        ts=time.time() - PENDING_AUTH_TTL_SECONDS - 60,
+    )
+
+    await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
+
+    assert stub_adapter.resumed == []
+    assert not path.exists()
+
+
+async def test_resume_pending_auth_logs_an_error_for_an_unmounted_channel(
+    tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A message parked by a channel this process no longer mounts is dropped."""
+    from alice_office_router.core import resume_pending_auth
+
+    settings = _settings(DATA_DIR=tmp_path)
+    msg = InboundMessage(channel="telegram", room_key="line_room_AAA", text="明天有什麼會議")
+    _park(settings, msg, "line_room_aaa")
+
+    with caplog.at_level(logging.ERROR):
+        await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
+
+    assert stub_adapter.resumed == []
+    assert "auth_resume_no_adapter" in caplog.text
+
+
+async def test_resume_pending_auth_logs_an_adapter_failure_instead_of_raising(
+    tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It runs detached off the OAuth callback: every failure must end in a log line."""
+    from alice_office_router.core import resume_pending_auth
+
+    settings = _settings(DATA_DIR=tmp_path)
+    stub_adapter.error = RuntimeError("push failed")
+    _park(settings, _msg("明天有什麼會議"), "line_room_aaa")
+
+    with caplog.at_level(logging.ERROR):
+        await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
+
+    assert "auth_resume_failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# warm_room — container + agent warm-up, triggered by LINE follow/join
 # ---------------------------------------------------------------------------
 
 

@@ -40,6 +40,22 @@ class ChannelAdapter(Protocol):
         """
         ...
 
+    async def resume(self, msg: InboundMessage) -> None:
+        """Re-run a message this channel received earlier, delivering by push.
+
+        Called by core (`resume_pending_auth`) after a member finishes Google
+        authorization, with the message they were asking when the link was
+        issued. There is no reply token left by then — that one belonged to the
+        original webhook event and has long expired — so the answer goes out
+        unprompted, on the channel's own push path. A channel that cannot push
+        (see channels/api.py) drops the message and says so in the log.
+
+        Args:
+            msg: The parked inbound message to run again, exactly as it was
+                first received (docs/google-auth-per-member-plan.md §3.4).
+        """
+        ...
+
 
 class InboundMessage(BaseModel):
     """The only inbound shape the channel-free core understands.
