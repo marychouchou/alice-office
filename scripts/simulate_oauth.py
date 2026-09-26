@@ -19,7 +19,7 @@ This script does exactly that one step:
     (b) walk the running router's real OAuth routes end to end, so everything
         /oauth/callback does after a genuine Google redirect actually happens:
         store the member token, fire the on_authorized hook, and resume the
-        message the member parked (core.resume_pending_auth ->
+        message the member parked (auth_links.resume_pending_auth ->
         ChannelAdapter.resume, plan §3.4).
 
 (b) needs one piece of local plumbing, because the callback insists on

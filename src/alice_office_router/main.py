@@ -7,11 +7,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from alice_office_router.channels import enabled_adapters, register_adapters
+
+# isort: split
+# `channels` must be imported before `auth_links`: auth_links imports
+# channels.base, which initializes the `channels` package (api → core →
+# auth_links), so importing auth_links first re-enters it half-initialized.
+from alice_office_router.auth_links import resume_pending_auth
 from alice_office_router.config import get_settings
-from alice_office_router.core import cancel_warmups, resume_pending_auth
 from alice_office_router.file_links import files_router
 from alice_office_router.google_oauth import oauth_router, set_on_authorized
 from alice_office_router.logging_setup import RequestContextMiddleware, configure_logging
+from alice_office_router.warmup import cancel_warmups
 
 # Before anything else logs: every logger in this process (uvicorn's too)
 # renders through one structlog formatter from here on (logging_setup).
@@ -25,11 +31,11 @@ _LEGACY_LINE_WEBHOOK_PATH = "/webhook"
 
 
 async def _on_google_authorized(room_key: str, member_key: str) -> None:
-    """Hand a finished Google authorization back to core.
+    """Hand a finished Google authorization back to auth_links.
 
     Adapts `google_oauth.on_authorized`'s channel-free `(room_id, member_key)`
     signature — the room id it passes *is* the room key, since that is what
-    `/oauth/start?user_id=` carries — to core's, which also needs settings.
+    `/oauth/start?user_id=` carries — to auth_links's, which also needs settings.
 
     Args:
         room_key: The room the member authorized in.
@@ -73,7 +79,7 @@ app.add_middleware(RequestContextMiddleware)
 _adapters = enabled_adapters(_settings)
 # Mounting answers "where does an inbound message arrive"; registering answers
 # the reverse — "which adapter does this parked message belong to" — for
-# core.resume_pending_auth, whose only routing key is InboundMessage.channel.
+# auth_links.resume_pending_auth, whose only routing key is InboundMessage.channel.
 register_adapters(_adapters)
 
 for adapter in _adapters:

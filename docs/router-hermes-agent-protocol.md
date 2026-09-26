@@ -55,7 +55,7 @@ flowchart TD
   一種）。
 - 三條路徑都會輪詢 `/health` 再回傳 URL（真實 Hermes image 要跑完 s6
   supervision、skill sync、gateway startup，比先前的 mock 慢很多）。2026-09-15 起
-  不再對「已 running」跳過等待：背景暖機（`core.warm_room`）和
+  不再對「已 running」跳過等待：背景暖機（`warmup.warm_room`）和
   operator `docker restart` 都會讓 container 先 running、api_server 晚一步才起來。
   已就緒的 container 第一次 poll 就回，穩態成本是每則一次 GET。
 
@@ -163,14 +163,14 @@ Body:
 
 ### 暖機探針與 `DELETE /api/sessions/{session_id}`
 
-Router 可以在背景把房間暖起來（`core.warm_room` → `core._run_warmup`），**兩步**：
+Router 可以在背景把房間暖起來（`warmup.warm_room` → `warmup._run_warmup`），**兩步**：
 （2026-09-18 起觸發點不再是「Google gate 擋下訊息」——那個狀態已刪除；改接 LINE
 `follow`／`join`，見 `docs/google-auth-per-member-plan.md` §3.5，目前尚未接上。）
 
 1. `get_or_create_container`：把容器叫起來（30–60 秒的冷啟動）。
 2. **暖機探針**：對這個容器送一輪丟棄用的對話，session id 固定
-   `warmup-probe`（`core.WARMUP_SESSION_ID`），內容只是一句「回 OK 就好」
-   （`core.WARMUP_PROMPT`），ceiling 用自己的 120 秒（`_WARMUP_MAX_SECONDS`），
+   `warmup-probe`（`warmup.WARMUP_SESSION_ID`），內容只是一句「回 OK 就好」
+   （`warmup.WARMUP_PROMPT`），ceiling 用自己的 120 秒（`_WARMUP_MAX_SECONDS`），
    不借用給真實對話用的 `HERMES_REQUEST_TIMEOUT_SECONDS`。
 
 第 2 步存在的理由：**容器 running 不等於 agent 熱**。Hermes 進程在「這個進程的第一輪
@@ -201,7 +201,7 @@ Headers:
 - 探針失敗（`httpx.HTTPError`／`ValueError`／`TimeoutError`）只記一行 WARNING
   `Agent warm-up probe failed for room ...`，不影響那則已經送出的授權連結；房間不會被
   標記成已探測，下一則被擋的訊息會再試一次。
-- **一個 router 進程對一個房間只探一次**（`core._probed`）：探針是一次真的 LLM 呼叫
+- **一個 router 進程對一個房間只探一次**（`warmup._probed`）：探針是一次真的 LLM 呼叫
   （約 28k prompt tokens），已經熱的容器不值得再付一次。已知取捨：operator 手動
   `docker restart` 某房間的容器而 router 沒重啟 → 該房間下一輪真實對話自己付一次
   4.5 秒；router 重啟 → 每個房間最多多探一次。
@@ -288,7 +288,7 @@ sequenceDiagram
 | `ask_hermes_agent` | `hermes.failed` 或串流無任何內容 | `raise ValueError`，log error，回固定提示 |
 | `ask_hermes_agent` | `finish_reason == "length"`（截斷） | **不算失敗**：回傳截到一半的文字，log warning `hermes_agent_truncated` |
 
-`core.py::_ask_agent()` 對這兩步各自 `try/except`，失敗只記 log 不
+`agent_turn.py::ask_agent()` 對這兩步各自 `try/except`，失敗只記 log 不
 往外拋——此時 LINE webhook 早已回過 200，沒有 HTTP response 可以再回錯誤給任何
 人，只能從 router 的 log 觀察到。
 

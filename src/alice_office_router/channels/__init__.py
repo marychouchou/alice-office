@@ -7,7 +7,7 @@ discovery or plugin system (see docs/channel-interface-design.md §4.2).
 
 `register_adapters` / `adapter_for` are the *runtime* half of that: the mounted
 adapters, keyed by name, so code that holds only an `InboundMessage` can find
-the channel it came from. Exactly one caller needs this — `core.resume_pending_auth`,
+the channel it came from. Exactly one caller needs this — `auth_links.resume_pending_auth`,
 which re-runs a parked message after Google authorization and has nothing but
 `msg.channel` to route on.
 """

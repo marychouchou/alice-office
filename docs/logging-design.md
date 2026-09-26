@@ -184,7 +184,7 @@ token 三件組，見 `docs/router-hermes-agent-protocol.md`），Hermes 只在
 （新 epoch 的第一輪，Hermes 要等第一次 chat completions 才會建立）視為基準 0；任一次讀取
 失敗（逾時、非 2xx、回應格式不符）兩個欄位一律回 `None`，代表「不知道」而非「這一輪打了
 0 次」，且從不讓這個讀取失敗拖垮或掩蓋原本的回覆。欄位也補進 `AgentReply`（供
-`core._ask_agent` 使用）與 §5.7 的 `TurnEnvelope`，兩個 sink 都不是 JSONL only——純數字，
+`agent_turn.ask_agent` 使用）與 §5.7 的 `TurnEnvelope`，兩個 sink 都不是 JSONL only——純數字，
 沒有內容或身分疑慮。**已知取捨**：`tool_errors`（工具呼叫中失敗幾次）目前沒有加——
 Hermes 只在容器內 `logs/agent.log`／`errors.log` 印一行
 `WARNING agent.tool_executor: Tool X returned error`（`tool_executor.py` 的
@@ -446,7 +446,7 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 | `gate_status` | `ok` / `unauthorized`（發話者沒有可用 token——不擋訊息，但這一輪的 system prompt 會多帶一段提示，見 `group_context.GOOGLE_AUTH_MISSING_HINT`；只有在 agent 這輪其實用不到 Google 時才會留下這個值）/ `notice`（token 有效但缺 Drive scope，仍照常呼叫 agent）/ `auth_link`（這輪回覆含 Google 授權連結——`auth_links.publish_auth_links` 把 marker 換成連結後覆寫掉前面的值，見 `docs/google-auth-per-member-plan.md` §3.3）/ `None`（observe、reset 短路，沒跑到判斷這一步）。舊版的 `blocked` 不會再出現，理由同上 |
 | `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
 | `tool_calls`, `api_calls` | 這一輪 Hermes 內部的工具呼叫次數／LLM API 呼叫次數，`None`＝未知（沒有呼叫或讀取失敗）。兩個都不是 JSONL only——純數字，兩個 sink 都有。來源與取捨見 §5.1 的 2026-09-15 補充 |
-| `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `core.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
+| `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `agent_turn.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
 
 `process_inbound` 拆成 `_route` + 薄包裝的做法不變；只是發出點移到 adapter，讓
 `delivered` 能一次寫進去而不是事後補一行 error log。
@@ -473,7 +473,7 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 **`error` 欄位不能直接塞 `str(exc)`**（2026-09-14 review 後改）：pydantic 的
 `ValidationError.__str__` 會把它拒絕的那個值一起印出來——在這條路徑上那就是 agent 的
 回覆文字，正好是 log stream 不能帶的東西；反過來 `str(httpx.ReadTimeout(""))` 是空字串，
-欄位會變成沒有資訊的 `"agent: "`。`core._describe_error` 因此只組
+欄位會變成沒有資訊的 `"agent: "`。`conversation_log.describe_error` 因此只組
 `"<origin>: <例外類別名>"`，非 pydantic 的例外再接一段截到 200 字的訊息，pydantic 的則
 只留錯誤數量與欄位路徑（`exc.error_count()` / `loc`），永遠不碰 `input`。
 
@@ -655,7 +655,7 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
       因此與 log 設定完全解耦。Loki 那條路仍走 `alice.conversation` logger 發
       `conversation_turn` 事件，與原案相同。
 - [x] `core.process_inbound` 拆成 `_route` + 薄包裝，回傳含 `texts` 與 envelope 草稿的
-      `InboundResult`；`_ask_agent`／`_ask_group_agent` 改回傳 `AgentTurn` dataclass，
+      `InboundResult`；`agent_turn.ask_agent`／`_ask_group_agent` 改回傳 `AgentTurn` dataclass，
       帶回 `session_id`／`duration_ms`／`prompt_tokens`／`rotated`／`error`／outcome
       （`silence` 與 `agent_failed` 因此不再共用「回 None」）。各 adapter 送完訊息後填
       `delivered` 並呼叫 `record_turn`；LINE 的 `_deliver_reply` 改回傳 bool，
@@ -776,7 +776,7 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
       錯的（`group_context` 的說明就寫著在飛的 turn 期間會收到第二則訊息），已改掉。
       CLI 也不再用 `id(envelope)` 判斷「這個 envelope 被認領了沒」，改用
       `EnvelopeIndex.bound` 裡的位置。
-- [x] **`error` 欄位不再夾帶內容**（`core._describe_error`，見 §5.7）。
+- [x] **`error` 欄位不再夾帶內容**（`conversation_log.describe_error`，見 §5.7）。
 - [x] **讀不動的 envelope 行不再靜默丟掉**：`read_envelopes` 改成逐行串流（不再
       `read_text()` 整檔進記憶體），數出解析失敗的行數與 `schema_version` 超前的行數，
       CLI 印成 warning。

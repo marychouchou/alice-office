@@ -111,9 +111,10 @@ _pending: dict[str, tuple[str, str, float]] = {}
 _MEMBER_KEY_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 # Called after a member's token is stored, so the router can pick up whatever
-# that member was waiting for: `core.resume_pending_auth`, registered by
+# that member was waiting for: `auth_links.resume_pending_auth`, registered by
 # main.py's lifespan (docs/google-auth-per-member-plan.md §3.4). A hook rather
-# than an import, so google_oauth never has to import core, which imports it.
+# than an import, so google_oauth never has to import auth_links or core,
+# either of which would import it right back.
 on_authorized: Callable[[str, str], Awaitable[None]] | None = None
 
 # Strong references to the in-flight hook tasks: asyncio holds only a weak

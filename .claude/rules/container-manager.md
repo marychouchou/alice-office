@@ -29,5 +29,5 @@ paths:
    檢查登記進去），讓「未啟用」＝不在清單上，而不是每站一個 if。
 3. ~~`get_or_create_container` 的 `needs_wait` 旗標／`_wait_until_ready` 4 層巢狀~~
    ——2026-09-15 已消掉：一律呼叫 `_wait_until_ready`（健康容器第一次 poll 就返回），
-   health poll 抽成 `_is_healthy`。**不要把旗標加回來**：core 的 `warm_room` 暖機在
+   health poll 抽成 `_is_healthy`。**不要把旗標加回來**：warmup 的 `warm_room` 暖機在
    room lock 外建容器，「已 running」不代表 api_server 已就緒。

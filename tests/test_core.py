@@ -1,22 +1,19 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import threading
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import httpx
 import pytest
 from pydantic import ValidationError
 
+from alice_office_router.agent_turn import AGENT_FAILURE_NOTICE, AGENT_TIMEOUT_NOTICE
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
-from alice_office_router.core import AGENT_FAILURE_NOTICE, AGENT_TIMEOUT_NOTICE
 from alice_office_router.hermes_client import AgentReply
 from alice_office_router.session_hygiene import RESET_CONFIRMATION, SessionState, load_state
 
@@ -61,7 +58,7 @@ def _recording_ask(
             Exception instance to raise for that session id.
 
     Returns:
-        (fake_ask, calls) — patch core.ask_hermes_agent with fake_ask and read
+        (fake_ask, calls) — patch agent_turn.ask_hermes_agent with fake_ask and read
         the recorded (session_id, text, system) tuples from calls afterwards.
     """
     calls: list[SimpleNamespace] = []
@@ -127,47 +124,21 @@ def _group_msg(
     )
 
 
+# Also defined in tests/test_warmup.py (same fixture; keep in sync): two
+# pipeline tests here assert that a turn no longer starts a warm-up.
 @pytest.fixture
 def warmups() -> Iterator[dict[str, asyncio.Task[None]]]:
     """Give each warm-up test a clean warm-up registry.
 
     Yields:
-        core's `_warmups` dict, emptied before and after the test so an
+        warmup's `_warmups` dict, emptied before and after the test so an
         in-flight task from another test can never change the outcome.
     """
-    from alice_office_router.core import _warmups
+    from alice_office_router.warmup import _warmups
 
     _warmups.clear()
     yield _warmups
     _warmups.clear()
-
-
-@pytest.fixture
-def probed() -> Iterator[set[str]]:
-    """Give each warm-up test a clean agent-probe registry.
-
-    Yields:
-        core's `_probed` set, emptied before and after the test so a room
-        another test already probed never skips this test's probe.
-    """
-    from alice_office_router.core import _probed
-
-    _probed.clear()
-    yield _probed
-    _probed.clear()
-
-
-async def _settle_warmups() -> None:
-    """Await every in-flight container warm-up.
-
-    Must be called *inside* the test's `patch(...)` block: the warm-up task
-    resolves `core.get_or_create_container` only once it first runs, which is
-    after the call that started it has returned, so a test that leaves the
-    patch before settling would hand the real docker call to a worker thread.
-    """
-    from alice_office_router.core import _warmups
-
-    await asyncio.gather(*_warmups.values())
 
 
 # ---------------------------------------------------------------------------
@@ -185,11 +156,11 @@ async def test_ok_status_returns_only_agent_reply(tmp_path: Path) -> None:
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="哈囉，我是 Hermes")),
         ) as mock_ask,
     ):
@@ -227,11 +198,11 @@ async def test_outbox_marker_in_a_reply_becomes_a_download_url(tmp_path: Path) -
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text=f"做好了：\noutbox://{token}")),
         ),
     ):
@@ -264,11 +235,11 @@ async def test_token_symlink_is_swapped_to_the_speaker_before_the_gate(tmp_path:
         patch("alice_office_router.core.select_member_tokens") as mock_select,
         patch("alice_office_router.core.check_google_authorization") as mock_gate,
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="好")),
         ),
     ):
@@ -300,10 +271,10 @@ async def test_a_real_symlink_swap_nudges_the_container_s_google_mount(tmp_path:
         patch("alice_office_router.core.refresh_google_mount") as mock_refresh,
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
         mock_refresh.side_effect = lambda *args: order.append("refresh")
         mock_ask.side_effect = _record_agent
@@ -324,11 +295,11 @@ async def test_no_symlink_change_means_no_container_exec(tmp_path: Path) -> None
         patch("alice_office_router.core.refresh_google_mount") as mock_refresh,
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="好")),
         ),
     ):
@@ -347,11 +318,11 @@ async def test_token_symlink_swap_for_a_direct_room_uses_the_room_key(tmp_path: 
         patch("alice_office_router.core.select_member_tokens") as mock_select,
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="好")),
         ),
     ):
@@ -377,11 +348,11 @@ async def test_a_speaker_without_a_google_token_still_reaches_the_agent(
 
     with (
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="今天是 9 月 18 日")),
         ) as mock_ask,
     ):
@@ -411,11 +382,11 @@ async def test_auth_marker_in_a_reply_becomes_the_speaker_s_authorization_link(
 
     with (
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text=f"要看你的行事曆，先授權：\n{AUTH_MARKER}")),
         ),
     ):
@@ -442,11 +413,11 @@ async def test_an_unidentified_group_speaker_still_reaches_the_agent(tmp_path: P
 
     with (
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="好的")),
         ) as mock_ask,
     ):
@@ -478,10 +449,10 @@ async def test_an_unauthorized_speaker_s_turn_warns_the_agent_in_its_system_prom
             return_value=("unauthorized", None),
         ),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
     ):
         result = await process_inbound(_msg("明天有什麼會"), settings)
 
@@ -506,10 +477,10 @@ async def test_an_unauthorized_group_speaker_s_turn_warns_the_agent_too(tmp_path
             return_value=("unauthorized", None),
         ),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
     ):
         await process_inbound(_group_msg("幫我看行事曆"), settings)
 
@@ -527,10 +498,10 @@ async def test_an_authorized_speaker_s_turn_carries_no_auth_hint(tmp_path: Path)
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
     ):
         await process_inbound(_msg("今天幾號"), settings)
 
@@ -550,495 +521,17 @@ async def test_an_unauthorized_turn_that_emits_the_marker_is_recorded_as_auth_li
 
     with (
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text=f"需要看行事曆：\n{AUTH_MARKER}")),
         ),
     ):
         result = await process_inbound(_msg("明天有什麼會"), settings)
 
     assert result.envelope.gate_status == "auth_link"
-
-
-# ---------------------------------------------------------------------------
-# resume_pending_auth — re-run what a member parked before authorizing
-# (docs/google-auth-per-member-plan.md §3.4)
-# ---------------------------------------------------------------------------
-
-
-class _StubAdapter:
-    """A ChannelAdapter stand-in that records (or refuses) what it is asked to resume."""
-
-    def __init__(self, name: str = "line", error: Exception | None = None) -> None:
-        self.name = name
-        self.error = error
-        self.resumed: list[InboundMessage] = []
-
-    def api_router(self) -> object:
-        raise NotImplementedError
-
-    async def resume(self, msg: InboundMessage) -> None:
-        self.resumed.append(msg)
-        if self.error is not None:
-            raise self.error
-
-
-@pytest.fixture
-def stub_adapter() -> Iterator[_StubAdapter]:
-    """Register a stub adapter as the only channel, restoring the real ones after.
-
-    Yields:
-        The registered stub; read `stub.resumed` to see what core handed it.
-    """
-    from alice_office_router import channels
-
-    saved = dict(channels._adapters)
-    stub = _StubAdapter()
-    channels.register_adapters([stub])
-    yield stub
-    channels.register_adapters(list(saved.values()))
-
-
-def _park(
-    settings: Settings, msg: InboundMessage, member_key: str, *, ts: float | None = None
-) -> Path:
-    """Write a pending-auth record the way auth_links.write_pending_auth does."""
-    from alice_office_router.auth_links import write_pending_auth
-
-    write_pending_auth(settings, msg.room_key, member_key, msg)
-    path = settings.room_pending_auth_path(msg.room_key, member_key)
-    if ts is not None:
-        record = json.loads(path.read_text(encoding="utf-8"))
-        record["ts"] = ts
-        path.write_text(json.dumps(record), encoding="utf-8")
-    return path
-
-
-async def test_resume_pending_auth_hands_the_parked_message_to_its_adapter(
-    tmp_path: Path, stub_adapter: _StubAdapter
-) -> None:
-    """The member gets their answer without retyping the question."""
-    from alice_office_router.core import resume_pending_auth
-
-    settings = _settings(DATA_DIR=tmp_path)
-    msg = _msg("明天有什麼會議")
-    path = _park(settings, msg, "line_room_aaa")
-
-    await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
-
-    assert len(stub_adapter.resumed) == 1
-    resumed = stub_adapter.resumed[0]
-    assert resumed.text.endswith("明天有什麼會議")
-    # Identity is untouched: same room, same channel, same speaker.
-    assert resumed.model_dump(exclude={"text"}) == msg.model_dump(exclude={"text"})
-    # Single-shot: the record is consumed, so authorizing twice never re-asks.
-    assert not path.exists()
-
-
-async def test_resume_tells_the_agent_the_authorization_just_happened(
-    tmp_path: Path, stub_adapter: _StubAdapter
-) -> None:
-    """Replayed verbatim, the question is answered from the session's "not authorized" history.
-
-    Seen in the group e2e: the resumed turn repeated "you still need to
-    authorize" without retrying a single Google tool. The system-voiced prefix
-    is what makes the agent try again.
-    """
-    from alice_office_router.core import resume_pending_auth
-
-    settings = _settings(DATA_DIR=tmp_path)
-    _park(settings, _msg("明天有什麼會議"), "line_room_aaa")
-
-    await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
-
-    assert stub_adapter.resumed[0].text == (
-        "（系統：剛完成 Google 授權，請重新執行剛才的請求。）明天有什麼會議"
-    )
-
-
-async def test_resume_in_a_group_names_who_authorized(
-    tmp_path: Path, stub_adapter: _StubAdapter
-) -> None:
-    """A group turn carries several people's history, so the prefix has to say whose token this is."""
-    from alice_office_router.core import resume_pending_auth
-
-    settings = _settings(DATA_DIR=tmp_path)
-    msg = _group_msg("明天有什麼會議", sender_id="U1", sender_name="王小明").model_copy(
-        update={"room_key": "line_C_GROUP"}
-    )
-    _park(settings, msg, "u1")
-
-    await resume_pending_auth("line_C_GROUP", "u1", settings)
-
-    assert stub_adapter.resumed[0].text == (
-        "（系統：王小明 剛完成 Google 授權，請重新執行剛才的請求。）明天有什麼會議"
-    )
-
-
-async def test_resume_pending_auth_does_nothing_when_no_message_is_parked(
-    tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Authorizing with nothing waiting is the normal case, not an error."""
-    from alice_office_router.core import resume_pending_auth
-
-    with caplog.at_level(logging.INFO):
-        await resume_pending_auth("line_room_AAA", "line_room_aaa", _settings(DATA_DIR=tmp_path))
-
-    assert stub_adapter.resumed == []
-    assert "auth_resume_empty" in caplog.text
-
-
-async def test_resume_pending_auth_ignores_an_expired_record(
-    tmp_path: Path, stub_adapter: _StubAdapter
-) -> None:
-    """A question parked 11 minutes ago is stale; the member has moved on."""
-    from alice_office_router.auth_links import PENDING_AUTH_TTL_SECONDS
-    from alice_office_router.core import resume_pending_auth
-
-    settings = _settings(DATA_DIR=tmp_path)
-    path = _park(
-        settings,
-        _msg("明天有什麼會議"),
-        "line_room_aaa",
-        ts=time.time() - PENDING_AUTH_TTL_SECONDS - 60,
-    )
-
-    await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
-
-    assert stub_adapter.resumed == []
-    assert not path.exists()
-
-
-async def test_resume_pending_auth_logs_an_error_for_an_unmounted_channel(
-    tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A message parked by a channel this process no longer mounts is dropped."""
-    from alice_office_router.core import resume_pending_auth
-
-    settings = _settings(DATA_DIR=tmp_path)
-    msg = InboundMessage(channel="telegram", room_key="line_room_AAA", text="明天有什麼會議")
-    _park(settings, msg, "line_room_aaa")
-
-    with caplog.at_level(logging.ERROR):
-        await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
-
-    assert stub_adapter.resumed == []
-    assert "auth_resume_no_adapter" in caplog.text
-
-
-async def test_resume_pending_auth_logs_an_adapter_failure_instead_of_raising(
-    tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
-) -> None:
-    """It runs detached off the OAuth callback: every failure must end in a log line."""
-    from alice_office_router.core import resume_pending_auth
-
-    settings = _settings(DATA_DIR=tmp_path)
-    stub_adapter.error = RuntimeError("push failed")
-    _park(settings, _msg("明天有什麼會議"), "line_room_aaa")
-
-    with caplog.at_level(logging.ERROR):
-        await resume_pending_auth("line_room_AAA", "line_room_aaa", settings)
-
-    assert "auth_resume_failed" in caplog.text
-    assert "RuntimeError" in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# warm_room — container + agent warm-up, triggered by LINE follow/join
-# ---------------------------------------------------------------------------
-
-
-async def test_warm_room_starts_the_container_then_probes_the_agent(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str]
-) -> None:
-    """The warm-up runs in the background and spends one throwaway turn on the agent."""
-    from alice_office_router.core import WARMUP_PROMPT, warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_line_room_AAA:8642",
-        ) as mock_get_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()) as mock_delete,
-    ):
-        warm_room("line_room_AAA", settings)
-        # Returns immediately: the caller never waits on the warm-up.
-        assert "line_room_AAA" in warmups
-        await _settle_warmups()
-
-    mock_get_container.assert_called_once_with("line_room_AAA", settings)
-    # The one agent call is the throwaway probe, on its own session id and its
-    # own (short) ceiling — no user text is ever sent here.
-    mock_ask.assert_awaited_once_with(
-        "http://hermes_line_room_AAA:8642",
-        "warmup-probe",
-        WARMUP_PROMPT,
-        "test_api_server_key",
-        idle_timeout_seconds=120.0,
-        max_seconds=120.0,
-    )
-    # ...and the probe leaves nothing behind in the room's state.db.
-    mock_delete.assert_awaited_once_with(
-        "http://hermes_line_room_AAA:8642", "warmup-probe", "test_api_server_key"
-    )
-    assert "line_room_AAA" in probed
-    assert warmups == {}
-
-
-async def test_warm_room_probe_failure_is_a_warning_and_leaves_the_room_unprobed(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
-) -> None:
-    """A failed probe costs the room's first real turn its cold start, nothing else."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_line_room_AAA:8642",
-        ),
-        patch(
-            "alice_office_router.core.ask_hermes_agent",
-            new=AsyncMock(side_effect=ValueError("Hermes agent failed: x")),
-        ),
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()) as mock_delete,
-        caplog.at_level(logging.WARNING, logger="alice_office_router.core"),
-    ):
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("warm-up probe failed" in message for message in warnings)
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    # A half-run probe may still have made Hermes create the session.
-    mock_delete.assert_awaited_once()
-    # Not probed, so a later warm-up retries.
-    assert probed == set()
-    assert warmups == {}
-
-
-async def test_warm_room_probe_session_delete_failure_is_a_warning_only(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
-) -> None:
-    """A stray probe session is worth a log line, not a re-probe of a warm agent."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_line_room_AAA:8642",
-        ),
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
-        patch(
-            "alice_office_router.core.delete_hermes_session",
-            new=AsyncMock(side_effect=httpx.ConnectError("x")),
-        ),
-        caplog.at_level(logging.WARNING, logger="alice_office_router.core"),
-    ):
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("Could not delete warm-up session" in message for message in warnings)
-    # The agent itself is warm — that is what `_probed` records.
-    assert "line_room_AAA" in probed
-    assert warmups == {}
-
-
-async def test_warm_room_twice_probes_the_agent_only_once(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str]
-) -> None:
-    """A second warm-up after the first finished re-warms the container only."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_line_room_AAA:8642",
-        ) as mock_get_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
-    ):
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-
-    # Resolving an existing container is cheap; a second ~28k-token probe of an
-    # already-warm agent is not. (Deduplication is in-flight only, so the
-    # second call does re-run the container step.)
-    assert mock_get_container.call_count == 2
-    mock_ask.assert_awaited_once()
-    assert probed == {"line_room_AAA"}
-
-
-async def test_warm_room_probe_unexpected_error_ends_in_the_error_log(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
-) -> None:
-    """An exception the probe does not expect is logged, not left on a dead task."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_line_room_AAA:8642",
-        ),
-        patch(
-            "alice_office_router.core.ask_hermes_agent",
-            new=AsyncMock(side_effect=RuntimeError("boom")),
-        ),
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()) as mock_delete,
-        caplog.at_level(logging.ERROR, logger="alice_office_router.core"),
-    ):
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-
-    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert "warm-up failed" in errors[0]
-    assert "agent: RuntimeError: boom" in errors[0]
-    # Cleanup still ran on the way out.
-    mock_delete.assert_awaited_once()
-    assert probed == set()
-    assert warmups == {}
-
-
-async def test_warm_room_container_failure_is_logged_and_skips_the_probe(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
-) -> None:
-    """A warm-up that fails is logged for the operator and leaves no entry behind."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            side_effect=RuntimeError("did not become ready"),
-        ),
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
-        caplog.at_level(logging.ERROR),
-    ):
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-
-    # No container, no probe: the second step never gets a URL to talk to.
-    mock_ask.assert_not_awaited()
-    assert probed == set()
-    errors = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
-    assert len(errors) == 1
-    assert "warm-up failed" in errors[0]
-    assert "container: RuntimeError: did not become ready" in errors[0]
-    # A failed warm-up leaves no entry behind, so the next trigger retries.
-    assert warmups == {}
-
-
-async def test_warm_room_twice_warms_once_while_in_flight(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str]
-) -> None:
-    """A second trigger during a running warm-up reuses it, not a second thread."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-    release = threading.Event()
-
-    def _slow_container(room_key: str, config: Settings) -> str:
-        release.wait(2)
-        return "http://hermes_line_room_AAA:8642"
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container", side_effect=_slow_container
-        ) as mock_get_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
-    ):
-        try:
-            warm_room("line_room_AAA", settings)
-            # Let the first task reach its to_thread await before the second
-            # trigger, so the dedup is exercised on a genuinely in-flight one.
-            await asyncio.sleep(0)
-            warm_room("line_room_AAA", settings)
-            assert len(warmups) == 1
-        finally:
-            # Release the parked thread and settle inside the patch even when
-            # the assertion fails, so no task outlives the mock.
-            release.set()
-            await _settle_warmups()
-
-    assert mock_get_container.call_count == 1
-
-
-async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
-    warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
-) -> None:
-    """Shutdown cancels the tracked warm-ups and says so; the thread finishes on its own."""
-    from alice_office_router.core import cancel_warmups, warm_room
-
-    settings = _settings()
-    release = threading.Event()
-
-    def _slow_container(room_key: str, config: Settings) -> str:
-        release.wait(2)
-        return "http://hermes_line_room_AAA:8642"
-
-    with (
-        patch("alice_office_router.core.get_or_create_container", side_effect=_slow_container),
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
-        patch("alice_office_router.core.delete_hermes_session", new=AsyncMock()),
-        caplog.at_level(logging.INFO, logger="alice_office_router.core"),
-    ):
-        try:
-            warm_room("line_room_AAA", settings)
-            task = warmups["line_room_AAA"]
-            # A task cancelled before its first step never enters the
-            # coroutine (so nothing logs); let it reach the to_thread await.
-            await asyncio.sleep(0)
-            cancel_warmups()
-            await asyncio.wait([task])
-        finally:
-            release.set()
-
-    assert task.cancelled()
-    assert any("cancelled at shutdown" in record.getMessage() for record in caplog.records)
-    assert warmups == {}
-
-
-async def test_warm_room_retries_after_the_previous_one_finished(
-    warmups: dict[str, asyncio.Task[None]],
-) -> None:
-    """Deduplication is in-flight only: once a warm-up has finished, the next one warms again."""
-    from alice_office_router.core import warm_room
-
-    settings = _settings()
-
-    with (
-        patch(
-            "alice_office_router.core.get_or_create_container",
-            return_value="http://hermes_line_room_AAA:8642",
-        ) as mock_get_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()),
-    ):
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-        warm_room("line_room_AAA", settings)
-        await _settle_warmups()
-
-    assert mock_get_container.call_count == 2
 
 
 async def test_notice_returns_notice_then_agent_reply(tmp_path: Path) -> None:
@@ -1053,11 +546,11 @@ async def test_notice_returns_notice_then_agent_reply(tmp_path: Path) -> None:
             return_value=("notice", _NOTICE_MSG),
         ),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="哈囉，我是 Hermes")),
         ),
     ):
@@ -1083,11 +576,11 @@ async def test_agent_error_returns_the_failure_notice(tmp_path: Path) -> None:
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
@@ -1105,10 +598,10 @@ async def test_container_error_returns_the_failure_notice_and_skips_agent() -> N
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             side_effect=RuntimeError("boom"),
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
         texts = (await process_inbound(_msg(), settings)).texts
 
@@ -1128,11 +621,11 @@ async def test_notice_kept_when_agent_fails(tmp_path: Path) -> None:
             return_value=("notice", _NOTICE_MSG),
         ),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
@@ -1157,8 +650,8 @@ async def test_unaddressed_group_message_is_observed_and_short_circuits() -> Non
     with (
         patch("alice_office_router.core.record_observed") as mock_record,
         patch("alice_office_router.core.check_google_authorization") as mock_gate,
-        patch("alice_office_router.core.get_or_create_container") as mock_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.agent_turn.get_or_create_container") as mock_container,
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
         texts = (
             await process_inbound(_group_msg("userA 跟 userB 問早", addressed=False), settings)
@@ -1185,11 +678,11 @@ async def test_addressed_group_builds_tagged_prompt_under_system_message(tmp_pat
         patch("alice_office_router.core.peek_observed", return_value=observed),
         patch("alice_office_router.core.clear_observed") as mock_clear,
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="好的，已安排")),
         ) as mock_ask,
     ):
@@ -1217,11 +710,11 @@ async def test_group_agent_failure_keeps_buffer(tmp_path: Path) -> None:
         patch("alice_office_router.core.peek_observed", return_value=[]),
         patch("alice_office_router.core.clear_observed") as mock_clear,
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
@@ -1244,11 +737,11 @@ async def test_group_agent_failure_notifies_without_dropping_real_observed_backg
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
@@ -1273,11 +766,11 @@ async def test_group_silence_token_is_dropped_but_buffer_cleared(tmp_path: Path)
         patch("alice_office_router.core.peek_observed", return_value=[]),
         patch("alice_office_router.core.clear_observed") as mock_clear,
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="NO_REPLY")),
         ),
     ):
@@ -1301,8 +794,8 @@ async def test_reset_command_confirms_rotates_and_skips_agent(tmp_path: Path) ->
 
     with (
         patch("alice_office_router.core.check_google_authorization") as mock_gate,
-        patch("alice_office_router.core.get_or_create_container") as mock_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.agent_turn.get_or_create_container") as mock_container,
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
         texts = (await process_inbound(_msg("/new"), settings)).texts
 
@@ -1323,8 +816,8 @@ async def test_group_reset_clears_observed_buffer(tmp_path: Path) -> None:
 
     with (
         patch("alice_office_router.core.check_google_authorization") as mock_gate,
-        patch("alice_office_router.core.get_or_create_container") as mock_container,
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.agent_turn.get_or_create_container") as mock_container,
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=AsyncMock()) as mock_ask,
     ):
         texts = (await process_inbound(_group_msg("/new"), settings)).texts
 
@@ -1362,10 +855,10 @@ async def test_idle_rotation_generates_handoff_then_injects_into_new_epoch(
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
     ):
         texts = (await process_inbound(_msg("今天的進度"), settings)).texts
 
@@ -1403,10 +896,10 @@ async def test_handoff_failure_still_rotates_clean_slate(tmp_path: Path) -> None
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
     ):
         texts = (await process_inbound(_msg("今天的進度"), settings)).texts
 
@@ -1437,10 +930,10 @@ async def test_group_idle_rotation_wraps_tagged_prompt(tmp_path: Path) -> None:
         patch("alice_office_router.core.peek_observed", return_value=[]),
         patch("alice_office_router.core.clear_observed"),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
     ):
         texts = (await process_inbound(_group_msg(), settings)).texts
 
@@ -1461,11 +954,11 @@ async def test_successful_turn_records_token_watermark(tmp_path: Path) -> None:
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="回覆", prompt_tokens=4321)),
         ),
     ):
@@ -1491,11 +984,11 @@ async def test_envelope_outcome_replied_carries_session_and_latency(tmp_path: Pa
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="回覆", prompt_tokens=27000)),
         ),
     ):
@@ -1525,11 +1018,11 @@ async def test_envelope_carries_the_reply_call_counts(tmp_path: Path) -> None:
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(
                 return_value=AgentReply(text="回覆", tool_calls=11, api_calls=14),
             ),
@@ -1585,11 +1078,11 @@ async def test_envelope_records_the_gate_status_of_a_normal_turn(tmp_path: Path)
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="好")),
         ),
     ):
@@ -1611,11 +1104,11 @@ async def test_envelope_outcome_agent_failed_records_the_error(tmp_path: Path) -
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("boom")),
         ),
     ):
@@ -1639,7 +1132,7 @@ async def test_envelope_outcome_agent_failed_when_the_container_is_unreachable()
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             side_effect=RuntimeError("no docker"),
         ),
     ):
@@ -1664,11 +1157,11 @@ async def test_envelope_outcome_silence(tmp_path: Path) -> None:
         patch("alice_office_router.core.peek_observed", return_value=[]),
         patch("alice_office_router.core.clear_observed"),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_C1:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="NO_REPLY")),
         ),
     ):
@@ -1696,11 +1189,11 @@ async def test_timeout_error_names_the_exception_type_not_its_empty_message(
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=httpx.ReadTimeout("")),
         ),
     ):
@@ -1720,11 +1213,11 @@ async def test_ceiling_timeout_error_gets_the_timeout_notice(tmp_path: Path) -> 
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=TimeoutError()),
         ),
     ):
@@ -1744,11 +1237,11 @@ async def test_agent_reported_failure_gets_the_generic_failure_notice(tmp_path: 
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("Hermes agent failed: tool crashed")),
         ),
     ):
@@ -1775,10 +1268,12 @@ async def test_validation_error_never_carries_the_rejected_input(
         caplog.at_level(logging.ERROR),
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=AsyncMock(side_effect=failure)),
+        patch(
+            "alice_office_router.agent_turn.ask_hermes_agent", new=AsyncMock(side_effect=failure)
+        ),
     ):
         result = await process_inbound(_msg(), settings)
 
@@ -1807,10 +1302,10 @@ async def test_envelope_records_rotation_and_request_context(tmp_path: Path) -> 
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=fake_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=fake_ask),
         bound_contextvars(request_id="req-1", event_id="evt-1"),
     ):
         result = await process_inbound(_msg("今天的進度"), settings)
@@ -1834,11 +1329,11 @@ async def test_envelope_has_no_request_context_outside_a_request(tmp_path: Path)
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.core.ask_hermes_agent",
+            "alice_office_router.agent_turn.ask_hermes_agent",
             new=AsyncMock(return_value=AgentReply(text="回覆")),
         ),
     ):
@@ -1899,10 +1394,10 @@ async def test_same_room_turns_run_one_at_a_time(
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=_ask),
         patch("alice_office_router.core.struct_logger", new=Mock()) as mock_struct_logger,
     ):
         first = asyncio.create_task(process_inbound(_msg("第一則"), settings))
@@ -1957,10 +1452,10 @@ async def test_different_rooms_are_not_serialized(
     with (
         patch("alice_office_router.core.check_google_authorization", return_value=("ok", None)),
         patch(
-            "alice_office_router.core.get_or_create_container",
+            "alice_office_router.agent_turn.get_or_create_container",
             return_value="http://hermes_room:8642",
         ),
-        patch("alice_office_router.core.ask_hermes_agent", new=_ask),
+        patch("alice_office_router.agent_turn.ask_hermes_agent", new=_ask),
     ):
         await asyncio.wait_for(
             asyncio.gather(

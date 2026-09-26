@@ -11,6 +11,13 @@ Alongside the texts it returns a `TurnEnvelope` draft describing how the turn
 went (docs/logging-design.md §5.7). Core builds it but does not emit it: only
 the adapter knows whether the reply actually reached the room, so the adapter
 fills `delivered` and calls `conversation_log.record_turn`.
+
+This module is only the dispatch pipeline and the room turn lock. What each
+step does lives next door, one reason-for-change per module: a single agent
+turn — container, session rotation and handoff, the Hermes call, the timeout
+and failure notices — is `agent_turn`; warming a room's container and agent
+before its first message is `warmup`; re-running a message parked for Google
+authorization is `auth_links.resume_pending_auth`.
 """
 
 from __future__ import annotations
@@ -22,15 +29,14 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 
-import httpx
 import structlog
-from pydantic import ValidationError
 from structlog.contextvars import bound_contextvars
 
-from alice_office_router.auth_links import publish_auth_links, read_pending_auth
+from alice_office_router.agent_turn import AgentTurn, ask_agent, elapsed_ms
+from alice_office_router.auth_links import publish_auth_links
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
-from alice_office_router.container_manager import get_or_create_container, refresh_google_mount
+from alice_office_router.container_manager import refresh_google_mount
 from alice_office_router.conversation_log import Outcome, TurnEnvelope
 from alice_office_router.file_links import publish_file_links
 from alice_office_router.google_oauth import check_google_authorization
@@ -45,16 +51,10 @@ from alice_office_router.group_context import (
     peek_observed,
     record_observed,
 )
-from alice_office_router.hermes_client import ask_hermes_agent, delete_hermes_session
 from alice_office_router.session_hygiene import (
-    HANDOFF_PROMPT,
     RESET_CONFIRMATION,
-    begin_turn,
-    build_turn_text,
     check_reset_command,
-    complete_turn,
     reset_session,
-    session_id_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,56 +78,6 @@ struct_logger = structlog.stdlib.get_logger(__name__)
 # number of rooms, which already costs a container each.
 _room_locks: dict[str, asyncio.Lock] = {}
 
-# In-flight warm-ups, one per room. `warm_room` starts a room's container here
-# — and then warms its agent with one throwaway turn — so the room's first real
-# message lands on a ready agent instead of paying the 30–60 s cold start plus
-# the agent's first-turn tax. Triggered from LINE's `follow` (1:1 friend add)
-# and `join` (added to a group) events — the moment a room appears, well before
-# its first question; it used to hang off the Google gate's "blocked" reply,
-# which no longer exists (docs/google-auth-per-member-plan.md §3.5). Keyed by
-# room so a second trigger while the first warm-up is still running reuses it
-# instead of spawning another thread. The entry is dropped when the task
-# finishes (success or failure), so a later trigger retries a warm-up that
-# failed — deduplication is in-flight only, never "once ever". Holding the Task
-# also keeps it from being garbage collected mid-flight. Process-local, like
-# `_room_locks`.
-_warmups: dict[str, asyncio.Task[None]] = {}
-
-# The session id the warm-up probe turn runs under. Deliberately neither a room
-# key (`line_…`/`api_…`) nor a `room_key#N` epoch id (session_hygiene.
-# session_id_for), so it can never collide with a user session; the probe is
-# deleted right after it runs anyway (see _probe_agent).
-WARMUP_SESSION_ID = "warmup-probe"
-
-# What the probe asks. Cheap on purpose: the point is to make the Hermes process
-# run one chat turn, not to get an answer.
-WARMUP_PROMPT = "Warm-up ping from the router. Reply with the single word OK and do nothing else."
-
-# Absolute ceiling for the probe turn. A probe that takes longer than this is
-# worthless — the user's real message has long since arrived by then — and
-# HERMES_REQUEST_TIMEOUT_SECONDS is sized for real user turns (tool loops,
-# document work), not for a one-word ping.
-_WARMUP_MAX_SECONDS = 120.0
-
-# Rooms whose agent this router process has already probed. Starting a
-# container is cheap to repeat; the probe is a real ~28k-token LLM call, and a
-# second warm-up trigger for the same room would land on an already-warm
-# container and pay it again for nothing. The in-flight dedup in
-# `_warmups` only covers warm-ups that overlap in time, so it cannot do this.
-# Known misses, both accepted: an operator's `docker restart` of a room's
-# container while the router stays up leaves this set stale, so that room's
-# next real turn pays the tool-registry tax once; a router restart empties it,
-# costing at most one extra probe per room. Process-local, like `_room_locks`.
-_probed: set[str] = set()
-
-
-# Cap on the free-text half of an error string. `error` rides the log stream off
-# the host into Loki, where message content must never go (conversation_log's
-# module doc), so what an exception's str() happens to contain is not safe to
-# forward whole — a few hundred characters of a stack-free message is all an
-# operator reads anyway.
-_ERROR_DETAIL_MAX_CHARS = 200
-
 # Outcomes whose inbound text Hermes already wrote to the room's state.db, so
 # the envelope must not keep a second copy: "replied", and "silence" — the agent
 # answered, it just answered with the silence token. "agent_failed" is
@@ -135,327 +85,6 @@ _ERROR_DETAIL_MAX_CHARS = 200
 # never reached Hermes, and then this envelope is the only record of what the
 # user said (see scripts/conversations.py `_is_missing_from_state_db`).
 _TEXT_IN_STATE_DB: frozenset[Outcome] = frozenset({"replied", "silence"})
-
-# What the room is told when the router gave up waiting for the turn (the
-# stream went silent for HERMES_IDLE_TIMEOUT_SECONDS, or the whole turn passed
-# the HERMES_REQUEST_TIMEOUT_SECONDS ceiling). The agent itself is not
-# interrupted, so its answer still lands in the room's Hermes session and a
-# repeat question is cheap — the wording says so. Channel-free: no LINE-specific
-# wording, every adapter sends it as plain text.
-AGENT_TIMEOUT_NOTICE = (
-    "這題處理時間超過限制，這次的回覆沒有送出。請再問我一次，可以把問題縮小或分段，我會接著處理。"
-)
-
-# What the room is told for every other agent-bound failure (container could not
-# be created or reached, HTTP error, unusable response body). Deliberately
-# generic: the actionable detail belongs in the log's `error` field, not in the
-# room. Channel-free, like AGENT_TIMEOUT_NOTICE.
-AGENT_FAILURE_NOTICE = "系統暫時無法回應，請稍後再試一次。"
-
-
-def _describe_error(origin: str, exc: Exception) -> str:
-    """Render an exception for the `error` field without leaking message content.
-
-    `str(exc)` is not safe to forward. A pydantic `ValidationError` embeds the
-    value it rejected — for this router that is the agent's reply text, i.e. the
-    exact thing the log stream must not carry — and some httpx timeouts stringify
-    to nothing at all, which would leave `error` empty and useless. The type name
-    is always present and always safe; the message is truncated; a validation
-    error contributes only its shape.
-
-    Args:
-        origin: Which stage failed ("container", "agent").
-        exc: The exception that ended the turn.
-
-    Returns:
-        A short, content-free reason string, e.g. "agent: ReadTimeout" or
-        "agent: ValidationError (1 error at text)".
-    """
-    name = type(exc).__name__
-    if isinstance(exc, ValidationError):
-        fields = ", ".join(
-            ".".join(str(part) for part in error["loc"]) or "<root>" for error in exc.errors()
-        )
-        return f"{origin}: {name} ({exc.error_count()} error(s) at {fields})"
-    detail = str(exc)[:_ERROR_DETAIL_MAX_CHARS].strip()
-    return f"{origin}: {name}: {detail}" if detail else f"{origin}: {name}"
-
-
-async def _drop_probe_session(target_url: str, room_key: str, config: Settings) -> None:
-    """Best-effort: remove the warm-up probe's throwaway session from the room.
-
-    Failure is logged and swallowed: the probe has already done its job by then,
-    and the only cost of a session that outlives it is one stray turn a
-    cross-session `session_search` could surface (see delete_hermes_session).
-
-    Args:
-        target_url: The room's Hermes container base URL.
-        room_key: The room key core routes on (log context only).
-        config: Application settings.
-    """
-    try:
-        await delete_hermes_session(target_url, WARMUP_SESSION_ID, config.HERMES_API_SERVER_KEY)
-    except httpx.HTTPError as exc:
-        logger.warning(f"Could not delete warm-up session for room {room_key}: {exc}")
-
-
-async def _probe_agent(target_url: str, room_key: str, config: Settings) -> bool:
-    """Spend one throwaway turn on the room's agent, then delete its session.
-
-    A running container is not yet a warm agent: the Hermes process pays a
-    one-time tool-registry probe (~4.5 s of capability checks and vision
-    auto-detection) on its *first* chat turn and memoizes the result
-    process-wide, so whichever turn goes first eats it. This makes that turn a
-    router-owned ping on WARMUP_SESSION_ID instead of the user's real question,
-    and then deletes the session so nothing of it stays in the room's state.db.
-
-    Args:
-        target_url: The room's Hermes container base URL.
-        room_key: The room key core routes on.
-        config: Application settings.
-
-    Returns:
-        True when the probe turn completed (the room counts as probed), False
-        when it failed — the caller then leaves the room unprobed so a later
-        warm-up retries.
-    """
-    started = time.perf_counter()
-    probed = True
-    try:
-        await ask_hermes_agent(
-            target_url,
-            WARMUP_SESSION_ID,
-            WARMUP_PROMPT,
-            config.HERMES_API_SERVER_KEY,
-            idle_timeout_seconds=config.HERMES_IDLE_TIMEOUT_SECONDS,
-            max_seconds=_WARMUP_MAX_SECONDS,
-        )
-    except (httpx.HTTPError, ValueError, TimeoutError) as exc:
-        # Same tuple as _generate_handoff's: the probe is a best-effort extra,
-        # and a failed one only costs the user's first turn its cold start.
-        logger.warning(
-            f"Agent warm-up probe failed for room {room_key}; "
-            f"first turn pays the cold start ({exc})"
-        )
-        probed = False
-    finally:
-        # Unconditional: a probe that failed mid-turn may still have made
-        # Hermes create the session, and an unexpected exception type (which
-        # propagates to _run_warmup's error log) must not leave one behind
-        # either.
-        await _drop_probe_session(target_url, room_key, config)
-    if probed:
-        logger.info(f"Agent warm for room {room_key} ({_elapsed_ms(started)} ms)")
-    return probed
-
-
-async def _run_warmup(room_key: str, config: Settings) -> None:
-    """Body of one warm-up: start the room's container, then warm its agent.
-
-    Two steps, because a healthy container still answers its first real turn
-    slowly: Hermes builds its tool definitions on the first chat turn of the
-    process and memoizes them from then on, so the probe turn (see
-    `_probe_agent`) moves that cost off the user's first message. The probe is
-    skipped for a room this process already probed (`_probed`).
-
-    Each step fails on its own terms. The broad catch around the container step
-    mirrors `_ask_agent`'s guard around the same call: docker's exception types
-    cannot be imported here (container_manager is the only module allowed to),
-    and whatever went wrong must end in a log line, never an unobserved task
-    exception — the same reason the probe step has one. The user is not told:
-    the next real message walks the normal path and surfaces
-    AGENT_FAILURE_NOTICE if it still fails.
-
-    Args:
-        room_key: The room whose container to start.
-        config: Application settings.
-    """
-    try:
-        target_url = await asyncio.to_thread(get_or_create_container, room_key, config)
-    except asyncio.CancelledError:
-        # Shutdown (cancel_warmups). The worker thread cannot be interrupted,
-        # so the docker call runs to completion on its own; the container it
-        # produces is found, not recreated, by the next resolution.
-        logger.info(f"Container warm-up for room {room_key} cancelled at shutdown")
-        raise
-    except Exception as exc:
-        # Same guard as _ask_agent's container step (its twin; keep in sync).
-        reason = _describe_error("container", exc)
-        logger.error(f"Container warm-up failed for room {room_key}: {reason}")
-        return
-    logger.info(f"Container warm for room {room_key}")
-
-    if room_key in _probed:
-        return
-    try:
-        probed = await _probe_agent(target_url, room_key, config)
-    except asyncio.CancelledError:
-        logger.info(f"Agent warm-up for room {room_key} cancelled at shutdown")
-        raise
-    except Exception as exc:
-        # Anything _probe_agent does not treat as an expected probe failure.
-        reason = _describe_error("agent", exc)
-        logger.error(f"Agent warm-up failed for room {room_key}: {reason}")
-        return
-    if probed:
-        _probed.add(room_key)
-
-
-def warm_room(room_key: str, config: Settings) -> None:
-    """Start the room's container and warm its agent in the background.
-
-    Returns immediately; the caller carries on without waiting. Deduplicated
-    per room: one in-flight warm-up task per room (`_warmups`), and the agent
-    probe inside it runs at most once per room per process (`_probed`). No extra log
-    context needs binding: `asyncio.create_task` copies the current
-    contextvars (process_inbound's `room_key`, the adapter's request fields)
-    and `asyncio.to_thread` carries them into the worker thread, so every line
-    the warm-up logs — including container_manager's own `container=` — is
-    already tagged with the room.
-
-    Args:
-        room_key: The room whose container to start.
-        config: Application settings.
-    """
-    # `done()` rather than membership: a finished task stays registered until
-    # its pop callback runs on the next loop iteration, and a trigger landing
-    # in that window must still get its retry.
-    existing = _warmups.get(room_key)
-    if existing is not None and not existing.done():
-        return
-    task = asyncio.create_task(_run_warmup(room_key, config), name=f"warmup:{room_key}")
-    _warmups[room_key] = task
-    task.add_done_callback(lambda _done: _warmups.pop(room_key, None))
-
-
-def _resumed_message(msg: InboundMessage) -> InboundMessage:
-    """Prefix a parked message with what changed while it was parked.
-
-    A resumed turn re-enters the room's *existing* Hermes session, whose last
-    few turns all say "you are not authorized yet". Replayed verbatim, the
-    question is answered from that history — the agent repeats the refusal
-    without ever retrying a Google tool (seen in the group e2e of
-    docs/google-auth-per-member-plan.md §6b). One system-voiced sentence ahead
-    of the original text is what tells it the world has moved on. Channel-free
-    on purpose: the LINE adapter's own lead line announces the authorization to
-    the room, this one is addressed to the agent.
-
-    Args:
-        msg: The parked inbound message, exactly as first received.
-
-    Returns:
-        A copy whose text carries the prefix; every identity field is
-        untouched, so the turn still runs as the same speaker in the same room.
-    """
-    # Named only in a group, matching auth_links._link_text: a 1:1 room has
-    # nobody else the authorization could have belonged to.
-    who = f"{msg.sender_name} " if msg.is_group and msg.sender_name else ""
-    prefix = f"（系統：{who}剛完成 Google 授權，請重新執行剛才的請求。）"
-    return msg.model_copy(update={"text": f"{prefix}{msg.text}"})
-
-
-async def resume_pending_auth(room_key: str, member_key: str, config: Settings) -> None:
-    """Re-run whatever a member parked before they went off to authorize.
-
-    The router half of the Google authorization resume
-    (docs/google-auth-per-member-plan.md §3.4): `auth_links` parked the message
-    that made the agent ask for a link, and this picks it up once the token is
-    on disk, so the member gets their answer without retyping the question. It
-    goes back in with a system-voiced prefix (`_resumed_message`), not verbatim.
-
-    Registered as `google_oauth.on_authorized` from main.py — a hook rather
-    than an import, since google_oauth is imported *by* core — and run as a
-    fire-and-forget task off the OAuth callback, which is why every failure
-    ends here as a log line: there is no request left to return it to, and an
-    unobserved task exception would only surface at garbage-collection time.
-
-    Args:
-        room_key: The room the member authorized in. Same value the hook is
-            given as `room_id`: `/oauth/start?user_id=` carries the prefixed
-            room key (see auth_links._link_text -> google_oauth.auth_url_for).
-        member_key: The member whose token was just stored.
-        config: Application settings.
-    """
-    # Imported here, not at module scope: `channels` builds the adapters, which
-    # import this module, so a top-level import would be a cycle.
-    from alice_office_router.channels import adapter_for
-
-    try:
-        msg = await asyncio.to_thread(read_pending_auth, config, room_key, member_key)
-        if msg is None:
-            # The normal case for a member who authorized without a question
-            # waiting (a re-authorization, an expired park, a second click).
-            struct_logger.info("auth_resume_empty", room_key=room_key, member=member_key)
-            return
-        adapter = adapter_for(msg.channel)
-        if adapter is None:
-            struct_logger.error(
-                "auth_resume_no_adapter", room_key=room_key, member=member_key, channel=msg.channel
-            )
-            return
-        struct_logger.info(
-            "auth_resume_started", room_key=room_key, member=member_key, channel=msg.channel
-        )
-        await adapter.resume(_resumed_message(msg))
-    except Exception as exc:
-        # Deliberately broad, like google_oauth._run_authorized's: a resume is
-        # a whole agent turn's worth of code reached from a detached task.
-        struct_logger.error(
-            "auth_resume_failed",
-            room_key=room_key,
-            member=member_key,
-            error=_describe_error("resume", exc),
-        )
-
-
-def cancel_warmups() -> None:
-    """Cancel every in-flight room warm-up (called at lifespan shutdown).
-
-    Makes the abandoned warm-ups visible in the log instead of leaving them
-    to the runner's silent teardown. The worker threads themselves finish on
-    their own (see _run_warmup).
-    """
-    for task in list(_warmups.values()):
-        task.cancel()
-
-
-@dataclass(frozen=True)
-class AgentTurn:
-    """The result of one agent-bound turn, reply text plus what to record.
-
-    Attributes:
-        outcome: How the turn ended (conversation_log.Outcome). An agent-bound
-            turn only ever produces three of them: "replied" when the agent
-            answered and the answer is deliverable, "agent_failed" when the
-            container or the agent call failed, "silence" when a group reply was
-            the silence token.
-        text: The text to deliver to the room — the agent's reply for
-            "replied", and the fixed notice (AGENT_TIMEOUT_NOTICE or
-            AGENT_FAILURE_NOTICE) for "agent_failed", so a failed turn is
-            never answered with silence. None only for "silence", where the
-            agent deliberately chose not to answer.
-        session_id: The exact X-Hermes-Session-Id sent (the join key onto
-            state.db), or None when the call never got that far.
-        rotated: Whether this turn rotated the room to a fresh session epoch.
-        duration_ms: Wall time of the agent HTTP call, None if it never ran.
-        prompt_tokens: The reply's reported prompt_tokens, if any.
-        tool_calls: How many tool calls Hermes made answering this turn, or
-            None when the call never ran or the count could not be read (see
-            hermes_client.AgentReply).
-        api_calls: How many internal LLM API calls this turn made, same
-            caveats as tool_calls.
-        error: Short reason string when the turn failed; None otherwise.
-    """
-
-    outcome: Outcome
-    text: str | None = None
-    session_id: str | None = None
-    rotated: bool = False
-    duration_ms: float | None = None
-    prompt_tokens: int | None = None
-    tool_calls: int | None = None
-    api_calls: int | None = None
-    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -503,18 +132,6 @@ class InboundResult:
     envelope: TurnEnvelope
 
 
-def _elapsed_ms(started: float) -> float:
-    """Return milliseconds elapsed since a perf_counter reading.
-
-    Args:
-        started: The `time.perf_counter()` value taken before the call.
-
-    Returns:
-        Elapsed wall time in milliseconds, rounded to 2 decimals.
-    """
-    return round((time.perf_counter() - started) * 1000, 2)
-
-
 def _context_value(key: str) -> str | None:
     """Read one string field out of the bound structlog context.
 
@@ -527,148 +144,6 @@ def _context_value(key: str) -> str | None:
     """
     value = structlog.contextvars.get_contextvars().get(key)
     return value if isinstance(value, str) else None
-
-
-async def _generate_handoff(
-    target_url: str, room_key: str, retired_epoch: int, config: Settings
-) -> str | None:
-    """Best-effort: ask the just-retired session for a one-shot handoff summary.
-
-    Sends one extra request to the retired epoch's session id (the rotation has
-    already happened in begin_turn) asking for a short summary of unfinished
-    items, preferences, and in-progress tasks. Any failure is logged and
-    swallowed — the new epoch then continues clean-slate, since a fresh session
-    with no summary still beats an ever-growing one. The summary is never
-    persisted: it exists only to be injected into this turn's user message.
-
-    Args:
-        target_url: The room's Hermes container base URL.
-        room_key: The room key core routes on.
-        retired_epoch: The epoch just closed (whose session is summarized).
-        config: Application settings.
-
-    Returns:
-        The handoff summary text, or None when the summary request failed.
-    """
-    old_session_id = session_id_for(room_key, retired_epoch)
-    try:
-        reply = await ask_hermes_agent(
-            target_url,
-            old_session_id,
-            HANDOFF_PROMPT,
-            config.HERMES_API_SERVER_KEY,
-            idle_timeout_seconds=config.HERMES_IDLE_TIMEOUT_SECONDS,
-            max_seconds=config.HERMES_REQUEST_TIMEOUT_SECONDS,
-        )
-    except (httpx.HTTPError, ValueError, TimeoutError) as exc:
-        logger.warning(
-            f"Handoff summary failed for room {room_key}; continuing clean-slate ({exc})"
-        )
-        return None
-    return reply.text
-
-
-async def _ask_agent(
-    room_key: str, text: str, config: Settings, *, system: str | None = None
-) -> AgentTurn:
-    """Resolve the room's Hermes container, rotate if due, and ask for a reply.
-
-    Each step is independently guarded: a failure is logged and yields an
-    "agent_failed" AgentTurn carrying a fixed notice for the room (a timeout
-    gets its own wording), mirroring the original background-task contract
-    where a downstream error must never propagate — but never answering the
-    user with silence. Session hygiene is applied here so 1:1 and group turns
-    share it: begin_turn evaluates the triggers and rotates atomically (before
-    any await); a rotated turn then fetches a one-shot handoff summary from the
-    retired epoch's session and folds it into this turn's user text; a
-    successful turn records its token watermark (see session_hygiene, including
-    the accepted trade-offs of the non-persisted handoff).
-
-    Args:
-        room_key: Unique room key used to resolve the container and session.
-        text: User message text to forward to the agent.
-        config: Application settings.
-        system: Optional ephemeral system message for this turn (the group
-            path passes GROUP_SYSTEM_PROMPT, the 1:1 path
-            DIRECT_SYSTEM_PROMPT); None sends the room's own prompt alone.
-
-    Returns:
-        An AgentTurn carrying the reply (or the failure) plus the session id,
-        rotation flag, latency and token count the envelope records.
-    """
-    try:
-        # Off-loop: the call blocks up to _READY_TIMEOUT_SECONDS on a cold
-        # room, and may wait on container_manager's lock while a warm-up
-        # thread holds it — neither should stall every other room's turn.
-        target_url = await asyncio.to_thread(get_or_create_container, room_key, config)
-    except Exception as exc:
-        # Same guard as _run_warmup's (its twin; keep in sync).
-        reason = _describe_error("container", exc)
-        logger.error(f"Failed to get/create container for room {room_key}: {reason}")
-        return AgentTurn(outcome="agent_failed", text=AGENT_FAILURE_NOTICE, error=reason)
-
-    plan = begin_turn(config, room_key)
-    # retired_epoch is set exactly when this turn rotated (see TurnPlan).
-    handoff = (
-        await _generate_handoff(target_url, room_key, plan.retired_epoch, config)
-        if plan.retired_epoch is not None
-        else None
-    )
-
-    session_id = session_id_for(room_key, plan.epoch)
-    started = time.perf_counter()
-    try:
-        result = await ask_hermes_agent(
-            target_url,
-            session_id,
-            build_turn_text(handoff, text),
-            config.HERMES_API_SERVER_KEY,
-            idle_timeout_seconds=config.HERMES_IDLE_TIMEOUT_SECONDS,
-            max_seconds=config.HERMES_REQUEST_TIMEOUT_SECONDS,
-            system=system,
-        )
-    except (httpx.HTTPError, ValueError, TimeoutError) as exc:
-        reason = _describe_error("agent", exc)
-        # Two different budgets ran out, and they mean different things: httpx
-        # raises when the stream went silent (idle — the agent stopped even
-        # sending keepalives, so it is probably dead), asyncio.timeout when the
-        # whole turn passed the absolute ceiling (still alive, just far too
-        # long). The room hears the same notice; the operator needs the
-        # difference to know which env var to raise (docs/troubleshooting.md).
-        idle = isinstance(exc, httpx.TimeoutException)
-        timed_out = idle or isinstance(exc, TimeoutError)
-        if timed_out:
-            kind, limit = (
-                ("idle", config.HERMES_IDLE_TIMEOUT_SECONDS)
-                if idle
-                else ("ceiling", config.HERMES_REQUEST_TIMEOUT_SECONDS)
-            )
-            logger.error(
-                f"Hermes agent request hit the {kind} timeout for room {room_key} "
-                f"after {limit}s: {reason}"
-            )
-        else:
-            logger.error(f"Hermes agent request failed for room {room_key}: {reason}")
-        return AgentTurn(
-            outcome="agent_failed",
-            text=AGENT_TIMEOUT_NOTICE if timed_out else AGENT_FAILURE_NOTICE,
-            session_id=session_id,
-            rotated=plan.rotated,
-            duration_ms=_elapsed_ms(started),
-            error=reason,
-        )
-
-    complete_turn(config, room_key, epoch=plan.epoch, prompt_tokens=result.prompt_tokens)
-    return AgentTurn(
-        outcome="replied",
-        text=result.text,
-        session_id=session_id,
-        rotated=plan.rotated,
-        duration_ms=_elapsed_ms(started),
-        prompt_tokens=result.prompt_tokens,
-        tool_calls=result.tool_calls,
-        api_calls=result.api_calls,
-    )
 
 
 def _with_extra(prompt: str, extra: str | None) -> str:
@@ -713,7 +188,7 @@ async def _ask_group_agent(
     """
     observed = peek_observed(config, msg.room_key)
     prompt = build_group_prompt(observed, msg)
-    turn = await _ask_agent(
+    turn = await ask_agent(
         msg.room_key, prompt, config, system=_with_extra(GROUP_SYSTEM_PROMPT, extra_system)
     )
     # "replied" is the only outcome that folds the background in; the `is None`
@@ -745,7 +220,7 @@ async def _reply_for(
     """
     if msg.is_group:
         return await _ask_group_agent(msg, config, extra_system=extra_system)
-    return await _ask_agent(
+    return await ask_agent(
         msg.room_key, msg.text, config, system=_with_extra(DIRECT_SYSTEM_PROMPT, extra_system)
     )
 
@@ -766,9 +241,7 @@ async def _room_turn(room_key: str) -> AsyncIterator[None]:
     started = time.perf_counter()
     async with lock:
         if queued:
-            struct_logger.info(
-                "room_turn_queued", room_key=room_key, waited_ms=_elapsed_ms(started)
-            )
+            struct_logger.info("room_turn_queued", room_key=room_key, waited_ms=elapsed_ms(started))
         yield
 
 

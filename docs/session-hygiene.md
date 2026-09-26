@@ -150,13 +150,13 @@ tool-loop 迭代數），60000 會在逐字稿還很小時就被一般 2-3 迭�
 
 ## 交接流程與注入格式（one-shot，不落地）
 
-自動輪替會失憶（此部署沒開任何跨 session 記憶），所以要自帶交接。`core._ask_agent` 的順序：
+自動輪替會失憶（此部署沒開任何跨 session 記憶），所以要自帶交接。`agent_turn.ask_agent` 的順序：
 
 1. `begin_turn` → 同步評估門檻。命中 → **同一個呼叫裡**原子寫入
    `SessionState(epoch=old+1)`（activity 蓋新、watermark 清空），回
    `TurnPlan{epoch=old+1, rotated=True, retired_epoch=old}`；未命中 → 只寫回
    `last_activity_ts=now`，回 `TurnPlan{epoch, rotated=False, retired_epoch=None}`。
-2. `rotated` 為真 → `_generate_handoff`：對**剛退役的** session id（`retired_epoch`）多打一次
+2. `rotated` 為真 → `agent_turn._generate_handoff`：對**剛退役的** session id（`retired_epoch`）多打一次
    `ask_hermes_agent(HANDOFF_PROMPT)`，要一份 ≤300 字摘要（未完成事項／使用者偏好／進行中
    任務）。失敗（`httpx.HTTPError`／`ValueError`）→ log warning、回 `None`、新 epoch 乾淨開始。
    摘要**只存在這個 turn 的記憶體裡，不寫進狀態檔**。
@@ -176,7 +176,7 @@ tool-loop 迭代數），60000 會在逐字稿還很小時就被一般 2-3 迭�
 
 **為什麼注入 user message 而不是 system message**：request 內的 system message 在
 Hermes 容器內是 ephemeral（不寫 DB），下一則訊息就看不到；user message 會存進 transcript，
-整個 epoch 都在。1:1 與群組路徑都走 `_ask_agent`，所以共用同一套輪替與交接行為。
+整個 epoch 都在。1:1 與群組路徑都走 `agent_turn.ask_agent`，所以共用同一套輪替與交接行為。
 
 ## 併發推理（single-worker 前提）
 
@@ -209,7 +209,7 @@ await），不會被 mid-write 搶佔，狀態檔不需要 lock。唯一的空�
 | 兩個門檻環境變數 | `config.py` 的 `SESSION_IDLE_RESET_MINUTES`／`SESSION_ROTATE_PROMPT_TOKENS`（`.env.example` 有繁中說明） |
 | 狀態檔路徑 | `config.room_router_state_dir(room_id)` |
 | 所有 session 邏輯 | `session_hygiene.py`（純函式；router／core 只呼叫、不寫判斷內容） |
-| 交接的兩次 HTTP 呼叫 | `core._generate_handoff` / `core._ask_agent` |
+| 交接的兩次 HTTP 呼叫 | `agent_turn._generate_handoff` / `agent_turn.ask_agent` |
 | 回應解析出 `prompt_tokens` | `hermes_client.AgentReply` / `_Usage`（<=0 → None） |
 | 自我 @mention 剝除 | `channels/line/events._strip_self_mentions`（UTF-16 offset，見該檔註解） |
 

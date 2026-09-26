@@ -117,7 +117,7 @@ return {"status": "ok"}
 
 ### 5. `_process_and_reply`：三個獨立步驟
 
-`core.py::process_inbound`（容器/agent 兩步在 `core.py::_ask_agent`），每一步各自 `try/except`、失敗只記 log 不 raise（因為此時已經
+`core.py::process_inbound`（容器/agent 兩步在 `agent_turn.py::ask_agent`），每一步各自 `try/except`、失敗只記 log 不 raise（因為此時已經
 沒有 HTTP response 可以回傳錯誤給任何人了）：
 
 ```mermaid

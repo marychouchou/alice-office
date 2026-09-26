@@ -219,7 +219,7 @@ sequenceDiagram
     participant G as Google
     participant OA as google_oauth
     participant GT as google_tokens
-    participant C as core.resume_pending_auth
+    participant C as auth_links.resume_pending_auth
     participant AD as ChannelAdapter（如 LineAdapter）
     participant H as Hermes 容器
 
@@ -258,7 +258,7 @@ sequenceDiagram
   確認文案——**不經 `begin_turn`、不要交接摘要、完全不呼叫 agent**（乾淨重來）。
 - **自動輪替**（距上次進 agent 的訊息超過 `SESSION_IDLE_RESET_MINUTES`（預設 1 天）、
   上一輪 token 用量超標）：一則正常要進 agent 的
-  訊息在 `_ask_agent` 裡由 `begin_turn` 同一次同步呼叫判斷並原子地 bump epoch，
+  訊息在 `agent_turn.ask_agent` 裡由 `begin_turn` 同一次同步呼叫判斷並原子地 bump epoch，
   命中就先跟**剛退役**的 session 要一份 ≤300 字交接摘要、以 user message 前置注入
   新 epoch 的第一則訊息。
 
@@ -306,7 +306,7 @@ sequenceDiagram
 先生一份預設版、之後就永遠蓋不掉（write-once）。
 
 這通常不是使用者真的等到的那一次：LINE 的 `follow`（1:1 加好友）與 `join`
-（被拉進群組）事件一收到就觸發 `core.warm_room`，在背景走完全一樣的
+（被拉進群組）事件一收到就觸發 `warmup.warm_room`，在背景走完全一樣的
 「建容器 → seed → `docker run` → `/health`」流程並多跑一輪暖機探針（見 §5 的
 2026-09-18 更新，取代了舊版「靠 gate `blocked` 觸發暖機」的設計）——使用者的
 第一則真正提問，多半落在早就 ready 的容器上。只有暖機還沒跑完、或暖機本身失敗時，

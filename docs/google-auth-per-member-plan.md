@@ -116,7 +116,7 @@ data/<room>/google/
 - `/oauth/callback`：存進成員檔 → `asyncio.create_task(on_authorized(room_key, member_key))`
   → 回 HTML「授權成功，答案稍後會出現在 LINE」。`on_authorized` 是 main.py lifespan 註冊進
   `google_oauth` 的 hook（避免 google_oauth ↔ core 循環 import）。
-- `core.resume_pending_auth(room_key, member_key)`：讀 pending、刪檔、找到該 channel 的 adapter、
+- `auth_links.resume_pending_auth(room_key, member_key)`：讀 pending、刪檔、找到該 channel 的 adapter、
   呼叫 `adapter.resume(msg)`。
 - `ChannelAdapter` Protocol 新增 `async def resume(self, msg: InboundMessage) -> None`；
   `channels/__init__.py` 提供 `adapter_for(channel_name)` registry（main.py 建 adapter 時登記）。
@@ -135,7 +135,7 @@ data/<room>/google/
   `Outcome` Literal 保留 `"blocked"` 供舊 envelope 讀取，程式不再產生；`logging-design.md` §5.7 註明。
 - 暖機子系統（`_warm_container` 等）唯一觸發點是 blocked 回合，會失去呼叫者。**保留機制、
   換觸發點**：LINE `follow`（1:1 加好友，目前 adapter 直接忽略）與 `join`（群組，已處理）事件
-  → `core.warm_room(room_key)`。體驗上比現在更早暖機。
+  → `warmup.warm_room(room_key)`。體驗上比現在更早暖機。
 
 ### 3.6 換檔時機
 

@@ -178,6 +178,11 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 | agent 的人設／自我認知（是誰、語氣、行為原則） | `src/hermes/SOUL.md`（write-once seed 到每房間 `data/<room_id>/SOUL.md`＝Hermes identity 層），**不是** `group_context.py` 的 `*_SYSTEM_PROMPT`（那只管回覆形狀）也不是 skill |
 | 「這則訊息該不該進 agent」的 gate 判斷（如 Google OAuth gate） | 獨立模組提供回傳 status 的純函式（比照 `google_oauth.check_google_authorization`），router 只呼叫、不寫判斷內容 |
 | 對 Hermes agent 的 HTTP 協定 | `hermes_client.py` |
+| 訊息分派管線本身（observe 短路 → reset → token 換檔 → gate → agent → seam → envelope 草稿）、room turn lock | `core.py`，只分派，各步驟的內容不放這裡 |
+| 單一 agent 回合怎麼跑、怎麼失敗（容器解析 → session 輪替與交接 → Hermes 呼叫 → 逾時／失敗提示文案） | `agent_turn.py` |
+| 房間冷啟動策略（follow／join 觸發的背景暖機、探針、去重、shutdown 取消） | `warmup.py` |
+| Google 授權連結的發放、停放與授權後接續（marker 替換、pending 讀寫、`resume_pending_auth`） | `auth_links.py` |
+| log stream 的 `error` 欄位可以帶什麼（例外 → 字串的內容安全規則） | `conversation_log.describe_error` |
 | 環境變數與路徑推導 | `config.py` 的 Settings |
 | 新的 agent 能力（工具） | `src/hermes/mcp/<name>/` 或 `src/hermes/plugin/` 的 template，不是 router 的功能 |
 | agent 在每個房間都該知道的環境事實（用哪個 Python、檔案在哪） | `src/hermes/skill/alice/runtime-env/SKILL.md`（烤進 image，見 `Dockerfile.hermes`），不是 config.yaml 也不是 plugin |

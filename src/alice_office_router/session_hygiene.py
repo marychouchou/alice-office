@@ -5,7 +5,7 @@ transcript (state.db) grows without bound — Hermes on the api_server path neve
 idle-resets, and the router's own thresholds are the only lever. This module
 owns that lever: it tracks a per-room "session epoch" in
 data/<room_id>/router_state/session.json and derives the X-Hermes-Session-Id
-core sends. Bumping the epoch swaps in a brand-new session id, so Hermes silently
+agent_turn sends. Bumping the epoch swaps in a brand-new session id, so Hermes silently
 opens a fresh (empty) session while the old transcript stays under the old id for
 audit. Epoch 0 sends the bare room_key, byte-identical to the legacy behaviour,
 so an existing room keeps its history until it first rotates.
@@ -14,11 +14,11 @@ Rotation comes three ways: a manual reset command ({"/new", "/reset", "新對話
 a clean slate with no handoff); an idle timeout; or a prompt-token watermark.
 Because switching sessions is total amnesia here (no cross-session memory is
 enabled in this deployment), an automatic rotation carries a one-shot handoff:
-after `begin_turn` bumps the epoch, core asks the *retired* session for a short
-summary and injects it into the first user message of the new epoch — a
+after `begin_turn` bumps the epoch, agent_turn asks the *retired* session for a
+short summary and injects it into the first user message of the new epoch — a
 request-level system message is ephemeral in Hermes (never persisted), so the
 summary must ride inside a user message to survive the whole epoch. The summary
-is never persisted here (this module only builds the injected text; core.py
+is never persisted here (this module only builds the injected text; agent_turn.py
 issues the two HTTP calls).
 
 Concurrency: a single-worker deployment (same reasoning as group_context), so
@@ -69,7 +69,7 @@ _RESET_COMMANDS = frozenset({"/new", "/reset", "新對話"})
 RESET_CONFIRMATION = "好的，我們重新開始一段新的對話。先前的對話我不會再參考。"
 
 # Sent to the retired session on an automatic rotation to elicit a short handoff
-# summary of the epoch just closed (best-effort; see core._generate_handoff).
+# summary of the epoch just closed (best-effort; see agent_turn._generate_handoff).
 HANDOFF_PROMPT = (
     "我們即將把這段對話收尾、換到新的對話串。請用 300 字以內，"
     "條列出未完成事項、使用者偏好、以及進行中的任務，作為交接摘要。"

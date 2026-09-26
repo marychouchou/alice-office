@@ -349,7 +349,7 @@ cat data/<room_id>/router_state/pending_auth/<member_key>.json   # {"ts": ..., "
 - 重跑的答案回來了，內容卻還是「你需要先授權」：那一輪重新進的是房間**原本那個
   session**，前幾輪的歷史全是「還沒授權」，agent 很容易照著歷史回答、根本不重試
   工具。router 現在會在重跑的訊息前面加一句系統前綴（群組還會點名是誰授權完成，
-  見 `core._resumed_message`）來壓住這件事，但它是提示不是保證——再問一次同樣的
+  見 `auth_links._resumed_message`）來壓住這件事，但它是提示不是保證——再問一次同樣的
   問題就會走正常回合、拿到真答案。
 
 **群組裡連結／授權公告點名了不該點的人，或某人完全沒收到連結**
@@ -547,7 +547,7 @@ Router 是用 SSE streaming 呼叫 agent 的，Hermes 每靜默 30 秒會送一�
 文字，只在 router log 記一筆 `hermes_agent_truncated`（帶 `finish_reason="length"`），那是
 LLM 的 max tokens 設定問題，不是 router 的逾時。
 
-以上每一種使用者**都會**收到一則固定提示（逾時兩種走 `core.AGENT_TIMEOUT_NOTICE`，其餘走
+以上每一種使用者**都會**收到一則固定提示（逾時兩種走 `agent_turn.AGENT_TIMEOUT_NOTICE`，其餘走
 `AGENT_FAILURE_NOTICE`），不會是完全沒有回應；如果使用者連提示都沒收到，問題在送訊那一段，
 看 2.1 節第 7 步。
 

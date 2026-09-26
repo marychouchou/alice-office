@@ -33,7 +33,8 @@ from alice_office_router.channels.line.profiles import resolve_sender_name
 from alice_office_router.channels.line.verify import verify_line_signature
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.conversation_log import record_turn
-from alice_office_router.core import process_inbound, warm_room
+from alice_office_router.core import process_inbound
+from alice_office_router.warmup import warm_room
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +292,7 @@ class LineAdapter:
     def _warm(self, event: Event, config: Settings) -> None:
         """Start this room's container (and warm its agent) in the background.
 
-        Fire-and-forget by contract: `core.warm_room` returns as soon as the
+        Fire-and-forget by contract: `warmup.warm_room` returns as soon as the
         task is scheduled, deduplicates per room itself, and reports its own
         failures — a room whose warm-up fails simply pays the cold start on its
         first real message.
