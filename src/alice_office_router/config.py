@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     # minutes. The webhook itself already returned 200 and the turn runs in a
     # background task, so raising this does not affect LINE's own webhook
     # deadline. On expiry (either budget) the router stops waiting and sends the
-    # user the fixed timeout notice (core.AGENT_TIMEOUT_NOTICE) — the agent is
+    # user the fixed timeout notice (agent_turn.AGENT_TIMEOUT_NOTICE) — the agent is
     # not interrupted, so that turn's answer still lands in the room's Hermes
     # session.
     HERMES_REQUEST_TIMEOUT_SECONDS: float = 3600.0

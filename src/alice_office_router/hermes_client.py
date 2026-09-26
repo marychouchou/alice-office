@@ -345,7 +345,7 @@ async def delete_hermes_session(base_url: str, session_id: str, api_key: str) ->
     """Delete one Hermes session, dropping its row and messages from state.db.
 
     The only call in this router that deletes anything on the Hermes side, and it
-    exists for exactly one reason: the warm-up probe (see core._probe_agent and
+    exists for exactly one reason: the warm-up probe (see warmup._probe_agent and
     docs/router-hermes-agent-protocol.md 「暖機探針」). A freshly started Hermes
     process pays a one-time tool-registry probe on its first chat turn, so the
     gate's warm-up spends one throwaway turn on its own session id to take that

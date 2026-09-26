@@ -178,9 +178,11 @@ flowchart TB
     registry["<b>channels.enabled_adapters</b><br/>[Component: Python 函式]<br/><i>靜態 registry：LINE 恆啟用；<br/>API channel 依 API_CHANNEL_TOKEN 決定</i>"]:::comp
     line_adapter["<b>channels.line — LineAdapter</b><br/>[Component: FastAPI router + linebot SDK]<br/><i>verify（HMAC 驗簽）｜events（wire format 解析＋<br/>媒體/貼圖/位置→佔位文字、mention_is_self 判斷）｜<br/>profiles（群組成員顯示名稱查詢，15 分鐘 TTL cache）｜<br/>dedup（事件去重）｜client（Reply → Push fallback）｜<br/>format（長度/則數切分）；addressed＝mention∨呼叫詞，<br/>判斷邏輯在 adapter 本身（_is_addressed）</i>"]:::comp
     api_adapter["<b>channels.api — ApiChannelAdapter</b><br/>[Component: FastAPI router]<br/><i>Bearer 驗證；room_key 形狀白名單<br/>（line_* / api_*）；同步回傳原始 markdown</i>"]:::comp
-    core["<b>core.process_inbound</b><br/>[Component: async Python 函式]<br/><i>channel-free：群組 unaddressed 短路 →<br/>reset 指令 → gate → 容器 → agent → list[str]<br/>不碰任何 channel 的送訊 API</i>"]:::comp
+    core["<b>core.process_inbound</b><br/>[Component: async Python 函式]<br/><i>channel-free：群組 unaddressed 短路 →<br/>reset 指令 → gate → 分派給 agent_turn → list[str]<br/>不碰任何 channel 的送訊 API</i>"]:::comp
+    agent_turn["<b>agent_turn</b><br/>[Component: Python 模組]<br/><i>ask_agent：單一 agent 回合——容器解析 →<br/>session 輪替與交接 → 呼叫 Hermes →<br/>逾時／失敗固定提示文案（AGENT_TIMEOUT_NOTICE 等）</i>"]:::comp
+    warmup["<b>warmup</b><br/>[Component: Python 模組]<br/><i>warm_room：LINE follow／join 觸發的背景暖機——<br/>建容器＋跑一輪丟棄用暖機探針，探針跑完即刪 session，<br/>per-room 去重、shutdown 時 cancel</i>"]:::comp
     group_ctx["<b>group_context</b><br/>[Component: Python 模組]<br/><i>observed buffer 讀寫／裁剪、組 tagged<br/>［名稱|ID］prompt、silence token 判斷（NO_REPLY 等）</i>"]:::comp
-    sess_hyg["<b>session_hygiene</b><br/>[Component: Python 模組]<br/><i>check_reset_command／reset_session：手動重置（不帶交接）｜<br/>begin_turn／complete_turn：閒置與 token 門檻判斷、<br/>epoch 輪替、水位 CAS｜HANDOFF_PROMPT／build_turn_text：<br/>交接文字（HTTP 由 core 發）｜衍生 X-Hermes-Session-Id</i>"]:::comp
+    sess_hyg["<b>session_hygiene</b><br/>[Component: Python 模組]<br/><i>check_reset_command／reset_session：手動重置（不帶交接）｜<br/>begin_turn／complete_turn：閒置與 token 門檻判斷、<br/>epoch 輪替、水位 CAS｜HANDOFF_PROMPT／build_turn_text：<br/>交接文字（HTTP 由 agent_turn 發）｜衍生 X-Hermes-Session-Id</i>"]:::comp
     oauth["<b>google_oauth</b><br/>[Component: FastAPI router + httpx]<br/><i>member 化的 /oauth/start、/oauth/callback；<br/>check_google_authorization 只剩 notice／ok；<br/>callback 存完 token 後觸發 on_authorized hook</i>"]:::comp
     gtok["<b>google_tokens</b><br/>[Component: Python 模組]<br/><i>member_key_for：算出這一輪該用誰的帳號；<br/>select_member_tokens：把 tokens.json 換成該成員的<br/>相對 symlink（room lock 內、回合之間，原子替換）；<br/>成員檔讀寫、既有房間的 legacy 遷移</i>"]:::comp
     alinks["<b>auth_links</b><br/>[Component: Python 模組]<br/><i>publish_auth_links：把回覆裡的 google-auth://request<br/>marker 換成這一輪發話者自己的授權連結，<br/>暫存觸發訊息到 pending_auth/&lt;member_key&gt;.json<br/>供授權後重跑（鏡射 file_links）</i>"]:::comp
@@ -199,13 +201,19 @@ flowchart TB
   api_adapter -- "InboundMessage" --> core
   core -- "select_member_tokens(room, member_key)<br/>→ 每輪開始前換檔" --> gtok
   core -- "check_google_authorization(room, member_key)<br/>→ notice / ok" --> oauth
-  core -- "get_or_create_container(room_key)<br/>→ 容器 URL（follow／join 時背景暖機）" --> cm
+  core -- "refresh_google_mount(room_key)<br/>（換檔後同步 mount，room lock 內）" --> cm
   core -- "peek/record/clear observed buffer、<br/>組 prompt、判斷 silence" --> group_ctx
-  core -- "check_reset_command／reset_session（手動重置）、<br/>begin_turn／complete_turn（自動輪替、epoch 讀寫）" --> sess_hyg
-  core -- "ask_hermes_agent(url, session_id, text)" --> hc
+  core -- "check_reset_command／reset_session（手動重置）" --> sess_hyg
+  core -- "ask_agent(room_key, text, config, system=…)<br/>→ AgentTurn" --> agent_turn
+  agent_turn -- "get_or_create_container(room_key)<br/>→ 容器 URL" --> cm
+  agent_turn -- "begin_turn／complete_turn（自動輪替、epoch 讀寫）、<br/>HANDOFF_PROMPT／build_turn_text（交接摘要）" --> sess_hyg
+  agent_turn -- "ask_hermes_agent(url, session_id, text)" --> hc
+  line_adapter -- "warm_room(room_key)<br/>（follow／join 背景暖機，fire-and-forget）" --> warmup
+  warmup -- "get_or_create_container(room_key)" --> cm
+  warmup -- "ask_hermes_agent／delete_hermes_session<br/>（暖機探針，跑完即刪 session）" --> hc
   core -- "publish_file_links(reply_text, room_key)<br/>→ 已改寫成下載網址的文字" --> flinks
   core -- "publish_auth_links(reply_text, msg)<br/>→ marker 換成授權連結；<br/>resume_pending_auth 讀 pending" --> alinks
-  core -- "resume_pending_auth：<br/>adapter_for(msg.channel).resume(msg)<br/>（授權後重跑，一律 push 送出）" --> line_adapter
+  alinks -- "resume_pending_auth：<br/>adapter_for(msg.channel).resume(msg)<br/>（授權後重跑，一律 push 送出）" --> line_adapter
   flinks -- "讀 outbox/&lt;token&gt;/（O_NOFOLLOW）並清掉" --> roomdata
   flinks -- "複製、出檔、掃過期" --> pubfiles
   cm -- "docker SDK" --> docker

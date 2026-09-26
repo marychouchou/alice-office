@@ -79,7 +79,7 @@ flowchart TB
 
 | # | Use case | 主要程式碼 | 相關文件 |
 |---|---|---|---|
-| UC1 | 傳送訊息並取得回覆（1:1） | `core.py::process_inbound`／`_ask_agent`、`channels/line/adapter.py::_dispatch_message` | `docs/line-hermes-message-flow.md` |
+| UC1 | 傳送訊息並取得回覆（1:1） | `core.py::process_inbound`／`agent_turn.py::ask_agent`、`channels/line/adapter.py::_dispatch_message` | `docs/line-hermes-message-flow.md` |
 | UC2 | 在群組中點名助理取得回覆 | `channels/line/adapter.py::_is_addressed`／`_schedule_group_message`、`core.py::_ask_group_agent`、`group_context.py::build_group_prompt` | `docs/group-chat-design.md` §4、§7 |
 | UC3 | 在群組中被動提供背景脈絡 | `core.py::process_inbound`（observe short-circuit）、`group_context.py::record_observed` | `docs/group-chat-design.md` §6 |
 | UC4 | bot 加入群組自我介紹 | `channels/line/adapter.py::_schedule_join_greeting`（`_GROUP_JOIN_GREETING`，不經 core） | `docs/group-chat-design.md` §9 |

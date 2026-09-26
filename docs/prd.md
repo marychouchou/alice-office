@@ -125,7 +125,7 @@ flowchart TB
   等待會記一筆 `room_turn_queued`（含 `waited_ms`）log。不同房間彼此不受影響；群組的
   未點名訊息走 observe 捷徑，不等這把鎖（背景脈絡照常累積）。單 worker 部署才成立，
   多 worker 需要換成共用鎖。
-- 對應：`core.process_inbound`、`core._route`／`core._take_turn`、`core._ask_agent`、
+- 對應：`core.process_inbound`、`core._route`／`core._take_turn`、`agent_turn.ask_agent`、
   `container_manager.get_or_create_container`。
 
 ### FR-02　群組訊息的 addressed／observe 判斷與行為差異
@@ -198,10 +198,10 @@ flowchart TD
 - `leave`／`memberLeft` 不處理（無 reply token 可用）；`memberJoined`（既有群組有新
   成員加入，非 bot 自己被邀請）目前不發問候，避免過度打擾（見範圍外章節）。
 - `join`（群組）與 `follow`（1:1 加好友，無自我介紹可回）都會觸發
-  `core.warm_room`：在背景建立房間目錄與容器、跑一輪丟棄用的暖機探針，讓這個房間
+  `warmup.warm_room`：在背景建立房間目錄與容器、跑一輪丟棄用的暖機探針，讓這個房間
   的第一則真正提問落在已就緒的 agent 上，不用再等 30–60 秒冷啟動（見「效能」節）。
 - 對應：`channels/line/adapter.py::_schedule_join_greeting`、`_GROUP_JOIN_GREETING`、
-  `_warm`、`core.warm_room`。
+  `_warm`、`warmup.warm_room`。
 
 ### FR-04　session 手動重置指令
 
@@ -236,7 +236,7 @@ flowchart TD
   乾淨開始。
 - 舊逐字稿保留在舊 session id 下可稽核，不主動刪除。
 - 對應：`session_hygiene.py`（`begin_turn` / `complete_turn` / `build_turn_text`）、
-  `core._generate_handoff`；完整機制見 `docs/session-hygiene.md`。
+  `agent_turn._generate_handoff`；完整機制見 `docs/session-hygiene.md`。
 
 ### FR-06　Google 延遲授權＋群組逐人授權（gate_status：ok / unauthorized / notice / auth_link）
 
@@ -265,7 +265,7 @@ flowchart TD
 - **授權完自動接續**：連結發出的同時，router 把觸發它的那則訊息原樣存進
   `data/<room_id>/router_state/pending_auth/<member_key>.json`（10 分鐘 TTL，同一人
   再觸發只留最後一則）。使用者點連結、在瀏覽器完成 Google 同意後，callback 把 token
-  存進該成員的檔案，背景重跑那則訊息（`core.resume_pending_auth` → 對應 channel
+  存進該成員的檔案，背景重跑那則訊息（`auth_links.resume_pending_auth` → 對應 channel
   adapter 的 `resume`），答案用 Push（不是 Reply）直接送回聊天室——使用者不用再問
   一次。API channel 沒有 push 管道，pending 訊息直接捨棄，使用者要自己再問一次。
 - **沒 token 的人，agent 會事先被告知**：router 在進 agent 前就知道這位發話者沒有可用
@@ -292,7 +292,7 @@ flowchart TD
   - API channel 的 pending 會被丟棄（見上）。
 - 對應：`google_tokens.py`（成員檔、換檔）、`auth_links.py`（marker、pending）、
   `google_oauth.py::check_google_authorization`（僅剩 notice）、
-  `core._take_turn`／`core.resume_pending_auth`；完整設計見
+  `core._take_turn`／`auth_links.resume_pending_auth`；完整設計見
   [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)，架構決策見
   `docs/google-workspace-integration-summary.md`。
 
@@ -421,7 +421,7 @@ flowchart TD
 ### 效能
 
 - 新房間容器冷啟動 30–60 秒（s6 supervision + skill sync），`/health` 輪詢間隔
-  1 秒、最多 60 秒逾時。LINE 的 `follow`／`join` 事件觸發 `core.warm_room` 在背景
+  1 秒、最多 60 秒逾時。LINE 的 `follow`／`join` 事件觸發 `warmup.warm_room` 在背景
   暖機（見 FR-03），比等第一則訊息才建容器更早，不佔任何回覆的等待時間。
 - 對 Hermes agent 的單次請求走 SSE streaming，以「靜默多久」而非「總共多久」判定 agent
   是否還活著：靜默上限預設 120 秒（`HERMES_IDLE_TIMEOUT_SECONDS`），絕對上限預設 3600 秒
