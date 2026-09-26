@@ -35,6 +35,11 @@ re-points itself per record — a stateful, racy object for what is one append o
 one line. Writing the line here keeps `logging_setup` untouched and makes the
 file's format independent of any log configuration.
 
+The same content rule governs the `error` field wherever it is filled:
+`describe_error` is the one place an exception becomes that string, so every
+module that records a failure (core, agent_turn, warmup, auth_links) renders it
+through here instead of forwarding `str(exc)`.
+
 The envelope is emitted by the *adapter*, not by core: `delivered` is only
 known once the channel has tried to send, so core returns the draft
 (`core.InboundResult.envelope`) and each adapter fills that one field in before
@@ -64,7 +69,7 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from alice_office_router.config import Settings
 
@@ -101,6 +106,13 @@ Outcome = Literal["replied", "observed", "reset", "blocked", "agent_failed", "si
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 
+# Cap on the free-text half of an error string. `error` rides the log stream off
+# the host into Loki, where message content must never go (this module's
+# docstring), so what an exception's str() happens to contain is not safe to
+# forward whole — a few hundred characters of a stack-free message is all an
+# operator reads anyway.
+_ERROR_DETAIL_MAX_CHARS = 200
+
 
 def _now_iso() -> str:
     """Return the current UTC time in the same ISO-8601 shape log lines use.
@@ -110,6 +122,34 @@ def _now_iso() -> str:
         TimeStamper so an envelope line and its log line sort together.
     """
     return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+
+
+def describe_error(origin: str, exc: Exception) -> str:
+    """Render an exception for the `error` field without leaking message content.
+
+    `str(exc)` is not safe to forward. A pydantic `ValidationError` embeds the
+    value it rejected — for this router that is the agent's reply text, i.e. the
+    exact thing the log stream must not carry — and some httpx timeouts stringify
+    to nothing at all, which would leave `error` empty and useless. The type name
+    is always present and always safe; the message is truncated; a validation
+    error contributes only its shape.
+
+    Args:
+        origin: Which stage failed ("container", "agent").
+        exc: The exception that ended the turn.
+
+    Returns:
+        A short, content-free reason string, e.g. "agent: ReadTimeout" or
+        "agent: ValidationError (1 error at text)".
+    """
+    name = type(exc).__name__
+    if isinstance(exc, ValidationError):
+        fields = ", ".join(
+            ".".join(str(part) for part in error["loc"]) or "<root>" for error in exc.errors()
+        )
+        return f"{origin}: {name} ({exc.error_count()} error(s) at {fields})"
+    detail = str(exc)[:_ERROR_DETAIL_MAX_CHARS].strip()
+    return f"{origin}: {name}: {detail}" if detail else f"{origin}: {name}"
 
 
 class TurnEnvelope(BaseModel):
