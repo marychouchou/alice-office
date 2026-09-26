@@ -592,10 +592,12 @@ alice-office-router/
 ├── src/
 │   └── alice_office_router/
 │       ├── main.py              # FastAPI app factory + lifespan；mount enabled_adapters() 的 routers
-│       ├── core.py              # process_inbound：channel-free gate → 容器 → agent → list[str]
+│       ├── core/
+│       │   └── pipeline.py      # process_inbound：channel-free gate → 容器 → agent → list[str]
 │       ├── hermes_client.py     # 呼叫 Hermes 容器的 /v1/chat/completions
 │       ├── container_manager.py # Docker 容器動態管理
-│       ├── google_oauth.py      # Google OAuth 路由 + 授權 gate（見「Google Workspace 整合」）
+│       ├── google/
+│       │   └── oauth.py         # Google OAuth 路由 + 授權 gate（見「Google Workspace 整合」）
 │       ├── config.py            # pydantic-settings 設定
 │       └── channels/            # channel adapters（每個通道自己的 wire format）
 │           ├── __init__.py      # enabled_adapters(config)
@@ -609,10 +611,10 @@ alice-office-router/
 │               └── events.py    # LINE webhook 事件 pydantic model + inbound 文字解析
 ├── tests/
 │   ├── conftest.py
-│   ├── test_core.py
+│   ├── core/test_pipeline.py
 │   ├── test_hermes_client.py
 │   ├── test_container_manager.py
-│   ├── test_google_oauth.py
+│   ├── google/test_oauth.py
 │   ├── test_hermes_shared_node_deps.py  # 檢查各 MCP package.json 與共用 package.json 同步
 │   └── channels/line/           # LINE wire-format 測試（test_adapter/verify/client/format/dedup/events）
 ├── src/hermes/                  # MCP / plugin 原始碼樣板（seed 進每個房間，見上方「C. Plugin / MCP」）

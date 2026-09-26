@@ -11,7 +11,7 @@ import pytest
 
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
-from alice_office_router.google_tokens import (
+from alice_office_router.google.tokens import (
     ANONYMOUS_MEMBER,
     account_key,
     check_member_token,

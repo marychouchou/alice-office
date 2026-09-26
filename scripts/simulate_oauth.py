@@ -11,7 +11,7 @@ This script does exactly that one step:
 
     (a) optionally copy an existing member token file into
         data/<room_id>/google/members/<member_key>.json, re-keyed under THIS
-        room's own account_key (google_tokens.py: a member file's single
+        room's own account_key (google/tokens.py: a member file's single
         inner key is always account_key(room_id) of whichever room's
         directory it lives under — never the member_key, and never the
         source room's account_key).
@@ -30,7 +30,7 @@ The stub then answers the exchange with that file's token, so `code=fake`
 is enough and no browser or Google account is involved. Without it the
 callback fails at the exchange and this script says so.
 
-The hook cannot be called from here instead: google_oauth.on_authorized is a
+The hook cannot be called from here instead: google.oauth.on_authorized is a
 module-level variable set inside the *running router process* (main.py's
 lifespan), and this script is a separate process whose fresh import of that
 module has it at None. Driving the router's own HTTP routes is what makes
@@ -59,7 +59,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from alice_office_router.config import get_settings
-from alice_office_router.google_tokens import account_key, save_member_tokens
+from alice_office_router.google.tokens import account_key, save_member_tokens
 
 DEFAULT_ROUTER_URL = "http://localhost:8000"
 # The callback exchanges this for a token at Settings.GOOGLE_TOKEN_URL; the
@@ -69,8 +69,8 @@ FAKE_AUTH_CODE = "fake-authorization-code"
 # off is a detached task — so this only has to cover the token exchange.
 _HTTP_TIMEOUT_SECONDS = 30.0
 
-# The shape google_tokens.account_key() produces — member_key becomes a
-# filename under the room's members/ directory (mirrors google_oauth.py's
+# The shape google.tokens.account_key() produces — member_key becomes a
+# filename under the room's members/ directory (mirrors google/oauth.py's
 # own _MEMBER_KEY_RE for /oauth/start's `member` query param).
 _MEMBER_KEY_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
@@ -79,10 +79,10 @@ def rekey_single_entry(source: dict[str, dict[str, object]], new_key: str) -> di
     """Take a member file's one token entry and re-key it for a different room.
 
     A member file always holds exactly one entry, keyed account_key(room_id)
-    of whichever room it was written for (google_tokens.py module docstring).
+    of whichever room it was written for (google/tokens.py module docstring).
     Reusing a token from another room keeps its token DATA but must swap that
     key to this room's own account_key — the Google MCPs here look the
-    account up strictly by that key (google_tokens.REQUIRED_SCOPES /
+    account up strictly by that key (google.tokens.REQUIRED_SCOPES /
     check_member_token).
 
     Args:
@@ -94,7 +94,7 @@ def rekey_single_entry(source: dict[str, dict[str, object]], new_key: str) -> di
 
     Raises:
         ValueError: If the source file doesn't hold exactly one entry (not
-            shaped like a member file google_tokens.py itself writes).
+            shaped like a member file google/tokens.py itself writes).
     """
     if len(source) != 1:
         raise ValueError(

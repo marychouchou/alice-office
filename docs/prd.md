@@ -125,7 +125,7 @@ flowchart TB
   等待會記一筆 `room_turn_queued`（含 `waited_ms`）log。不同房間彼此不受影響；群組的
   未點名訊息走 observe 捷徑，不等這把鎖（背景脈絡照常累積）。單 worker 部署才成立，
   多 worker 需要換成共用鎖。
-- 對應：`core.process_inbound`、`core._route`／`core._take_turn`、`agent_turn.ask_agent`、
+- 對應：`core.pipeline.process_inbound`、`core.pipeline._route`／`core.pipeline._take_turn`、`core.agent_turn.ask_agent`、
   `container_manager.get_or_create_container`。
 
 ### FR-02　群組訊息的 addressed／observe 判斷與行為差異
@@ -157,7 +157,7 @@ flowchart TB
   cutoff，不是位置），agent／容器失敗時 buffer 保留，避免脈絡遺失。
 - 對應：`channels/line/adapter.py::_is_addressed`、
   `channels/line/events.py::mention_is_self`、`group_context.py`、
-  `core.py::_ask_group_agent`。
+  `core/pipeline.py::_ask_group_agent`。
 
 ```mermaid
 ---
@@ -198,10 +198,10 @@ flowchart TD
 - `leave`／`memberLeft` 不處理（無 reply token 可用）；`memberJoined`（既有群組有新
   成員加入，非 bot 自己被邀請）目前不發問候，避免過度打擾（見範圍外章節）。
 - `join`（群組）與 `follow`（1:1 加好友，無自我介紹可回）都會觸發
-  `warmup.warm_room`：在背景建立房間目錄與容器、跑一輪丟棄用的暖機探針，讓這個房間
+  `core.warmup.warm_room`：在背景建立房間目錄與容器、跑一輪丟棄用的暖機探針，讓這個房間
   的第一則真正提問落在已就緒的 agent 上，不用再等 30–60 秒冷啟動（見「效能」節）。
 - 對應：`channels/line/adapter.py::_schedule_join_greeting`、`_GROUP_JOIN_GREETING`、
-  `_warm`、`warmup.warm_room`。
+  `_warm`、`core.warmup.warm_room`。
 
 ### FR-04　session 手動重置指令
 
@@ -214,7 +214,7 @@ flowchart TD
   房間的 group observed buffer（避免舊背景漏進新 epoch）、回傳固定確認文案——
   完全不呼叫 agent、不做 Google OAuth 檢查。
 - 對應：`session_hygiene.check_reset_command` / `reset_session`、
-  `core.process_inbound`。
+  `core.pipeline.process_inbound`。
 
 ### FR-05　session 閒置／token 門檻自動輪替＋交接摘要
 
@@ -236,7 +236,7 @@ flowchart TD
   乾淨開始。
 - 舊逐字稿保留在舊 session id 下可稽核，不主動刪除。
 - 對應：`session_hygiene.py`（`begin_turn` / `complete_turn` / `build_turn_text`）、
-  `agent_turn._generate_handoff`；完整機制見 `docs/session-hygiene.md`。
+  `core.agent_turn._generate_handoff`；完整機制見 `docs/session-hygiene.md`。
 
 ### FR-06　Google 延遲授權＋群組逐人授權（gate_status：ok / unauthorized / notice / auth_link）
 
@@ -250,22 +250,22 @@ flowchart TD
   回覆裡出現授權連結。
 - **身分規則（唯一一條）**：每一回合一律以「這一輪發話者」的身分執行 Google 工具——
   1:1 房間裡發話者就是房間本身；群組裡是 `sender_id` 解出的那個人。router 在
-  `core._take_turn` 進 agent 前，把這個房間的 `tokens.json` 換成（symlink）該發話者
-  自己的 token 檔（`google_tokens.select_member_tokens`），MCP 完全不用改、也不用
+  `core.pipeline._take_turn` 進 agent 前，把這個房間的 `tokens.json` 換成（symlink）該發話者
+  自己的 token 檔（`google.tokens.select_member_tokens`），MCP 完全不用改、也不用
   重啟容器就看到正確的帳號。「要操作誰的資源」不由 agent 判斷：A 問「B 的行事曆」
   一樣是用 A 的帳號去查，看不看得到由 Google 的分享設定決定。
   - **匿名群組發話者**：群組成員如果沒加 OA 好友，LINE 不會給 `sender_id`，這種
     發話者拿不到任何連結，只會收到固定提示請先加好友。
 - **授權連結：marker 走回覆的最後一關（跟 `outbox://` 同一招）**：Google 工具（gmail／
   drive／calendar）回報沒有 token時，agent 依 system prompt／MCP 錯誤文字的指示，在
-  回覆裡貼一行固定字串 `google-auth://request`；router 在送出前（`auth_links.
+  回覆裡貼一行固定字串 `google-auth://request`；router 在送出前（`google.auth_links.
   publish_auth_links`，`publish_file_links` 之後、同一個 room lock 內）把它換成
   **這一輪發話者自己的**授權連結，並把觸發的那則訊息暫存起來（見下一點）。這一步
   發生時 `RouteResult.gate_status` 記為 `"auth_link"`。
 - **授權完自動接續**：連結發出的同時，router 把觸發它的那則訊息原樣存進
   `data/<room_id>/router_state/pending_auth/<member_key>.json`（10 分鐘 TTL，同一人
   再觸發只留最後一則）。使用者點連結、在瀏覽器完成 Google 同意後，callback 把 token
-  存進該成員的檔案，背景重跑那則訊息（`auth_links.resume_pending_auth` → 對應 channel
+  存進該成員的檔案，背景重跑那則訊息（`google.auth_links.resume_pending_auth` → 對應 channel
   adapter 的 `resume`），答案用 Push（不是 Reply）直接送回聊天室——使用者不用再問
   一次。API channel 沒有 push 管道，pending 訊息直接捨棄，使用者要自己再問一次。
 - **沒 token 的人，agent 會事先被告知**：router 在進 agent 前就知道這位發話者沒有可用
@@ -290,9 +290,9 @@ flowchart TD
   - `google-calendar` MCP 依名稱找行事曆有 5 分鐘快取，同一個 key 剛換人時，5 分鐘
     內用名稱查可能對到前一位使用者的行事曆清單（`primary` 與帶 `@` 的 id 不受影響）。
   - API channel 的 pending 會被丟棄（見上）。
-- 對應：`google_tokens.py`（成員檔、換檔）、`auth_links.py`（marker、pending）、
-  `google_oauth.py::check_google_authorization`（僅剩 notice）、
-  `core._take_turn`／`auth_links.resume_pending_auth`；完整設計見
+- 對應：`google/tokens.py`（成員檔、換檔）、`google/auth_links.py`（marker、pending）、
+  `google/oauth.py::check_google_authorization`（僅剩 notice）、
+  `core.pipeline._take_turn`／`google.auth_links.resume_pending_auth`；完整設計見
   [`google-auth-per-member-plan.md`](google-auth-per-member-plan.md)，架構決策見
   `docs/google-workspace-integration-summary.md`。
 
@@ -356,7 +356,7 @@ flowchart TD
 - Bearer token 驗證（常數時間比對），`room_key` 白名單只接受
   `line_<既有 LINE 房間原生 id>`（除錯用）或 `api_<slug>`（此通道自己的房間）兩種
   形狀。
-- 走跟 LINE 完全相同的 gate → 容器 → agent 管線（`core.process_inbound`），但同步
+- 走跟 LINE 完全相同的 gate → 容器 → agent 管線（`core.pipeline.process_inbound`），但同步
   在 HTTP response 回傳 agent 原始 Markdown，不做剝除／切塊，不需要 reply
   token／dedup。
 - 目前只接受純文字 `text` 欄位，不支援媒體上傳，也不支援模擬群組
@@ -373,7 +373,7 @@ flowchart TD
 - agent 呼叫 `share_file` 工具（`local-tools` plugin），工具把檔案複製到
   `$HERMES_HOME/outbox/<token>/<檔名>` 並回傳佔位字串 `outbox://<token>`；agent 把它
   原樣、單獨一行貼進回覆（規則由每回合的 system prompt 下達，既有房間立即生效）。
-- router 在送出前（`core._take_turn` → `file_links.publish_file_links`）驗證那個目錄裡
+- router 在送出前（`core.pipeline._take_turn` → `file_links.publish_file_links`）驗證那個目錄裡
   恰好一個一般檔（`O_NOFOLLOW` + `fstat`、大小 ≤ `FILE_LINK_MAX_BYTES`，預設 50 MB）、
   複製到房間 mount 之外的 `data/_files/<room_id>/<token>/`、刪掉 outbox 那份、順手清掉
   該房間過期的連結，最後把佔位字串換成 `{PUBLIC_BASE_URL}/files/<room_id>/<token>`。
@@ -421,7 +421,7 @@ flowchart TD
 ### 效能
 
 - 新房間容器冷啟動 30–60 秒（s6 supervision + skill sync），`/health` 輪詢間隔
-  1 秒、最多 60 秒逾時。LINE 的 `follow`／`join` 事件觸發 `warmup.warm_room` 在背景
+  1 秒、最多 60 秒逾時。LINE 的 `follow`／`join` 事件觸發 `core.warmup.warm_room` 在背景
   暖機（見 FR-03），比等第一則訊息才建容器更早，不佔任何回覆的等待時間。
 - 對 Hermes agent 的單次請求走 SSE streaming，以「靜默多久」而非「總共多久」判定 agent
   是否還活著：靜默上限預設 120 秒（`HERMES_IDLE_TIMEOUT_SECONDS`），絕對上限預設 3600 秒
@@ -457,7 +457,7 @@ flowchart TD
 
 ### 架構上刻意不做（設計決策，非缺陷）
 
-- **沒有 OutboundMessage 抽象**：`core.process_inbound` 只回 `list[str]`；等到真的
+- **沒有 OutboundMessage 抽象**：`core.pipeline.process_inbound` 只回 `list[str]`；等到真的
   有通道需要結構化回覆（按鈕、卡片）再加，現在抽象是憑空猜需求。
 - **Dedup 邏輯不上提到 core**：重送是 LINE 的通道特性，不該逼其他 channel（如 API
   channel）扛這個包袱。

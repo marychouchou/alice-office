@@ -18,7 +18,7 @@ from alice_office_router.channels.line.adapter import LineAdapter
 from alice_office_router.channels.line.events import Event
 from alice_office_router.config import Settings
 from alice_office_router.conversation_log import TurnEnvelope
-from alice_office_router.core import InboundResult
+from alice_office_router.core.pipeline import InboundResult
 
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"

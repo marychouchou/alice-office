@@ -33,8 +33,8 @@ from alice_office_router.channels.line.profiles import resolve_sender_name
 from alice_office_router.channels.line.verify import verify_line_signature
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.conversation_log import record_turn
-from alice_office_router.core import process_inbound
-from alice_office_router.warmup import warm_room
+from alice_office_router.core.pipeline import process_inbound
+from alice_office_router.core.warmup import warm_room
 
 logger = logging.getLogger(__name__)
 

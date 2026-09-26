@@ -39,7 +39,7 @@ JSON 物件（`docker compose logs --no-log-prefix webhook_router | jq .`），�
 `room_key`、`event_id`、`channel`、`container` 等欄位，所以可以直接用
 `jq 'select(.room_key=="line_U1234")'` 把單一房間的行挑出來；本機開發設
 `LOG_FORMAT=console` 會變成彩色好讀的格式。目前 router（`channels/line/adapter.py`、
-`core.py`、`channels/line/events.py`）會記錄的行是：
+`core/pipeline.py`、`channels/line/events.py`）會記錄的行是：
 
 - `Skipping duplicate LINE webhook event {event_id}`（INFO，去重擋掉）
 - `Skipping LINE message event with unresolvable room id`（WARNING）
@@ -60,7 +60,7 @@ JSON 物件（`docker compose logs --no-log-prefix webhook_router | jq .`），�
 LINE 的 `follow`（1:1 加好友）／`join`（被拉進群組）事件觸發的背景暖機是兩步
 （容器 → agent 探針 → 刪掉探針 session，設計見
 `docs/router-hermes-agent-protocol.md`「暖機探針」；2026-09-18 起這是唯一的觸發點，
-取代了舊版「靠 gate `blocked` 觸發」的設計），`core.py` 對應的行是：
+取代了舊版「靠 gate `blocked` 觸發」的設計），`core/pipeline.py` 對應的行是：
 
 - `Container warm for room ...`（INFO）：第 1 步成功，容器起來且 `/health` 通過。
 - `Container warm-up failed for room ...`（ERROR）：第 1 步失敗，**不會**再做探針；
@@ -320,7 +320,7 @@ Docker Desktop for macOS（virtiofs）的問題，不是我們的：host 端用 
 symlink 卻完全正常。症狀是成員明明授權好了，Google 工具還是說沒 token。
 
 容器裡只要有人 `opendir` 這個掛載點就會恢復，所以 router 從 2026-09-18 起會
-**自動處理**：`select_member_tokens` 真的換了檔，`core._take_turn` 就對房間容器
+**自動處理**：`select_member_tokens` 真的換了檔，`core.pipeline._take_turn` 就對房間容器
 exec 一次 `ls /opt/google-workspace/`（`container_manager.refresh_google_mount`，
 仍在 room lock 內、agent 回合之前）。沒有容器／容器沒跑只留 debug log，docker
 失敗留 warning，都不會讓這一輪掛掉。Linux 原生 bind mount 推測沒這個問題（未驗證），
@@ -349,7 +349,7 @@ cat data/<room_id>/router_state/pending_auth/<member_key>.json   # {"ts": ..., "
 - 重跑的答案回來了，內容卻還是「你需要先授權」：那一輪重新進的是房間**原本那個
   session**，前幾輪的歷史全是「還沒授權」，agent 很容易照著歷史回答、根本不重試
   工具。router 現在會在重跑的訊息前面加一句系統前綴（群組還會點名是誰授權完成，
-  見 `auth_links._resumed_message`）來壓住這件事，但它是提示不是保證——再問一次同樣的
+  見 `google.auth_links._resumed_message`）來壓住這件事，但它是提示不是保證——再問一次同樣的
   問題就會走正常回合、拿到真答案。
 
 **群組裡連結／授權公告點名了不該點的人，或某人完全沒收到連結**
@@ -357,7 +357,7 @@ cat data/<room_id>/router_state/pending_auth/<member_key>.json   # {"ts": ..., "
 - LINE 沒給這位發話者 `userId`（沒加 OA 好友）時，`sender_id` 是 `None`，Google
   工具一律視為沒有身分，回覆會是固定提示「LINE 沒有提供你的身分…」而不是連結——
   請他先加好友再問一次。
-- 連結本身沒有二次身分驗證，理論上群組裡別人也點得開；`auth_links.py` 只能在
+- 連結本身沒有二次身分驗證，理論上群組裡別人也點得開；`google/auth_links.py` 只能在
   文字上點名（「{顯示名稱} 請點此連結」），無法阻止別人手滑點到不是自己的連結，
   這是目前接受的取捨（見 `google-auth-per-member-plan.md` §7）。
 
@@ -547,7 +547,7 @@ Router 是用 SSE streaming 呼叫 agent 的，Hermes 每靜默 30 秒會送一�
 文字，只在 router log 記一筆 `hermes_agent_truncated`（帶 `finish_reason="length"`），那是
 LLM 的 max tokens 設定問題，不是 router 的逾時。
 
-以上每一種使用者**都會**收到一則固定提示（逾時兩種走 `agent_turn.AGENT_TIMEOUT_NOTICE`，其餘走
+以上每一種使用者**都會**收到一則固定提示（逾時兩種走 `core.agent_turn.AGENT_TIMEOUT_NOTICE`，其餘走
 `AGENT_FAILURE_NOTICE`），不會是完全沒有回應；如果使用者連提示都沒收到，問題在送訊那一段，
 看 2.1 節第 7 步。
 

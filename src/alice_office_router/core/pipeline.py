@@ -17,7 +17,7 @@ step does lives next door, one reason-for-change per module: a single agent
 turn — container, session rotation and handoff, the Hermes call, the timeout
 and failure notices — is `agent_turn`; warming a room's container and agent
 before its first message is `warmup`; re-running a message parked for Google
-authorization is `auth_links.resume_pending_auth`.
+authorization is `google.auth_links.resume_pending_auth`.
 """
 
 from __future__ import annotations
@@ -32,15 +32,15 @@ from dataclasses import dataclass, field, replace
 import structlog
 from structlog.contextvars import bound_contextvars
 
-from alice_office_router.agent_turn import AgentTurn, ask_agent, elapsed_ms
-from alice_office_router.auth_links import publish_auth_links
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import refresh_google_mount
 from alice_office_router.conversation_log import Outcome, TurnEnvelope
+from alice_office_router.core.agent_turn import AgentTurn, ask_agent, elapsed_ms
 from alice_office_router.file_links import publish_file_links
-from alice_office_router.google_oauth import check_google_authorization
-from alice_office_router.google_tokens import member_key_for, select_member_tokens
+from alice_office_router.google.auth_links import publish_auth_links
+from alice_office_router.google.oauth import check_google_authorization
+from alice_office_router.google.tokens import member_key_for, select_member_tokens
 from alice_office_router.group_context import (
     DIRECT_SYSTEM_PROMPT,
     GOOGLE_AUTH_MISSING_HINT,
@@ -306,7 +306,7 @@ async def _take_turn(msg: InboundMessage, config: Settings) -> RouteResult:
         # Second seam, same lock, same reason: a Google tool that reported "no
         # token" made the agent paste google-auth://request, which only the
         # router can turn into this speaker's own authorization link
-        # (auth_links.publish_auth_links). An issued link outranks whatever
+        # (google.auth_links.publish_auth_links). An issued link outranks whatever
         # the gate had to say — the turn's headline is now "go authorize".
         text, requested = await publish_auth_links(text, msg, config)
         if requested:

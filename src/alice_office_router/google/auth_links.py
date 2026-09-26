@@ -47,8 +47,8 @@ from pydantic import ValidationError
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings
 from alice_office_router.conversation_log import describe_error
-from alice_office_router.google_oauth import auth_url_for
-from alice_office_router.google_tokens import member_key_for
+from alice_office_router.google.oauth import auth_url_for
+from alice_office_router.google.tokens import member_key_for
 
 # Structured events an operator filters by field (room_key, member) —
 # docs/logging-design.md §5.1 — as in file_links.

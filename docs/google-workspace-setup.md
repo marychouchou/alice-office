@@ -86,7 +86,7 @@ flowchart TD
 
 真正發連結的是另一條路：agent 呼叫 Google 工具、工具回報沒有可用 token時，agent
 依 system prompt／MCP 錯誤文字的指示在回覆裡貼一行固定字串
-`google-auth://request`；router 在送出回覆前（`auth_links.publish_auth_links`）把
+`google-auth://request`；router 在送出回覆前（`google.auth_links.publish_auth_links`）把
 它換成**這一輪發話者自己**的連結：
 
 ```
@@ -105,7 +105,7 @@ flowchart TD
 `@cocal/google-calendar-mcp` 驗證 `GOOGLE_ACCOUNT_MODE` 必須符合
 `/^[a-z0-9_-]{1,64}$/`（只准小寫），但 LINE room id 開頭是大寫 `U`/`C`/`R`。
 因此整個 Google 整合統一用 **`room_id.lower()`** 當帳號 key（見
-`alice_office_router.google_tokens.account_key`）：每個成員檔**內層**的 key、
+`alice_office_router.google.tokens.account_key`）：每個成員檔**內層**的 key、
 `/oauth/callback` 存 token、`check_google_authorization`、三個 MCP manifest 的
 `{account_key}` 佔位符，全部都是同一個 lowercase key，不能有任何一處漏掉轉換，
 否則會出現「明明授權過但還是說沒授權」這種對不起來的情況。這跟「哪個成員檔」
@@ -116,7 +116,7 @@ key 存取 token。
 **跟上面不同的另一件事：`room_id` 本身（原始大小寫）決定資料夾位置，絕對不能被
 lowercase 污染。** `data/<room_id>/google/` 這個路徑用的是原始 `room_id`（跟
 `data/<room_id>/mcp`、`plugins` 同一個變數），只有寫進 `tokens.json`**裡面**的
-key 才轉小寫。`google_oauth._pending`（`/oauth/start` 到 `/oauth/callback` 之間
+key 才轉小寫。`google.oauth._pending`（`/oauth/start` 到 `/oauth/callback` 之間
 暫存 state 的字典）刻意存原始 `room_id`、不是 `account_key`，就是為了讓
 `oauth_callback` 能正確找回這個房間的資料夾——如果哪裡不小心把 lowercase 過的
 key 當成 `room_id` 傳給 `Settings.room_google_dir()`，在 Linux（case-sensitive

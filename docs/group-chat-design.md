@@ -79,7 +79,7 @@ class InboundMessage(BaseModel):
 預設值讓 1:1 與 api channel 的既有呼叫**一行都不用改、行為不變**。
 api channel 之後若要模擬群組（測試用）可直接帶這些欄位。
 
-> **2026-09-18 更新**：`sender_id` 多了一個用途——`google_tokens.member_key_for`
+> **2026-09-18 更新**：`sender_id` 多了一個用途——`google.tokens.member_key_for`
 > 拿它算這一輪該用誰的 Google 帳號（`account_key(sender_id)`；1:1 房間沒有
 > `sender_id`，改用房間自己）。群組訊息如果連不到 `sender_id`（成員沒加 OA
 > 好友），Google 工具一律視為「這位發話者沒有身分」，見
@@ -96,10 +96,10 @@ api channel 之後若要模擬群組（測試用）可直接帶這些欄位。
 - 損毀容忍：壞行跳過並 log warning，不炸整個 pipeline。
 - **清空時機**：讀出（peek）後先組 prompt 問 agent，**agent 成功回覆才 clear**；
   agent／container 失敗時 buffer 保留，脈絡不遺失。
-- 併發假設：單 worker 部署（與 `google_oauth._pending` 同假設）、
+- 併發假設：單 worker 部署（與 `google.oauth._pending` 同假設）、
   read/append/rewrite 皆同步 I/O（無 await 交錯），不需要鎖。
 
-## 7. Prompt 組裝與 silence token（`group_context.py` + `core.py` + `hermes_client.py`）
+## 7. Prompt 組裝與 silence token（`group_context.py` + `core/pipeline.py` + `hermes_client.py`）
 
 觸發時送給 agent 的 user content（發話者標籤格式比照 Hermes Telegram 的
 `[nickname|user_id]`）：
@@ -140,8 +140,8 @@ layered on top of core prompt、單次有效不進 config.yaml）：
 - 拿不到（API 錯、userId 缺席）→ fallback：`userId` 前 8 碼，連 userId 都沒有
   → `"成員"`。lookup 失敗**絕不能**擋訊息處理。
 - 這個 `sender_id`／`sender_name` 對就是 2026-09-18 起 Google 逐人授權用來辨識
-  「這一輪該用誰的帳號」的同一組欄位（`google_tokens.member_key_for`／
-  `auth_links._link_text`）——沒有另外一套群組身分機制，也因此繼承同樣的限制：
+  「這一輪該用誰的帳號」的同一組欄位（`google.tokens.member_key_for`／
+  `google.auth_links._link_text`）——沒有另外一套群組身分機制，也因此繼承同樣的限制：
   沒加 OA 好友的成員在 Google 授權這邊一樣拿不到連結（見 §5 更新）。
 
 ## 9. Join greeting（`channels/line/adapter.py` + `events.py`）
@@ -150,7 +150,7 @@ layered on top of core prompt、單次有效不進 config.yaml）：
   繁中自我介紹＋使用說明（「@我 或以呼叫詞開頭叫我；其他訊息我會安靜聽著當作背景」），
   文字常數放 `channels/line/`。不經 core、不問 agent。
 - join event 也要過 webhookEventId dedup。
-- join 同時觸發 `warmup.warm_room(room_key)`：被拉進群組就是「這個房間即將問第一個問題」
+- join 同時觸發 `core.warmup.warm_room(room_key)`：被拉進群組就是「這個房間即將問第一個問題」
   的最早訊號，容器與 agent 在這裡先暖起來，第一則訊息就不用等 30–60 秒冷啟動
   （1:1 的對應訊號是 `follow`，同樣只暖機、不回話——見
   `google-auth-per-member-plan.md` §3.5）。
@@ -173,12 +173,12 @@ layered on top of core prompt、單次有效不進 config.yaml）：
 | `channels/line/events.py` | `Mention`/`Mentionee` model、`Message.mention`、Event 的 `is_group`/`sender_id`/`mention_is_self` helper | LINE wire format |
 | `channels/line/adapter.py` | addressed 計算、sender_name lookup、join greeting、組 InboundMessage | LINE channel 行為 |
 | `channels/line/profiles.py`（新） | 群組成員名稱 cache | LINE wire format |
-| `core.py` | observe 短路（在 OAuth gate 之前）、group prompt 組裝呼叫、silence 過濾 | channel-free 管線 |
+| `core/pipeline.py` | observe 短路（在 OAuth gate 之前）、group prompt 組裝呼叫、silence 過濾 | channel-free 管線 |
 | `group_context.py`（新） | buffer record/peek/clear、build_group_prompt、is_silence、system prompt 常數 | channel-free 群組邏輯 |
 | `hermes_client.py` | `system` 參數 | Hermes HTTP 協定 |
 | `config.py` | 上表新設定＋path helper | 環境變數與路徑推導 |
-| `google_tokens.py`（2026-09-18 新增） | `member_key_for` 用 `InboundMessage.sender_id`／`is_group` 算出這一輪的 Google member key | Google 授權（逐人）——見 `google-auth-per-member-plan.md` |
-| `auth_links.py`（2026-09-18 新增） | 用 `sender_name` 組「{發話者} 請點此連結」；`resume` 走的 pending 訊息就是原始 `InboundMessage` | 同上 |
+| `google/tokens.py`（2026-09-18 新增） | `member_key_for` 用 `InboundMessage.sender_id`／`is_group` 算出這一輪的 Google member key | Google 授權（逐人）——見 `google-auth-per-member-plan.md` |
+| `google/auth_links.py`（2026-09-18 新增） | 用 `sender_name` 組「{發話者} 請點此連結」；`resume` 走的 pending 訊息就是原始 `InboundMessage` | 同上 |
 
 core 的 observe 短路放在 Google token 換檔／gate **之前**：未點名的訊息完全不進
 `_take_turn`，不換 `tokens.json` 指向、也不該觸發授權提示；未授權的房間照樣累積
@@ -188,7 +188,7 @@ core 的 observe 短路放在 Google token 換檔／gate **之前**：未點名�
 ## 12. 測試計畫
 
 全部照現有 pattern（`Event.model_validate({...})` 做 wire 層、
-`patch("alice_office_router.core.…")` 做 core 層、HMAC 簽章 POST 做 e2e 層）：
+`patch("alice_office_router.core.pipeline.…")` 做 core 層、HMAC 簽章 POST 做 e2e 層）：
 
 - events：mention 解析（isSelf true／false／缺席／@all）、`is_group`、
   `sender_id` 抽取、群組非 text 訊息。

@@ -1,11 +1,11 @@
 ---
 paths:
   - "src/alice_office_router/container_manager.py"
-  - "src/alice_office_router/google_oauth.py"
+  - "src/alice_office_router/google/oauth.py"
   - "src/alice_office_router/room_seed.py"
 ---
 
-# Known Anti-Patterns：container_manager / google_oauth / room_seed（2026-07-12 掃描，2026-09-15 更新）
+# Known Anti-Patterns：container_manager / google.oauth / room_seed（2026-07-12 掃描，2026-09-15 更新）
 
 改到這幾個檔案時適用；每條寫明觸發時機和該做的事。
 
@@ -20,8 +20,8 @@ paths:
    只是修 bug 則不必拆。
 2. **特殊情況散落：`config.google_oauth_enabled` 的 if 出現在 6 處**——
    `room_seed.py` 的 `ensure_mcp_seed`／`ensure_google_seed`，
-   `container_manager.py` 的 `_build_volume_config`，`google_tokens.py` 的
-   `select_member_tokens`，加上 `google_oauth.py` 的
+   `container_manager.py` 的 `_build_volume_config`，`google/tokens.py` 的
+   `select_member_tokens`，加上 `google/oauth.py` 的
    `oauth_start`／`check_google_authorization`。「這個部署沒啟用 Google」這一個
    特殊情況，房間初始化流程的每一站都得各自記得檢查，漏一站就是 bug。現況可用；
    第二個需要 OAuth gate 的整合（如 Microsoft）出現時，不要複製第二組散落的

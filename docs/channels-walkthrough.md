@@ -22,10 +22,10 @@
 └──────────────────────────┬────────────────────────────────┘
                            │ 只透過一個型別溝通：InboundMessage
                            ▼
-┌─────────────── channel-free 世界（全體共用一份）───────────┐
-│  core.process_inbound：Google gate → 容器 → agent          │
+┌─────────────── channel-free 世界（全體共用一份） ───────────┐
+│  core.pipeline.process_inbound：Google gate → 容器 → agent  │
 │  收 InboundMessage，回傳 list[str]（要送回房間的文字）      │
-└────────────────────────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────┘
 ```
 
 兩個不變式（違反任一個就是設計被破壞了）：
@@ -118,9 +118,9 @@ for adapter in _adapters:
 
 `register_adapters` / `adapter_for` 是同一份清單的**執行期反向索引**：mount 回答的是
 「訊息從哪裡進來」，registry 回答的是相反的問題——「手上只有一個 `InboundMessage`，
-它屬於哪個通道」。目前只有一個呼叫者：`auth_links.resume_pending_auth` 收到 OAuth callback
+它屬於哪個通道」。目前只有一個呼叫者：`google.auth_links.resume_pending_auth` 收到 OAuth callback
 的通知時，唯一能用的路由鍵就是 `msg.channel`。狀態是 process-local 的 dict（比照
-`core._room_locks`），`register_adapters` 每次整份取代而不是累加，測試建第二個 app
+`core.pipeline._room_locks`），`register_adapters` 每次整份取代而不是累加，測試建第二個 app
 時不會殘留前一個 app 的 adapter。
 
 三個值得注意的決定：
@@ -181,7 +181,7 @@ LINE event 有幾十個欄位，我們只認 `type` / `webhookEventId` / `replyT
 
 過完這兩道之後才依 `event.type` 分派：`message` 走 4d 以下的一般訊息路徑
 （`room_key` 解析不出來 → 跳過）。`follow`／`join` 走一條更短的路：兩者都呼叫
-`warmup.warm_room(room_key)`——在背景把這個房間的容器建起來、跑一輪暖機探針，讓它
+`core.warmup.warm_room(room_key)`——在背景把這個房間的容器建起來、跑一輪暖機探針，讓它
 第一則真正的提問落在已就緒的 agent 上（2026-09-18 取代了舊版「靠被擋下的第一則
 訊息觸發暖機」的設計，見 `docs/google-auth-per-member-plan.md` §3.5）；`join`
 另外用該事件的 reply token 回一則固定的繁中自我介紹
@@ -258,7 +258,7 @@ async with self._loading_animation(room_key, config, enabled=not is_group):
 
 ---
 
-## Step 5：channel-free 核心（`core.py`）
+## Step 5：channel-free 核心（`core/pipeline.py`）
 
 Background task 裡做的第一件事就是跨過抽象邊界：
 
@@ -285,18 +285,18 @@ texts = await process_inbound(msg, config)   # ← 從這行起，世界裡沒�
 兩個設計重點：
 
 - **每一步各自 try/except、失敗記 log 回 None**——這個函式跑在 background task 裡，
-  例外往上拋沒有人接得住，所以錯誤在這層就地吸收（`agent_turn.ask_agent` 的 docstring 明講了
+  例外往上拋沒有人接得住，所以錯誤在這層就地吸收（`core.agent_turn.ask_agent` 的 docstring 明講了
   這個契約）。
 - **回傳的是待送文字＋turn envelope，不是「已送出」**。notice 回
   `[提示, agent回覆]`；出現授權連結回 `[agent回覆（已換成連結）]`；正常回
   `[agent回覆]`。誰去送、怎麼送，是呼叫端 adapter 的事——這就是 core 可以被 LINE
   和 API 通道共用的原因。
 
-`core.py` 本身現在只剩分派：上面 1–4 步驟的內容已經搬進各自的模組——單一 agent 回合
-（容器解析、session 輪替與交接、呼叫 Hermes、逾時／失敗提示）住在 `agent_turn.py`；
-房間冷啟動的背景暖機住在 `warmup.py`；Google 授權連結的發放與授權後接續住在
-`auth_links.py`；log `error` 欄位的內容安全處理住在 `conversation_log.describe_error`。
-`core.py` 只留 `process_inbound`／`_route`／`_take_turn` 這類依序呼叫它們的薄包裝。
+`core/pipeline.py` 本身現在只剩分派：上面 1–4 步驟的內容已經搬進各自的模組——單一 agent 回合
+（容器解析、session 輪替與交接、呼叫 Hermes、逾時／失敗提示）住在 `core/agent_turn.py`；
+房間冷啟動的背景暖機住在 `core/warmup.py`；Google 授權連結的發放與授權後接續住在
+`google/auth_links.py`；log `error` 欄位的內容安全處理住在 `conversation_log.describe_error`。
+`core/pipeline.py` 只留 `process_inbound`／`_route`／`_take_turn` 這類依序呼叫它們的薄包裝。
 
 ---
 

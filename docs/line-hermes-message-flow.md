@@ -12,7 +12,7 @@
 | 角色 | 對應程式碼 | 職責 |
 |---|---|---|
 | LINE Platform | — | 使用者訊息的來源；接收 webhook 回傳、接收 Reply/Push Message API 呼叫 |
-| Router（`alice-office-router`） | `channels/line/adapter.py`、`channels/line/client.py`、`channels/line/format.py`、`channels/line/dedup.py`、`channels/line/events.py`、`core.py`、`main.py` | 驗簽、去重、逐一解析每個事件（含下載媒體）、管理 container 生命週期、串接 Hermes、組裝回覆並送回 LINE（Reply token 優先、Push 為 fallback）。**唯一**持有 LINE 憑證的元件 |
+| Router（`alice-office-router`） | `channels/line/adapter.py`、`channels/line/client.py`、`channels/line/format.py`、`channels/line/dedup.py`、`channels/line/events.py`、`core/pipeline.py`、`main.py` | 驗簽、去重、逐一解析每個事件（含下載媒體）、管理 container 生命週期、串接 Hermes、組裝回覆並送回 LINE（Reply token 優先、Push 為 fallback）。**唯一**持有 LINE 憑證的元件 |
 | Hermes Agent container | `container_manager.py` 建立、`nousresearch/hermes-agent` image | 每個聊天室一個，透過內建 `api_server` platform（OpenAI-compatible）純粹「收文字、吐文字」，完全不碰 LINE；使用者傳送的媒體檔案透過共用 volume 落地，由 container 內agent 自己的工具讀取 |
 | Docker Engine | `container_manager.py` | 依 `room_id` 動態建立/啟動/重用 container |
 
@@ -117,7 +117,7 @@ return {"status": "ok"}
 
 ### 5. `_process_and_reply`：三個獨立步驟
 
-`core.py::process_inbound`（容器/agent 兩步在 `agent_turn.py::ask_agent`），每一步各自 `try/except`、失敗只記 log 不 raise（因為此時已經
+`core/pipeline.py::process_inbound`（容器/agent 兩步在 `core/agent_turn.py::ask_agent`），每一步各自 `try/except`、失敗只記 log 不 raise（因為此時已經
 沒有 HTTP response 可以回傳錯誤給任何人了）：
 
 ```mermaid

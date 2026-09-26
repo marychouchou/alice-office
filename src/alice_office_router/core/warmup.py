@@ -23,10 +23,10 @@ import time
 
 import httpx
 
-from alice_office_router.agent_turn import elapsed_ms
 from alice_office_router.config import Settings
 from alice_office_router.container_manager import get_or_create_container
 from alice_office_router.conversation_log import describe_error
+from alice_office_router.core.agent_turn import elapsed_ms
 from alice_office_router.hermes_client import ask_hermes_agent, delete_hermes_session
 
 logger = logging.getLogger(__name__)

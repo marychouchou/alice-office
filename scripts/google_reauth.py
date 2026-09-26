@@ -7,7 +7,7 @@ stores the resulting token in one *member's* own token file under
 data/<room_id>/google/members/ — the same per-member file the router's
 /oauth/callback route writes and that room's gmail/drive/google-calendar
 MCP read from, through the room's tokens.json symlink (see
-alice_office_router.google_tokens module docstring; each room's Google data
+alice_office_router.google.tokens module docstring; each room's Google data
 is isolated, not shared across rooms).
 
 Usage:
@@ -23,13 +23,13 @@ room (same case) — it becomes the data/<room_id>/ directory name, and
 diverging case would silently create a second, empty directory instead of
 authorizing the room the LINE webhook actually talks to. The token dict
 *inside* the member file is still keyed by the lowercased account_key (see
-alice_office_router.google_tokens.account_key) — @cocal/google-calendar-mcp's
+alice_office_router.google.tokens.account_key) — @cocal/google-calendar-mcp's
 GOOGLE_ACCOUNT_MODE validation rejects LINE's uppercase-prefixed room ids,
 so that lowercased key must match what the router's oauth routes and every
 MCP's env use, regardless of which member file it lives in.
 
 --member does not choose which member file the router's tokens.json symlink
-currently points at — that happens per-turn (google_tokens.select_member_tokens),
+currently points at — that happens per-turn (google.tokens.select_member_tokens),
 driven by who is actually speaking. This script only deposits a token; make
 that member speak (or run scripts/simulate_oauth.py) to have the room pick
 it up.
@@ -49,16 +49,16 @@ import webbrowser
 from pathlib import Path
 
 from alice_office_router.config import Settings, get_settings
-from alice_office_router.google_tokens import account_key, load_member_tokens, save_member_tokens
+from alice_office_router.google.tokens import account_key, load_member_tokens, save_member_tokens
 
 # Deployment-level seed source (the operator's one-time drop location — see
 # README「Google Workspace 整合」). Not room-specific: every room's own
 # credentials copy starts as a copy of this same file.
 DEFAULT_CREDENTIALS_PATH = Path("./data/_google/gcp-oauth.keys.installed.json")
 
-# The shape google_tokens.account_key() produces (and @cocal/google-calendar-mcp
+# The shape google.tokens.account_key() produces (and @cocal/google-calendar-mcp
 # accepts) — --member becomes a filename under the room's members/ directory,
-# so it is checked against this before being trusted (mirrors google_oauth.py's
+# so it is checked against this before being trusted (mirrors google/oauth.py's
 # own _MEMBER_KEY_RE for /oauth/start's `member` query param).
 _MEMBER_KEY_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 
@@ -203,10 +203,10 @@ def save_token(
 ) -> None:
     """Merge a freshly exchanged token into one member's own Google token file.
 
-    Goes through google_tokens.save_member_tokens (temp-file-then-rename)
+    Goes through google.tokens.save_member_tokens (temp-file-then-rename)
     instead of writing tokens.json directly — tokens.json is now a symlink
     the router repoints at whichever member is currently speaking
-    (google_tokens.select_member_tokens), so it must never be written to as
+    (google.tokens.select_member_tokens), so it must never be written to as
     a plain file.
 
     Args:

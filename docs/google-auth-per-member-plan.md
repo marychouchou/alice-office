@@ -15,8 +15,8 @@ router 才在回覆裡放授權連結，使用者授權完 router 自動把剛�
 
 ## 1. 改版前（2026-09-18 之前的行為，供對照）
 
-- Gate 只認房間：`core._take_turn` 每回合呼叫 `check_google_authorization(room_key)`，
-  沒 token 就回 `blocked`，agent 完全不跑（`core.py:686-692`）。sender_id 沒進到
+- Gate 只認房間：`core.pipeline._take_turn` 每回合呼叫 `check_google_authorization(room_key)`，
+  沒 token 就回 `blocked`，agent 完全不跑（`core/pipeline.py:686-692`）。sender_id 沒進到
   gate、`/oauth/start`、`/oauth/callback` 任何一處。
 - `tokens.json` 每房一份，內層 key 是 `account_key(room_id)`＝room id 小寫；三個 MCP
   的 `GOOGLE_ACCOUNT_MODE` 在 config.yaml 寫死成這個 key（write-once，既有房間改不了 env）。
@@ -38,7 +38,7 @@ router 才在回覆裡放授權連結，使用者授權完 router 自動把剛�
 | `/opt/google-workspace` 是整個目錄 rw bind mount | `container_manager._build_volume_config` | host 端在目錄內換 symlink，容器內立即可見；symlink 目標要用**相對路徑** |
 | line-bot-sdk 已有 `TextMessageV2`／`MentionSubstitutionObject` | `uv run python -c "import linebot.v3.messaging"` | 群組真 @mention 可做，但列為加分項 |
 | `InboundMessage` 是 pydantic model | `channels/base.py:44-77` | pending 訊息可直接序列化存檔、原樣重跑 `process_inbound` |
-| `process_inbound` 對訊息無副作用，可重複呼叫 | `core.py:789-821` | 重跑走正常管線（lock、session hygiene、group prompt） |
+| `process_inbound` 對訊息無副作用，可重複呼叫 | `core/pipeline.py:789-821` | 重跑走正常管線（lock、session hygiene、group prompt） |
 
 ## 3. 設計
 
@@ -94,16 +94,16 @@ data/<room>/google/
      做法一致（`docs/file-share-design.md` §9）。
 - **router 事先知道發話者沒 token 時，會在該回合的 system prompt 加上提示，不再只靠工具錯誤文字**
   （2026-09-18 補）：`check_google_authorization` 多回一個 `"unauthorized"` 狀態（`check_member_token`
-  回 `missing`、且發話者身分可辨識時），`core._take_turn` 就把 `group_context.GOOGLE_AUTH_MISSING_HINT`
+  回 `missing`、且發話者身分可辨識時），`core.pipeline._take_turn` 就把 `group_context.GOOGLE_AUTH_MISSING_HINT`
   疊到這一輪的 system prompt 上——「你現在沒有可用的 Google 憑證，需要用到就直接放 marker、別呼叫工具」。
   起因是實機上 calendar MCP（第三方）回的是 `Authentication tokens are no longer valid. Please restart
   the server to re-authenticate.`，agent 把它讀成「授權過期」，回了「請在設定裡重新授權」卻沒放 marker，
   router 因此沒發出連結。上面那條 prompt 規則同時擴充成「任何跟憑證有關的 Google 工具失敗」都要放 marker。
-- 新模組 `auth_links.py`（鏡射 `file_links.py`）：`publish_auth_links(text, msg, config) -> (text, requested: bool)`：
+- 新模組 `google/auth_links.py`（鏡射 `file_links.py`）：`publish_auth_links(text, msg, config) -> (text, requested: bool)`：
   沒 marker 零 I/O 直接回傳；有 marker → 依 3.1 算 member_key → 換成
   「{sender_name} 請點此連結 Google 帳號：{PUBLIC_BASE_URL}/oauth/start?user_id={room}&member={member_key}」
   （或 None 身分的固定提示）並把這則 `InboundMessage` 寫進 pending（3.4）。
-- 在 `core._take_turn` 的 seam 與 `publish_file_links` 並列，同在 room lock 內。
+- 在 `core.pipeline._take_turn` 的 seam 與 `publish_file_links` 並列，同在 room lock 內。
   `RouteResult.gate_status` 新值 `"auth_link"` 讓 turn envelope 看得出這回合發了連結。
 - 群組訊息開頭用 `sender_name` 純文字點名即可；改成 `TextMessageV2` 真 @mention 列為加分項
   （限制：被 @ 的人必須在該群組，一則最多 20 個）。
@@ -116,7 +116,7 @@ data/<room>/google/
 - `/oauth/callback`：存進成員檔 → `asyncio.create_task(on_authorized(room_key, member_key))`
   → 回 HTML「授權成功，答案稍後會出現在 LINE」。`on_authorized` 是 main.py lifespan 註冊進
   `google_oauth` 的 hook（避免 google_oauth ↔ core 循環 import）。
-- `auth_links.resume_pending_auth(room_key, member_key)`：讀 pending、刪檔、找到該 channel 的 adapter、
+- `google.auth_links.resume_pending_auth(room_key, member_key)`：讀 pending、刪檔、找到該 channel 的 adapter、
   呼叫 `adapter.resume(msg)`。
 - `ChannelAdapter` Protocol 新增 `async def resume(self, msg: InboundMessage) -> None`；
   `channels/__init__.py` 提供 `adapter_for(channel_name)` registry（main.py 建 adapter 時登記）。
@@ -135,11 +135,11 @@ data/<room>/google/
   `Outcome` Literal 保留 `"blocked"` 供舊 envelope 讀取，程式不再產生；`logging-design.md` §5.7 註明。
 - 暖機子系統（`_warm_container` 等）唯一觸發點是 blocked 回合，會失去呼叫者。**保留機制、
   換觸發點**：LINE `follow`（1:1 加好友，目前 adapter 直接忽略）與 `join`（群組，已處理）事件
-  → `warmup.warm_room(room_key)`。體驗上比現在更早暖機。
+  → `core.warmup.warm_room(room_key)`。體驗上比現在更早暖機。
 
 ### 3.6 換檔時機
 
-`core._take_turn`（room lock 內）：
+`core.pipeline._take_turn`（room lock 內）：
 
 ```
 reset 檢查
@@ -158,10 +158,10 @@ text = publish_file_links(...); text, requested = publish_auth_links(...)
 
 | 檔案 | 動作 |
 |---|---|
-| `google_tokens.py`（新） | 成員檔讀寫、`select_member_tokens`、legacy 遷移、`_check_token`（從 google_oauth 搬來）。google_oauth.py 現 413 行，加東西前先拆 |
-| `google_oauth.py` | routes、`_pending`（三元組）、`check_google_authorization`（member 版、無 blocked）、`on_authorized` hook |
-| `auth_links.py`（新） | marker regex、替換、pending 寫入；鏡射 `file_links.py` |
-| `core.py` | `_take_turn` 換檔＋seam；`resume_pending_auth`；`warm_room`；刪 blocked 分支。建議先做一個純搬移 commit 把暖機子系統移到 `warmup.py`（core.py 已 821 行、混多種改動理由） |
+| `google/tokens.py`（新） | 成員檔讀寫、`select_member_tokens`、legacy 遷移、`_check_token`（從 google_oauth 搬來）。google/oauth.py 現 413 行，加東西前先拆 |
+| `google/oauth.py` | routes、`_pending`（三元組）、`check_google_authorization`（member 版、無 blocked）、`on_authorized` hook |
+| `google/auth_links.py`（新） | marker regex、替換、pending 寫入；鏡射 `file_links.py` |
+| `core/pipeline.py` | `_take_turn` 換檔＋seam；`resume_pending_auth`；`warm_room`；刪 blocked 分支。建議先做一個純搬移 commit 把暖機子系統移到 `core/warmup.py`（core/pipeline.py 已 821 行、混多種改動理由） |
 | `channels/base.py`、`channels/__init__.py` | Protocol `resume`、adapter registry |
 | `channels/line/adapter.py` | `_process_and_reply(reply_token: str \| None)`、`resume`、`follow` 事件 → warm |
 | `channels/api.py` | `resume` no-op |
@@ -187,13 +187,13 @@ write-once config.yaml 不受影響。
 0c. **測試工具**：`scripts/test_webhook.py` 加 `--sender-id`／`--mention`／`--event follow|join`；
    `scripts/google_reauth.py` 加 `--member`；`scripts/simulate_oauth.py`（本機直接觸發
    `on_authorized` hook，跳過 Google）。見 §6b。
-1. `google_tokens.py`＋Settings 路徑＋legacy 遷移＋symlink 換檔。1:1 行為不變（成員＝房間）。
+1. `google/tokens.py`＋Settings 路徑＋legacy 遷移＋symlink 換檔。1:1 行為不變（成員＝房間）。
    測試：成員檔格式、symlink 相對路徑、原子換檔、遷移、None 身分、disabled no-op。
 2. OAuth routes member 化（start 多 `member` 參數、`_pending` 三元組、callback 寫成員檔）；
    gate 函式 member 化、刪 blocked、刪 `GOOGLE_OAUTH_GATE`；`_take_turn` 接上換檔。
-   測試：`test_google_oauth.py` 的 start／callback／gate 全部改寫；`test_core.py` 的 9 個
+   測試：`tests/google/test_oauth.py` 的 start／callback／gate 全部改寫；`tests/core/test_pipeline.py` 的 9 個
    blocked 測試改成「沒 token 也進 agent」。
-3. Marker：token_manager 兩檔、system prompts、SKILL.md、`auth_links.py`、seam、`gate_status="auth_link"`、
+3. Marker：token_manager 兩檔、system prompts、SKILL.md、`google/auth_links.py`、seam、`gate_status="auth_link"`、
    pending 寫入。測試比照 `test_file_links.py` 的 substitute 系列。
 4. Resume：Protocol、registry、LINE `resume`、API no-op、`on_authorized` hook、callback 觸發、
    success HTML 文案、群組「已完成授權」前綴。測試：stub adapter 收到 resume；TTL 過期不重跑；
@@ -240,7 +240,7 @@ write-once config.yaml 不受影響。
 |---|---|---|---|
 | T1 | 個人房、無 token、非 Google 問題 | `test_webhook.py --user-id U_T10_ALICE --text "今天幾號"` | 直接回答；envelope `gate_status=ok`、`outcome=replied`；`tokens.json -> members/line_u_t10_alice.json`（目標不存在） |
 | T2 | 個人房、無 token、Google 問題 | 同上 `--text "明天有什麼會議"` | 回覆含 `/oauth/start?user_id=line_U_T10_ALICE&member=line_u_t10_alice`（`user_id` 是**加了前綴的 room key**，不是裸 LINE ID——連結由 `auth_url_for(config, msg.room_key, member_key)` 產生），不含 `google-auth://`；`pending_auth/line_u_t10_alice.json` 存在，內容＝原 InboundMessage；`gate_status=auth_link` |
-| T3 | 授權完成自動接續 | 把真 token 複製成 `members/line_u_t10_alice.json`，再呼叫 hook：`curl /oauth/callback` 走不通（要 Google code），改用 `uv run python -c` 直接 `await core.resume_pending_auth(...)`，或在 stub 模式提供 `scripts/simulate_oauth.py` | stub 收到一則 **push**（非 reply）到 `U_T10_ALICE`，內容是行事曆答案；pending 檔被刪；再跑一次 hook 不會重送 |
+| T3 | 授權完成自動接續 | 把真 token 複製成 `members/line_u_t10_alice.json`，再呼叫 hook：`curl /oauth/callback` 走不通（要 Google code），改用 `uv run python -c` 直接 `await core.pipeline.resume_pending_auth(...)`，或在 stub 模式提供 `scripts/simulate_oauth.py` | stub 收到一則 **push**（非 reply）到 `U_T10_ALICE`，內容是行事曆答案；pending 檔被刪；再跑一次 hook 不會重送 |
 | T4 | pending 過期 | 寫 pending 後把 ts 改成 11 分鐘前，跑 T3 的 hook | 不重跑、無 push、pending 被刪、log 一行 info |
 | T5 | 群組 A／B 各自拿連結 | `--group-id C_T10_GROUP --sender-id U_T10_A --mention --text "明天有什麼會"`；再以 `U_T10_B` 問信件 | 兩則回覆都是 `user_id=line_C_T10_GROUP`（房間）、`member=u_t10_a`／`member=u_t10_b`（發話者），開頭有各自的 `sender_name`；兩次 turn 之間 `tokens.json` 的 readlink 由 `members/u_t10_a.json` 變 `members/u_t10_b.json` |
 | T6 | 群組只有 A 授權 | 把真 token 複製成 `members/u_t10_a.json`；A 問行事曆；B 問行事曆 | A 得到答案；B 仍拿到自己的連結；`members/u_t10_b.json` 不存在 |
@@ -255,9 +255,9 @@ write-once config.yaml 不受影響。
 | T15 | 人工：真 LINE | 手機 1:1 問行事曆 → 點連結 → Google 同意 → 回 LINE | 不用再傳，答案自己出現；群組再做一次 T5 的兩人流程 |
 | T16 | 人工：Oregon | 依 upgrade 流程部署後重做 T15；`.env` 刪 `GOOGLE_OAUTH_GATE` | 同 T15；既有 Oregon 房間第一則訊息後目錄完成遷移 |
 
-單元測試對應：T1–T2／T5–T8 在 `tests/test_core.py`、`tests/test_auth_links.py`；T3–T4／T14 在
-`tests/test_core.py`（stub adapter）；T9／T11 的 host 端邏輯在 `tests/test_google_tokens.py`；
-T10 在 `tests/test_google_oauth.py`。
+單元測試對應：T1–T2／T5–T8 在 `tests/core/test_pipeline.py`、`tests/google/test_auth_links.py`；T3–T4／T14 在
+`tests/core/test_pipeline.py`（stub adapter）；T9／T11 的 host 端邏輯在 `tests/google/test_tokens.py`；
+T10 在 `tests/google/test_oauth.py`。
 
 **e2e 結果 2026-09-18**：T1–T14 在 macOS 本機（LINE stub ＋ 偽造 webhook ＋ API channel）
 全部 PASS，其中 T11／T12 要靠下面第 (1) 點的 macOS 掛載 workaround 才會過。跑出來的三件事已經修掉：

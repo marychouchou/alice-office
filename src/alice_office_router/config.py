@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     # (typically a Cloudflare tunnel). Everything the router hands a user to
     # open is built on it: the Google OAuth redirect_uri ({url}/oauth/callback,
     # which must also be registered in the GCP Web application client's
-    # Authorized redirect URIs) and auth links (google_oauth.py), and the
+    # Authorized redirect URIs) and auth links (google/oauth.py), and the
     # file-download links behind the agent's share_file tool (file_links.py).
     # Empty (default) = Google OAuth cannot run and share_file links are
     # replaced with a fixed "not configured" notice. Renamed from
@@ -356,7 +356,7 @@ class Settings(BaseSettings):
 
         Returns:
             room_google_dir / "members" — one <member_key>.json per person
-            who has authorized in this room (see google_tokens.py). The
+            who has authorized in this room (see google/tokens.py). The
             room's tokens.json is a relative symlink into this directory,
             repointed at the current speaker before every turn.
         """

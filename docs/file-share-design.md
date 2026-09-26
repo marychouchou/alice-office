@@ -51,7 +51,7 @@ flowchart LR
     end
 
     subgraph R["Router"]
-        RW["core._take_turn<br/>看到 outbox://TOKEN"]
+        RW["core.pipeline._take_turn<br/>看到 outbox://TOKEN"]
         V["驗證 outbox/TOKEN/ 裡那一個檔<br/>一般檔、非 symlink、大小合規"]
         PF["複製到 data/_files/ROOM/TOKEN/report.xlsx<br/>（agent 碰不到的目錄）"]
         URL["改寫成<br/>PUBLIC_BASE_URL/files/ROOM/TOKEN"]
@@ -139,7 +139,7 @@ flowchart TD
 - 現有架構是「container 對 LINE 零知情」（`docs/router-hermes-agent-protocol.md`）：容器
   不知道自己的 room_id、不知道 router 的公開網址。維持這條線，容器就不用新增任何環境變數，
   **既有房間不必 `docker rm -f` 重建**（容器 env 只在建立時讀）。
-- 改寫發生在 `core._take_turn`，是 1:1 與群組回覆共用的唯一接縫，而且在 channel adapter
+- 改寫發生在 `core.pipeline._take_turn`，是 1:1 與群組回覆共用的唯一接縫，而且在 channel adapter
   之前——所以 LINE 和 API channel（TUI／mobile）拿到的都是真實 URL。
 - `PUBLIC_BASE_URL` 沒設時，router 把佔位換成一句「此部署未設定檔案下載連結」，agent
   端不用知道功能有沒有開。
@@ -216,7 +216,7 @@ provider 不同）。
   純文字內容直接回文字不必做成檔案。要重建 image 才到，不急。
 
 同樣的兩層做法後來也用在 Google 授權連結（`google-auth://request`，
-`auth_links.py`）：見 `docs/google-auth-per-member-plan.md` §3.3。
+`google/auth_links.py`）：見 `docs/google-auth-per-member-plan.md` §3.3。
 
 `share_file` 工具本身住在 `src/hermes/plugin/local-tools/`，單一參數 `path`。不檢查來源
 路徑是否在 `/opt/data` 內——`hr` 工具本來就把 xlsx 寫到 `/tmp/`，容器內 `/tmp` 和 `/opt/data`
