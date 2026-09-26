@@ -164,7 +164,7 @@ Router 的 `room_key` 刻意**不**當 Loki label 而是留在 JSON 行內：一
 | `request_id` | 每個 HTTP request 產生一個 `uuid4` hex | ASGI middleware（`main.py` 掛在 app 上），request 開始 `clear_contextvars()` + `bind_contextvars(request_id=…)` |
 | `channel` | `line` / `api` | 各 adapter 進入點（`LineAdapter._handle_webhook` 等） |
 | `event_id` | LINE `webhookEventId`（`adapter.py:136` 已取出） | `LineAdapter._dispatch_event`，每個 event 進入時 bind，離開時 unbind |
-| `room_key` | `InboundMessage.room_key` | `core.process_inbound` 開頭 bind（`bound_contextvars` context manager，離開自動還原） |
+| `room_key` | `InboundMessage.room_key` | `core.pipeline.process_inbound` 開頭 bind（`bound_contextvars` context manager，離開自動還原） |
 | `container` | `hermes_<room_id>` | `container_manager.get_or_create_container` 內部 |
 | `duration_ms` | 對 Hermes agent HTTP 呼叫耗時 | `hermes_client.py` 呼叫完成那一行 log（`event="hermes_agent_call"`）的 kwargs，同一行還帶 `session_id`／`status`／`chunks`（收到幾個 SSE chunk）／`finish_reason`／`prompt_tokens`／`tool_calls`／`api_calls`（後兩者見下方 2026-09-15 補充） |
 
@@ -184,7 +184,7 @@ token 三件組，見 `docs/router-hermes-agent-protocol.md`），Hermes 只在
 （新 epoch 的第一輪，Hermes 要等第一次 chat completions 才會建立）視為基準 0；任一次讀取
 失敗（逾時、非 2xx、回應格式不符）兩個欄位一律回 `None`，代表「不知道」而非「這一輪打了
 0 次」，且從不讓這個讀取失敗拖垮或掩蓋原本的回覆。欄位也補進 `AgentReply`（供
-`agent_turn.ask_agent` 使用）與 §5.7 的 `TurnEnvelope`，兩個 sink 都不是 JSONL only——純數字，
+`core.agent_turn.ask_agent` 使用）與 §5.7 的 `TurnEnvelope`，兩個 sink 都不是 JSONL only——純數字，
 沒有內容或身分疑慮。**已知取捨**：`tool_errors`（工具呼叫中失敗幾次）目前沒有加——
 Hermes 只在容器內 `logs/agent.log`／`errors.log` 印一行
 `WARNING agent.tool_executor: Tool X returned error`（`tool_executor.py` 的
@@ -440,18 +440,18 @@ collector 送進 Loki、保留 30 天、任何 operator 都查得到，而且沒
 | `schema_version`, `ts`, `request_id`, `event_id`, `channel`, `room_key` | 同前 |
 | `session_id` | 這一輪送給 Hermes 的 session id（含 epoch）——**對回 `state.db.sessions.id` 的 join key** |
 | `outcome` | `replied` / `observed` / `reset` / `blocked` / `agent_failed` / `silence`；後五種在 `state.db` 裡**沒有對應紀錄**，這是 envelope 存在的主因。**`blocked` 是遺留值**：2026-09-18 起 Google 授權改成不擋訊息（延遲授權＋逐人授權，見 `docs/google-auth-per-member-plan.md`），程式碼不再產生它，`Outcome` Literal 只是保留讓舊 envelope／既有查詢工具還讀得懂歷史資料 |
-| `inbound_text` | **JSONL only**。只在 Hermes 自己沒記的那些 outcome 才填（`core._TEXT_IN_STATE_DB` = `replied` + `silence`；`silence` 也進了 agent，所以同樣不重複記）。`agent_failed` 刻意保留：它有一半的情況（容器起不來、連不上）根本沒碰到 Hermes，這份 envelope 是唯一記得使用者說了什麼的地方 |
+| `inbound_text` | **JSONL only**。只在 Hermes 自己沒記的那些 outcome 才填（`core.pipeline._TEXT_IN_STATE_DB` = `replied` + `silence`；`silence` 也進了 agent，所以同樣不重複記）。`agent_failed` 刻意保留：它有一半的情況（容器起不來、連不上）根本沒碰到 Hermes，這份 envelope 是唯一記得使用者說了什麼的地方 |
 | `is_group`, `addressed` | 群組脈絡，Hermes 只看到合併後的 prompt。兩個都是布林，兩個 sink 都有 |
 | `sender_id`, `sender_name` | **JSONL only**。群組發言者身分 |
-| `gate_status` | `ok` / `unauthorized`（發話者沒有可用 token——不擋訊息，但這一輪的 system prompt 會多帶一段提示，見 `group_context.GOOGLE_AUTH_MISSING_HINT`；只有在 agent 這輪其實用不到 Google 時才會留下這個值）/ `notice`（token 有效但缺 Drive scope，仍照常呼叫 agent）/ `auth_link`（這輪回覆含 Google 授權連結——`auth_links.publish_auth_links` 把 marker 換成連結後覆寫掉前面的值，見 `docs/google-auth-per-member-plan.md` §3.3）/ `None`（observe、reset 短路，沒跑到判斷這一步）。舊版的 `blocked` 不會再出現，理由同上 |
+| `gate_status` | `ok` / `unauthorized`（發話者沒有可用 token——不擋訊息，但這一輪的 system prompt 會多帶一段提示，見 `group_context.GOOGLE_AUTH_MISSING_HINT`；只有在 agent 這輪其實用不到 Google 時才會留下這個值）/ `notice`（token 有效但缺 Drive scope，仍照常呼叫 agent）/ `auth_link`（這輪回覆含 Google 授權連結——`google.auth_links.publish_auth_links` 把 marker 換成連結後覆寫掉前面的值，見 `docs/google-auth-per-member-plan.md` §3.3）/ `None`（observe、reset 短路，沒跑到判斷這一步）。舊版的 `blocked` 不會再出現，理由同上 |
 | `rotated`, `agent_duration_ms`, `prompt_tokens`, `error` | 同前 |
 | `tool_calls`, `api_calls` | 這一輪 Hermes 內部的工具呼叫次數／LLM API 呼叫次數，`None`＝未知（沒有呼叫或讀取失敗）。兩個都不是 JSONL only——純數字，兩個 sink 都有。來源與取捨見 §5.1 的 2026-09-15 補充 |
-| `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `agent_turn.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
+| `delivered` | adapter 送回 LINE 是否成功——`agent_failed` 現在也會送出一則固定提示（逾時／一般失敗兩種措辭，見 `core.agent_turn.AGENT_TIMEOUT_NOTICE`／`AGENT_FAILURE_NOTICE`），所以它的 `delivered` 不再恆為 null，只有 `observed`／`silence` 這種真的沒東西可送的 outcome 才是 null——**改由 adapter 在送完後發出 envelope**，而不是 core；core 只組好 envelope 回傳給 adapter（`process_inbound` 回傳型別從 `list[str]` 變成含 texts 與 envelope 的 dataclass） |
 
 `process_inbound` 拆成 `_route` + 薄包裝的做法不變；只是發出點移到 adapter，讓
 `delivered` 能一次寫進去而不是事後補一行 error log。
 
-**延遲授權新增的 structlog 事件**（2026-09-18，`auth_links.py`／`core.py` 的
+**延遲授權新增的 structlog 事件**（2026-09-18，`google/auth_links.py`／`core/pipeline.py` 的
 `struct_logger`，都走 `room_key`／`member` 這兩個 contextvars 過濾）：
 
 | 事件 | 何時 | 層級 |
@@ -601,7 +601,7 @@ uv run python scripts/conversations.py stats --since 30d           # outcome 分
 - [x] `main.py` 移除 `basicConfig`，改呼叫 `configure_logging`；加 ASGI middleware
       產生 `request_id`、記 access log；uvicorn access log 關閉。
 - [x] 綁定點：`LineAdapter._dispatch_event`（`event_id`、`channel`）、
-      `core.process_inbound`（`room_key`）、`container_manager.get_or_create_container`
+      `core.pipeline.process_inbound`（`room_key`）、`container_manager.get_or_create_container`
       （`container`）、`hermes_client`（`duration_ms`）。API channel adapter 比照。
       背景任務（`_process_and_reply`、入群問候 `_greet_group`）在 task 內重新 bind
       `room_key`，因為 request 的 context 在 task 執行前就已經解除。
@@ -654,8 +654,8 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
       handler 又會累積開啟中的檔案描述子；一次 append 一行不值得這個代價，而且檔案格式
       因此與 log 設定完全解耦。Loki 那條路仍走 `alice.conversation` logger 發
       `conversation_turn` 事件，與原案相同。
-- [x] `core.process_inbound` 拆成 `_route` + 薄包裝，回傳含 `texts` 與 envelope 草稿的
-      `InboundResult`；`agent_turn.ask_agent`／`_ask_group_agent` 改回傳 `AgentTurn` dataclass，
+- [x] `core.pipeline.process_inbound` 拆成 `_route` + 薄包裝，回傳含 `texts` 與 envelope 草稿的
+      `InboundResult`；`core.agent_turn.ask_agent`／`_ask_group_agent` 改回傳 `AgentTurn` dataclass，
       帶回 `session_id`／`duration_ms`／`prompt_tokens`／`rotated`／`error`／outcome
       （`silence` 與 `agent_failed` 因此不再共用「回 None」）。各 adapter 送完訊息後填
       `delivered` 並呼叫 `record_turn`；LINE 的 `_deliver_reply` 改回傳 bool，
@@ -682,7 +682,7 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
       `tests/test_conversation_store.py`（20 個，取代原案的 `test_conversations_script.py`
       檔名）——用手工建的迷你 `state.db` fixture（sessions＋messages＋fts5 trigram）驗證
       `show`／`search`（中文詞）／`export md`／`export jsonl`／`stats`／sender hash；
-      `tests/test_core.py` 既有測試只改回傳型別、行為不變，另加 9 個 envelope 測試涵蓋
+      `tests/core/test_pipeline.py` 既有測試只改回傳型別、行為不變，另加 9 個 envelope 測試涵蓋
       六種 outcome；adapter 測試加 6 個涵蓋 `delivered` 的 True／False／None。
 - [x] `docs/troubleshooting.md` 速查表加：`scripts/conversations.py` 五個常用指令、
       `hermes sessions export --format html`、`hermes insights`、`hermes logs --session`。
@@ -785,7 +785,7 @@ start 之間房間容器被 `docker rm` 掉時 `NotFound` 不會落到建立路�
       （同目錄 `.tmp` + `os.replace`）。§5.7／§6 與 `docs/troubleshooting.md` §3 補上
       「這是唯一留著原文的 sink、預設永不刪」。
 - [x] 其餘：拿掉沒人用的 `alice.channel` label 與 `_channel_of`（§5.2）；`Outcome`
-      收斂成 `conversation_log` 一處定義（`core.AgentTurn`、
+      收斂成 `conversation_log` 一處定義（`core.pipeline.AgentTurn`、
       `conversation_store.UNRECORDED_OUTCOMES`、CLI 常數都引用它），並在
       `conversation_log` 的模組 docstring 寫下「新增 outcome 要改哪五個地方」；
       `silence` 不再記 `inbound_text`（它有進到 Hermes）；`_DEDUPE` 的 GROUP BY 加上

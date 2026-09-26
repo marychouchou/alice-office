@@ -11,7 +11,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from alice_office_router.config import Settings
-from alice_office_router.google_oauth import (
+from alice_office_router.google.oauth import (
     _exchange_code_for_token,
     _pending,
     account_key,
@@ -303,7 +303,7 @@ class TestOAuthCallback:
             raise RuntimeError("resume blew up")
 
         set_on_authorized(_hook)
-        with caplog.at_level(logging.ERROR, logger="alice_office_router.google_oauth"):
+        with caplog.at_level(logging.ERROR, logger="alice_office_router.google.oauth"):
             response = await _authorize(client, member="u_speaker")
             await _settle_tasks()
 

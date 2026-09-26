@@ -143,7 +143,7 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
   repo 內做對的例子：`channels/line/events.py` 的 `_MESSAGE_HANDLERS` 對 `msg_type` 用
   dispatch table（2026-07-12 從 router 的 4 分支 if/elif 改過來）。
 - **單一檔案超過 400 行** → 檢查是否混了兩種以上「改動理由」（用下方路由表的分類判斷）。
-  有混 → 依改動理由拆檔；沒混（單一主題只是長，如 `google_oauth.py` 396 行整檔都是
+  有混 → 依改動理由拆檔；沒混（單一主題只是長，如 `google/oauth.py` 396 行整檔都是
   OAuth）→ 不動。
 - **同一個 `data/<room_id>/` 子路徑在兩個以上模組各自拼字串** → 提升成 `config.py`
   Settings 的 method（比照 `room_google_dir` 的做法），不要留兩份拼法。
@@ -159,7 +159,7 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 能不能靠改資料結構或初始化方式讓正常路徑直接涵蓋它，而不是保留 if 繞過去。
 特殊情況的數量反映的是資料結構／介面設計得好不好。
 
-- repo 內做對的例子：`google_tokens.load_member_tokens` 對不存在的檔案直接回 `{}`，
+- repo 內做對的例子：`google.tokens.load_member_tokens` 對不存在的檔案直接回 `{}`，
   所以所有呼叫端都沒有「tokens.json 還沒建立」的分支。新的讀取類 helper 比照辦理
   （在邊界把缺失正規化掉，讓呼叫端只有一條路徑）。
 - 邊界提醒：`_seed_templates` 的 `if dest_dir.exists(): continue` 是 write-once
@@ -176,12 +176,12 @@ codebase 變大時的結構規則。每一條都是「訊號 → 動作」，看
 | container 生命週期（建立/啟動/健康等待/URL 解析） | `container_manager.py`——**docker SDK 只允許在這個檔案 import** |
 | 房間 write-once seed（複製 template 到 `data/<room_id>/`） | `room_seed.py`；新增 seed 種類＝加一個 `ensure_<x>_seed(room_id, config)` 並在 `container_manager._create_container` 登記呼叫順序 |
 | agent 的人設／自我認知（是誰、語氣、行為原則） | `src/hermes/SOUL.md`（write-once seed 到每房間 `data/<room_id>/SOUL.md`＝Hermes identity 層），**不是** `group_context.py` 的 `*_SYSTEM_PROMPT`（那只管回覆形狀）也不是 skill |
-| 「這則訊息該不該進 agent」的 gate 判斷（如 Google OAuth gate） | 獨立模組提供回傳 status 的純函式（比照 `google_oauth.check_google_authorization`），router 只呼叫、不寫判斷內容 |
+| 「這則訊息該不該進 agent」的 gate 判斷（如 Google OAuth gate） | 獨立模組提供回傳 status 的純函式（比照 `google.oauth.check_google_authorization`），router 只呼叫、不寫判斷內容 |
 | 對 Hermes agent 的 HTTP 協定 | `hermes_client.py` |
-| 訊息分派管線本身（observe 短路 → reset → token 換檔 → gate → agent → seam → envelope 草稿）、room turn lock | `core.py`，只分派，各步驟的內容不放這裡 |
-| 單一 agent 回合怎麼跑、怎麼失敗（容器解析 → session 輪替與交接 → Hermes 呼叫 → 逾時／失敗提示文案） | `agent_turn.py` |
-| 房間冷啟動策略（follow／join 觸發的背景暖機、探針、去重、shutdown 取消） | `warmup.py` |
-| Google 授權連結的發放、停放與授權後接續（marker 替換、pending 讀寫、`resume_pending_auth`） | `auth_links.py` |
+| 訊息分派管線本身（observe 短路 → reset → token 換檔 → gate → agent → seam → envelope 草稿）、room turn lock | `core/pipeline.py`，只分派，各步驟的內容不放這裡 |
+| 單一 agent 回合怎麼跑、怎麼失敗（容器解析 → session 輪替與交接 → Hermes 呼叫 → 逾時／失敗提示文案） | `core/agent_turn.py` |
+| 房間冷啟動策略（follow／join 觸發的背景暖機、探針、去重、shutdown 取消） | `core/warmup.py` |
+| Google 授權連結的發放、停放與授權後接續（marker 替換、pending 讀寫、`resume_pending_auth`） | `google/auth_links.py` |
 | log stream 的 `error` 欄位可以帶什麼（例外 → 字串的內容安全規則） | `conversation_log.describe_error` |
 | 環境變數與路徑推導 | `config.py` 的 Settings |
 | 新的 agent 能力（工具） | `src/hermes/mcp/<name>/` 或 `src/hermes/plugin/` 的 template，不是 router 的功能 |

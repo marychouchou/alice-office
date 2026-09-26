@@ -12,12 +12,12 @@ from alice_office_router.channels import enabled_adapters, register_adapters
 # `channels` must be imported before `auth_links`: auth_links imports
 # channels.base, which initializes the `channels` package (api → core →
 # auth_links), so importing auth_links first re-enters it half-initialized.
-from alice_office_router.auth_links import resume_pending_auth
 from alice_office_router.config import get_settings
+from alice_office_router.core.warmup import cancel_warmups
 from alice_office_router.file_links import files_router
-from alice_office_router.google_oauth import oauth_router, set_on_authorized
+from alice_office_router.google.auth_links import resume_pending_auth
+from alice_office_router.google.oauth import oauth_router, set_on_authorized
 from alice_office_router.logging_setup import RequestContextMiddleware, configure_logging
-from alice_office_router.warmup import cancel_warmups
 
 # Before anything else logs: every logger in this process (uvicorn's too)
 # renders through one structlog formatter from here on (logging_setup).
@@ -79,7 +79,7 @@ app.add_middleware(RequestContextMiddleware)
 _adapters = enabled_adapters(_settings)
 # Mounting answers "where does an inbound message arrive"; registering answers
 # the reverse — "which adapter does this parked message belong to" — for
-# auth_links.resume_pending_auth, whose only routing key is InboundMessage.channel.
+# google.auth_links.resume_pending_auth, whose only routing key is InboundMessage.channel.
 register_adapters(_adapters)
 
 for adapter in _adapters:

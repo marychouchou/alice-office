@@ -23,7 +23,7 @@ from structlog.contextvars import bound_contextvars
 from alice_office_router.channels.base import InboundMessage
 from alice_office_router.config import Settings, get_settings
 from alice_office_router.conversation_log import record_turn
-from alice_office_router.core import process_inbound
+from alice_office_router.core.pipeline import process_inbound
 
 # room_key flows into a docker container name (hermes_<room_key>, whose network
 # hostname must stay < 63 chars) and the Google account_key regex

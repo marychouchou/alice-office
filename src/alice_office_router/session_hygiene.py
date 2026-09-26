@@ -18,7 +18,7 @@ after `begin_turn` bumps the epoch, agent_turn asks the *retired* session for a
 short summary and injects it into the first user message of the new epoch — a
 request-level system message is ephemeral in Hermes (never persisted), so the
 summary must ride inside a user message to survive the whole epoch. The summary
-is never persisted here (this module only builds the injected text; agent_turn.py
+is never persisted here (this module only builds the injected text; core/agent_turn.py
 issues the two HTTP calls).
 
 Concurrency: a single-worker deployment (same reasoning as group_context), so

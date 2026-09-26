@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
-from alice_office_router import google_oauth
+from alice_office_router.google import oauth as google_oauth
 from alice_office_router.main import app, lifespan
 
 _MAIN = "alice_office_router.main"

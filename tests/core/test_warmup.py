@@ -42,7 +42,7 @@ def warmups() -> Iterator[dict[str, asyncio.Task[None]]]:
         warmup's `_warmups` dict, emptied before and after the test so an
         in-flight task from another test can never change the outcome.
     """
-    from alice_office_router.warmup import _warmups
+    from alice_office_router.core.warmup import _warmups
 
     _warmups.clear()
     yield _warmups
@@ -57,7 +57,7 @@ def probed() -> Iterator[set[str]]:
         warmup's `_probed` set, emptied before and after the test so a room
         another test already probed never skips this test's probe.
     """
-    from alice_office_router.warmup import _probed
+    from alice_office_router.core.warmup import _probed
 
     _probed.clear()
     yield _probed
@@ -72,7 +72,7 @@ async def _settle_warmups() -> None:
     after the call that started it has returned, so a test that leaves the
     patch before settling would hand the real docker call to a worker thread.
     """
-    from alice_office_router.warmup import _warmups
+    from alice_office_router.core.warmup import _warmups
 
     await asyncio.gather(*_warmups.values())
 
@@ -86,17 +86,19 @@ async def test_warm_room_starts_the_container_then_probes_the_agent(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:
     """The warm-up runs in the background and spends one throwaway turn on the agent."""
-    from alice_office_router.warmup import WARMUP_PROMPT, warm_room
+    from alice_office_router.core.warmup import WARMUP_PROMPT, warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()) as mock_ask,
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()) as mock_delete,
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch(
+            "alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()
+        ) as mock_delete,
     ):
         warm_room("line_room_AAA", settings)
         # Returns immediately: the caller never waits on the warm-up.
@@ -126,21 +128,23 @@ async def test_warm_room_probe_failure_is_a_warning_and_leaves_the_room_unprobed
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """A failed probe costs the room's first real turn its cold start, nothing else."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.warmup.ask_hermes_agent",
+            "alice_office_router.core.warmup.ask_hermes_agent",
             new=AsyncMock(side_effect=ValueError("Hermes agent failed: x")),
         ),
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()) as mock_delete,
-        caplog.at_level(logging.WARNING, logger="alice_office_router.warmup"),
+        patch(
+            "alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()
+        ) as mock_delete,
+        caplog.at_level(logging.WARNING, logger="alice_office_router.core.warmup"),
     ):
         warm_room("line_room_AAA", settings)
         await _settle_warmups()
@@ -159,21 +163,21 @@ async def test_warm_room_probe_session_delete_failure_is_a_warning_only(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """A stray probe session is worth a log line, not a re-probe of a warm agent."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()),
         patch(
-            "alice_office_router.warmup.delete_hermes_session",
+            "alice_office_router.core.warmup.delete_hermes_session",
             new=AsyncMock(side_effect=httpx.ConnectError("x")),
         ),
-        caplog.at_level(logging.WARNING, logger="alice_office_router.warmup"),
+        caplog.at_level(logging.WARNING, logger="alice_office_router.core.warmup"),
     ):
         warm_room("line_room_AAA", settings)
         await _settle_warmups()
@@ -189,17 +193,17 @@ async def test_warm_room_twice_probes_the_agent_only_once(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:
     """A second warm-up after the first finished re-warms the container only."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()) as mock_ask,
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()),
     ):
         warm_room("line_room_AAA", settings)
         await _settle_warmups()
@@ -218,21 +222,23 @@ async def test_warm_room_probe_unexpected_error_ends_in_the_error_log(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """An exception the probe does not expect is logged, not left on a dead task."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ),
         patch(
-            "alice_office_router.warmup.ask_hermes_agent",
+            "alice_office_router.core.warmup.ask_hermes_agent",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ),
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()) as mock_delete,
-        caplog.at_level(logging.ERROR, logger="alice_office_router.warmup"),
+        patch(
+            "alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()
+        ) as mock_delete,
+        caplog.at_level(logging.ERROR, logger="alice_office_router.core.warmup"),
     ):
         warm_room("line_room_AAA", settings)
         await _settle_warmups()
@@ -251,17 +257,17 @@ async def test_warm_room_container_failure_is_logged_and_skips_the_probe(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """A warm-up that fails is logged for the operator and leaves no entry behind."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             side_effect=RuntimeError("did not become ready"),
         ),
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()) as mock_ask,
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()) as mock_ask,
+        patch("alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()),
         caplog.at_level(logging.ERROR),
     ):
         warm_room("line_room_AAA", settings)
@@ -282,7 +288,7 @@ async def test_warm_room_twice_warms_once_while_in_flight(
     warmups: dict[str, asyncio.Task[None]], probed: set[str]
 ) -> None:
     """A second trigger during a running warm-up reuses it, not a second thread."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
     release = threading.Event()
@@ -293,10 +299,10 @@ async def test_warm_room_twice_warms_once_while_in_flight(
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container", side_effect=_slow_container
+            "alice_office_router.core.warmup.get_or_create_container", side_effect=_slow_container
         ) as mock_get_container,
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()),
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()),
     ):
         try:
             warm_room("line_room_AAA", settings)
@@ -318,7 +324,7 @@ async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
     warmups: dict[str, asyncio.Task[None]], probed: set[str], caplog: pytest.LogCaptureFixture
 ) -> None:
     """Shutdown cancels the tracked warm-ups and says so; the thread finishes on its own."""
-    from alice_office_router.warmup import cancel_warmups, warm_room
+    from alice_office_router.core.warmup import cancel_warmups, warm_room
 
     settings = _settings()
     release = threading.Event()
@@ -328,10 +334,12 @@ async def test_cancel_warmups_logs_and_cancels_in_flight_tasks(
         return "http://hermes_line_room_AAA:8642"
 
     with (
-        patch("alice_office_router.warmup.get_or_create_container", side_effect=_slow_container),
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()),
-        patch("alice_office_router.warmup.delete_hermes_session", new=AsyncMock()),
-        caplog.at_level(logging.INFO, logger="alice_office_router.warmup"),
+        patch(
+            "alice_office_router.core.warmup.get_or_create_container", side_effect=_slow_container
+        ),
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.delete_hermes_session", new=AsyncMock()),
+        caplog.at_level(logging.INFO, logger="alice_office_router.core.warmup"),
     ):
         try:
             warm_room("line_room_AAA", settings)
@@ -353,16 +361,16 @@ async def test_warm_room_retries_after_the_previous_one_finished(
     warmups: dict[str, asyncio.Task[None]],
 ) -> None:
     """Deduplication is in-flight only: once a warm-up has finished, the next one warms again."""
-    from alice_office_router.warmup import warm_room
+    from alice_office_router.core.warmup import warm_room
 
     settings = _settings()
 
     with (
         patch(
-            "alice_office_router.warmup.get_or_create_container",
+            "alice_office_router.core.warmup.get_or_create_container",
             return_value="http://hermes_line_room_AAA:8642",
         ) as mock_get_container,
-        patch("alice_office_router.warmup.ask_hermes_agent", new=AsyncMock()),
+        patch("alice_office_router.core.warmup.ask_hermes_agent", new=AsyncMock()),
     ):
         warm_room("line_room_AAA", settings)
         await _settle_warmups()

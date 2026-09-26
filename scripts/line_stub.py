@@ -178,7 +178,7 @@ def google_token_response(member_file: Path) -> JsonObject:
     """Build Google's token-endpoint JSON out of an existing member token file.
 
     A member token file holds exactly one entry, keyed by the room's
-    account_key (see src/alice_office_router/google_tokens.py); its token data
+    account_key (see src/alice_office_router/google/tokens.py); its token data
     already carries everything the router's exchange reads back. `expires_in`
     is synthesized because the stored form is an absolute `expiry_date` — the
     router recomputes that from `expires_in` when it stores the result.

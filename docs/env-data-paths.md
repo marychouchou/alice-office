@@ -114,7 +114,7 @@ data/<room_id>/google/
 
 `member_key` 是發話者的 `account_key`（群組＝`sender_id`、1:1＝房間自己）；成員檔**內層**
 的 key 則固定是 `account_key(room_id)`，因為那是 MCP env `GOOGLE_ACCOUNT_MODE` 寫死的值。
-換檔由 `google_tokens.select_member_tokens` 在 `core._take_turn`（room lock 內、回合之間）
+換檔由 `google.tokens.select_member_tokens` 在 `core.pipeline._take_turn`（room lock 內、回合之間）
 用 temp symlink＋`os.replace` 原子完成，MCP 每次 tool call 都重讀檔案，所以不必重啟容器。
 symlink target 一定是相對路徑，否則容器內解析不到。升級前既有的一般檔 `tokens.json` 會在
 該房間下一回合被搬成 `members/<account_key(room_id)>.json`（1:1 房間因此授權無縫延續）。
@@ -122,7 +122,7 @@ symlink target 一定是相對路徑，否則容器內解析不到。升級前�
 
 `data/<room_id>/router_state/pending_auth/<member_key>.json` 是同一套機制的另一半：
 agent 呼叫 Google 工具卻沒 token 時，router 把那則觸發的訊息原樣存在這裡（10 分鐘
-TTL），等該成員完成授權後自動重跑、推播答案，使用者不用再問一次（`auth_links.py`
+TTL），等該成員完成授權後自動重跑、推播答案，使用者不用再問一次（`google/auth_links.py`
 `write_pending_auth`／`read_pending_auth`）。這個路徑純粹是 router 自己的狀態，跟
 同層的 `router_state/session.json`（session-hygiene）一樣，Hermes 不會去動它；
 不含使用者的 Google token，只含那則訊息本身的內容。

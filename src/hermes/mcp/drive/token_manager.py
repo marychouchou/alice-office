@@ -69,7 +69,7 @@ def refresh_token(refresh_token_str: str, creds: dict) -> dict:
 
 
 # What the router swaps for this speaker's own authorization link, on its way
-# out to the chat room (see alice_office_router/auth_links.py and
+# out to the chat room (see alice_office_router/google/auth_links.py and
 # docs/google-auth-per-member-plan.md §3.3). The MCP cannot build that link
 # itself: it knows neither its room id nor the router's public URL. So every
 # "you are not authorized" error carries this placeholder plus an instruction

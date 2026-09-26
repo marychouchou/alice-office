@@ -11,7 +11,7 @@ description: 產生或更新本專案的 C4 架構圖（docs/architecture-c4.md�
 ## 工作流程
 
 1. **確認程式碼現況**：讀 `src/alice_office_router/` 的模組結構（channels/、
-   core.py、container_manager.py、hermes_client.py、google_oauth.py、config.py）
+   core/pipeline.py、container_manager.py、hermes_client.py、google/oauth.py、config.py）
    與 `src/hermes/{mcp,plugin}/` 的模板清單，確認圖面要反映的邊界與關係。
 2. **改圖**：依下方的官方硬規則與本專案對應表修改 Mermaid 區塊。
 3. **驗證（必做）**：跑 `.claude/skills/c4-architecture/validate.sh

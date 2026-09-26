@@ -7,7 +7,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from alice_office_router.auth_links import (
+from alice_office_router.channels.base import InboundMessage
+from alice_office_router.config import Settings
+from alice_office_router.google.auth_links import (
     AUTH_LINK_ANONYMOUS_NOTICE,
     AUTH_LINKS_DISABLED_NOTICE,
     AUTH_MARKER,
@@ -16,8 +18,6 @@ from alice_office_router.auth_links import (
     read_pending_auth,
     write_pending_auth,
 )
-from alice_office_router.channels.base import InboundMessage
-from alice_office_router.config import Settings
 
 TEST_SECRET = "test_channel_secret"
 TEST_TOKEN = "test_channel_access_token"
@@ -288,7 +288,7 @@ def test_an_expired_pending_record_is_dropped_and_logged(tmp_path: Path) -> None
     }
     path.write_text(json.dumps(stale), encoding="utf-8")
 
-    with patch("alice_office_router.auth_links.struct_logger", new=Mock()) as mock_logger:
+    with patch("alice_office_router.google.auth_links.struct_logger", new=Mock()) as mock_logger:
         result = read_pending_auth(settings, ROOM, ROOM_MEMBER)
 
     assert result is None
@@ -303,7 +303,7 @@ def test_a_malformed_pending_record_is_dropped_and_logged(tmp_path: Path) -> Non
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"ts": 1, "mess', encoding="utf-8")
 
-    with patch("alice_office_router.auth_links.struct_logger", new=Mock()) as mock_logger:
+    with patch("alice_office_router.google.auth_links.struct_logger", new=Mock()) as mock_logger:
         result = read_pending_auth(settings, ROOM, ROOM_MEMBER)
 
     assert result is None
@@ -318,7 +318,7 @@ def test_a_pending_record_missing_its_message_is_dropped(tmp_path: Path) -> None
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"ts": 1}', encoding="utf-8")
 
-    with patch("alice_office_router.auth_links.struct_logger", new=Mock()) as mock_logger:
+    with patch("alice_office_router.google.auth_links.struct_logger", new=Mock()) as mock_logger:
         result = read_pending_auth(settings, ROOM, ROOM_MEMBER)
 
     assert result is None

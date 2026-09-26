@@ -118,7 +118,7 @@ def _park(
     settings: Settings, msg: InboundMessage, member_key: str, *, ts: float | None = None
 ) -> Path:
     """Write a pending-auth record the way auth_links.write_pending_auth does."""
-    from alice_office_router.auth_links import write_pending_auth
+    from alice_office_router.google.auth_links import write_pending_auth
 
     write_pending_auth(settings, msg.room_key, member_key, msg)
     path = settings.room_pending_auth_path(msg.room_key, member_key)
@@ -133,7 +133,7 @@ async def test_resume_pending_auth_hands_the_parked_message_to_its_adapter(
     tmp_path: Path, stub_adapter: _StubAdapter
 ) -> None:
     """The member gets their answer without retyping the question."""
-    from alice_office_router.auth_links import resume_pending_auth
+    from alice_office_router.google.auth_links import resume_pending_auth
 
     settings = _settings(DATA_DIR=tmp_path)
     msg = _msg("明天有什麼會議")
@@ -159,7 +159,7 @@ async def test_resume_tells_the_agent_the_authorization_just_happened(
     authorize" without retrying a single Google tool. The system-voiced prefix
     is what makes the agent try again.
     """
-    from alice_office_router.auth_links import resume_pending_auth
+    from alice_office_router.google.auth_links import resume_pending_auth
 
     settings = _settings(DATA_DIR=tmp_path)
     _park(settings, _msg("明天有什麼會議"), "line_room_aaa")
@@ -175,7 +175,7 @@ async def test_resume_in_a_group_names_who_authorized(
     tmp_path: Path, stub_adapter: _StubAdapter
 ) -> None:
     """A group turn carries several people's history, so the prefix has to say whose token this is."""
-    from alice_office_router.auth_links import resume_pending_auth
+    from alice_office_router.google.auth_links import resume_pending_auth
 
     settings = _settings(DATA_DIR=tmp_path)
     msg = _group_msg("明天有什麼會議", sender_id="U1", sender_name="王小明").model_copy(
@@ -194,7 +194,7 @@ async def test_resume_pending_auth_does_nothing_when_no_message_is_parked(
     tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Authorizing with nothing waiting is the normal case, not an error."""
-    from alice_office_router.auth_links import resume_pending_auth
+    from alice_office_router.google.auth_links import resume_pending_auth
 
     with caplog.at_level(logging.INFO):
         await resume_pending_auth("line_room_AAA", "line_room_aaa", _settings(DATA_DIR=tmp_path))
@@ -207,7 +207,7 @@ async def test_resume_pending_auth_ignores_an_expired_record(
     tmp_path: Path, stub_adapter: _StubAdapter
 ) -> None:
     """A question parked 11 minutes ago is stale; the member has moved on."""
-    from alice_office_router.auth_links import PENDING_AUTH_TTL_SECONDS, resume_pending_auth
+    from alice_office_router.google.auth_links import PENDING_AUTH_TTL_SECONDS, resume_pending_auth
 
     settings = _settings(DATA_DIR=tmp_path)
     path = _park(
@@ -227,7 +227,7 @@ async def test_resume_pending_auth_logs_an_error_for_an_unmounted_channel(
     tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A message parked by a channel this process no longer mounts is dropped."""
-    from alice_office_router.auth_links import resume_pending_auth
+    from alice_office_router.google.auth_links import resume_pending_auth
 
     settings = _settings(DATA_DIR=tmp_path)
     msg = InboundMessage(channel="telegram", room_key="line_room_AAA", text="明天有什麼會議")
@@ -244,7 +244,7 @@ async def test_resume_pending_auth_logs_an_adapter_failure_instead_of_raising(
     tmp_path: Path, stub_adapter: _StubAdapter, caplog: pytest.LogCaptureFixture
 ) -> None:
     """It runs detached off the OAuth callback: every failure must end in a log line."""
-    from alice_office_router.auth_links import resume_pending_auth
+    from alice_office_router.google.auth_links import resume_pending_auth
 
     settings = _settings(DATA_DIR=tmp_path)
     stub_adapter.error = RuntimeError("push failed")

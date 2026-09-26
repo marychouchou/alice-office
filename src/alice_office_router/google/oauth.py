@@ -14,7 +14,7 @@ directly. Both must be reimplemented here rather than ported as-is:
   (check_google_authorization) — since 2026-09-18 it no longer blocks a
   message, only notices a token that predates the Drive scope.
 
-Token storage itself lives in google_tokens.py: tokens are written per
+Token storage itself lives in google/tokens.py: tokens are written per
 member under data/<room_id>/google/members/, with tokens.json a symlink the
 router repoints at the current speaker. This module only exchanges codes and
 hands the result to that store. Two different identifiers are both in play
@@ -54,7 +54,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict
 
 from alice_office_router.config import Settings, get_settings
-from alice_office_router.google_tokens import (
+from alice_office_router.google.tokens import (
     account_key,
     check_member_token,
     load_member_tokens,
